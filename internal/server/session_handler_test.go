@@ -10,6 +10,7 @@ import (
 
 	"github.com/wake/tmux-box/internal/server"
 	"github.com/wake/tmux-box/internal/store"
+	"github.com/wake/tmux-box/internal/stream"
 	"github.com/wake/tmux-box/internal/tmux"
 )
 
@@ -20,7 +21,7 @@ func setupHandler(t *testing.T) *server.SessionHandler {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return server.NewSessionHandler(db, tmux.NewFakeExecutor())
+	return server.NewSessionHandler(db, tmux.NewFakeExecutor(), stream.NewManager())
 }
 
 func TestListEmpty(t *testing.T) {

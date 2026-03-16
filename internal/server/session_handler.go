@@ -10,18 +10,26 @@ import (
 	"strconv"
 
 	"github.com/wake/tmux-box/internal/store"
+	"github.com/wake/tmux-box/internal/stream"
 	"github.com/wake/tmux-box/internal/tmux"
 )
 
 var validSessionName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 type SessionHandler struct {
-	store *store.Store
-	tmux  tmux.Executor
+	store   *store.Store
+	tmux    tmux.Executor
+	streams *stream.Manager
 }
 
-func NewSessionHandler(s *store.Store, t tmux.Executor) *SessionHandler {
-	return &SessionHandler{store: s, tmux: t}
+func NewSessionHandler(s *store.Store, t tmux.Executor, sm *stream.Manager) *SessionHandler {
+	return &SessionHandler{store: s, tmux: t, streams: sm}
+}
+
+// SwitchMode switches a session between term and stream modes.
+// Not yet implemented — placeholder for Task 5.
+func (h *SessionHandler) SwitchMode(w http.ResponseWriter, r *http.Request) {
+	http.Error(w, "not implemented", 501)
 }
 
 type createReq struct {

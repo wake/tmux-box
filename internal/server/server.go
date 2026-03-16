@@ -7,29 +7,43 @@ import (
 
 	"github.com/wake/tmux-box/internal/config"
 	"github.com/wake/tmux-box/internal/store"
+	"github.com/wake/tmux-box/internal/stream"
 	"github.com/wake/tmux-box/internal/terminal"
 	"github.com/wake/tmux-box/internal/tmux"
 )
 
 type Server struct {
-	cfg   config.Config
-	store *store.Store
-	tmux  tmux.Executor
-	mux   *http.ServeMux
+	cfg     config.Config
+	store   *store.Store
+	tmux    tmux.Executor
+	streams *stream.Manager
+	mux     *http.ServeMux
 }
 
-func New(cfg config.Config, st *store.Store, tx tmux.Executor) *Server {
-	s := &Server{cfg: cfg, store: st, tmux: tx, mux: http.NewServeMux()}
+func New(cfg config.Config, st *store.Store, tx tmux.Executor, sm *stream.Manager) *Server {
+	s := &Server{cfg: cfg, store: st, tmux: tx, streams: sm, mux: http.NewServeMux()}
 	s.routes()
 	return s
 }
 
 func (s *Server) routes() {
-	sh := NewSessionHandler(s.store, s.tmux)
+	sh := NewSessionHandler(s.store, s.tmux, s.streams)
 	s.mux.HandleFunc("GET /api/sessions", sh.List)
 	s.mux.HandleFunc("POST /api/sessions", sh.Create)
 	s.mux.HandleFunc("DELETE /api/sessions/{id}", sh.Delete)
+	s.mux.HandleFunc("POST /api/sessions/{id}/mode", sh.SwitchMode)
 	s.mux.HandleFunc("/ws/terminal/{session}", s.handleTerminal)
+	s.mux.HandleFunc("/ws/stream/{session}", s.handleStream)
+}
+
+func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("session")
+	sess := s.streams.Get(name)
+	if sess == nil {
+		http.Error(w, "stream session not found", 404)
+		return
+	}
+	HandleStreamWS(w, r, sess)
 }
 
 func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
