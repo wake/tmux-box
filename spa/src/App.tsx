@@ -20,7 +20,7 @@ export default function App() {
       <SessionPanel />
       <div className="flex-1 h-full overflow-hidden">
         {active ? (
-          <TerminalView wsUrl={`${wsBase}/ws/terminal/${active.name}`} />
+          <TerminalView wsUrl={`${wsBase}/ws/terminal/${encodeURIComponent(active.name)}`} />
         ) : (
           <div className="flex items-center justify-center h-full">
             <p className="text-gray-400">Select a session</p>

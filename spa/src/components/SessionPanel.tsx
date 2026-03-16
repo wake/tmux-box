@@ -15,7 +15,7 @@ export default function SessionPanel() {
           <button
             key={s.id}
             onClick={() => setActive(s.id)}
-            className={`w-full text-left px-2 py-1.5 rounded text-sm ${
+            className={`w-full text-left px-2 py-1.5 rounded text-sm cursor-pointer ${
               activeId === s.id ? 'bg-gray-800 text-gray-100' : 'text-gray-400 hover:bg-gray-800/50'
             }`}
           >

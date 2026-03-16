@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
@@ -11,8 +11,10 @@ interface Props {
 
 export default function TerminalView({ wsUrl }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
+  const [ready, setReady] = useState(false)
 
   useEffect(() => {
+    setReady(false)
     if (!containerRef.current) return
 
     const term = new Terminal({
@@ -28,15 +30,28 @@ export default function TerminalView({ wsUrl }: Props) {
 
     try { term.loadAddon(new WebglAddon()) } catch { /* fallback to canvas */ }
 
-    // Delay initial fit to next frame — flex layout may not have final dimensions yet
     requestAnimationFrame(() => fitAddon.fit())
+
+    let revealed = false
+    const reveal = () => {
+      if (revealed) return
+      revealed = true
+      setReady(true)
+      term.focus()
+    }
+
+    // Fallback: reveal after 1.5s even if no data received
+    const fallbackTimer = setTimeout(reveal, 1500)
 
     const conn = connectTerminal(
       wsUrl,
-      (data) => term.write(new Uint8Array(data)),
+      (data) => {
+        term.write(new Uint8Array(data))
+        // Reveal on first data — terminal has rendered
+        reveal()
+      },
       () => term.write('\r\n\x1b[31m[disconnected]\x1b[0m\r\n'),
       () => {
-        // WebSocket opened — send initial size so tmux renders at correct dimensions
         fitAddon.fit()
         conn.resize(term.cols, term.rows)
       },
@@ -53,6 +68,7 @@ export default function TerminalView({ wsUrl }: Props) {
     observer.observe(containerRef.current)
 
     return () => {
+      clearTimeout(fallbackTimer)
       cancelAnimationFrame(rafId)
       observer.disconnect()
       conn.close()
@@ -60,5 +76,32 @@ export default function TerminalView({ wsUrl }: Props) {
     }
   }, [wsUrl])
 
-  return <div ref={containerRef} className="w-full h-full" />
+  return (
+    <div className="w-full h-full relative" style={{ background: '#0a0a1a' }}>
+      <div ref={containerRef} className="w-full h-full" />
+
+      {/* Loading overlay with breathing animation */}
+      <div
+        className="absolute inset-0 flex items-center justify-center pointer-events-none"
+        style={{
+          background: '#0a0a1a',
+          opacity: ready ? 0 : 1,
+          transition: 'opacity 0.3s ease-out',
+        }}
+      >
+        <span
+          className="text-gray-500 text-sm"
+          style={{ animation: 'breathing 2s ease-in-out infinite' }}
+        >
+          connecting...
+        </span>
+        <style>{`
+          @keyframes breathing {
+            0%, 100% { opacity: 0.3; }
+            50% { opacity: 1; }
+          }
+        `}</style>
+      </div>
+    </div>
+  )
 }
