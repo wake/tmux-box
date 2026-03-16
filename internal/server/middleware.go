@@ -2,6 +2,7 @@
 package server
 
 import (
+	"crypto/subtle"
 	"net"
 	"net/http"
 	"strings"
@@ -56,12 +57,12 @@ func TokenAuth(token string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Check Authorization header first
-			if auth := r.Header.Get("Authorization"); len(auth) >= 7 && strings.EqualFold(auth[:7], "bearer ") && auth[7:] == token {
+			if auth := r.Header.Get("Authorization"); len(auth) >= 7 && strings.EqualFold(auth[:7], "bearer ") && subtle.ConstantTimeCompare([]byte(auth[7:]), []byte(token)) == 1 {
 				next.ServeHTTP(w, r)
 				return
 			}
 			// Fallback: ?token= query param (for WebSocket)
-			if r.URL.Query().Get("token") == token {
+			if subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("token")), []byte(token)) == 1 {
 				next.ServeHTTP(w, r)
 				return
 			}

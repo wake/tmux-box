@@ -38,7 +38,8 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session not found", 404)
 		return
 	}
-	relay := terminal.NewRelay("tmux", []string{"attach-session", "-t", name}, "/tmp")
+	// cwd doesn't matter for tmux attach-session; tmux manages its own working directory.
+	relay := terminal.NewRelay("tmux", []string{"attach-session", "-t", name}, "/")
 	relay.HandleWebSocket(w, r)
 }
 

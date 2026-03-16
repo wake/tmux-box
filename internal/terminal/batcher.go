@@ -51,7 +51,9 @@ func (b *Batcher) flushLocked() {
 		b.timer.Stop()
 		b.timer = nil
 	}
+	b.mu.Unlock()
 	b.onFlush(out)
+	b.mu.Lock()
 }
 
 func (b *Batcher) Stop() {

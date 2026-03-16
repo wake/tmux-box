@@ -100,14 +100,39 @@ func (s *Store) ListSessions() ([]Session, error) {
 }
 
 func (s *Store) UpdateSession(id int64, u SessionUpdate) error {
+	updated := false
 	if u.Name != nil {
-		s.db.Exec("UPDATE sessions SET name = ? WHERE id = ?", *u.Name, id)
+		res, err := s.db.Exec("UPDATE sessions SET name = ? WHERE id = ?", *u.Name, id)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n > 0 {
+			updated = true
+		}
 	}
 	if u.Mode != nil {
-		s.db.Exec("UPDATE sessions SET mode = ? WHERE id = ?", *u.Mode, id)
+		res, err := s.db.Exec("UPDATE sessions SET mode = ? WHERE id = ?", *u.Mode, id)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n > 0 {
+			updated = true
+		}
 	}
 	if u.GroupID != nil {
-		s.db.Exec("UPDATE sessions SET group_id = ? WHERE id = ?", *u.GroupID, id)
+		res, err := s.db.Exec("UPDATE sessions SET group_id = ? WHERE id = ?", *u.GroupID, id)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n > 0 {
+			updated = true
+		}
+	}
+	if !updated {
+		return ErrNotFound
 	}
 	return nil
 }
@@ -150,6 +175,13 @@ func (s *Store) ListGroups() ([]Group, error) {
 }
 
 func (s *Store) UpdateGroup(id int64, name string) error {
-	_, err := s.db.Exec("UPDATE groups SET name = ? WHERE id = ?", name, id)
-	return err
+	res, err := s.db.Exec("UPDATE groups SET name = ? WHERE id = ?", name, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

@@ -4,12 +4,16 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 
 	"github.com/wake/tmux-box/internal/store"
 	"github.com/wake/tmux-box/internal/tmux"
 )
+
+var validSessionName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 type SessionHandler struct {
 	store *store.Store
@@ -49,6 +53,10 @@ func (h *SessionHandler) Create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name and cwd required", 400)
 		return
 	}
+	if !validSessionName.MatchString(req.Name) {
+		http.Error(w, "invalid session name: must match [a-zA-Z0-9_-]+", 400)
+		return
+	}
 	if req.Mode == "" {
 		req.Mode = "term"
 	}
@@ -66,6 +74,8 @@ func (h *SessionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := h.store.CreateSession(sess)
 	if err != nil {
+		// Rollback: kill the tmux session we just created
+		h.tmux.KillSession(req.Name)
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -83,7 +93,10 @@ func (h *SessionHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Find session name for tmux kill
-	sessions, _ := h.store.ListSessions()
+	sessions, err := h.store.ListSessions()
+	if err != nil {
+		log.Printf("list sessions for delete: %v", err)
+	}
 	for _, s := range sessions {
 		if s.ID == id {
 			h.tmux.KillSession(s.Name)

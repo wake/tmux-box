@@ -65,10 +65,14 @@ func (r *Relay) HandleWebSocket(w http.ResponseWriter, req *http.Request) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer conn.Close() // wake WS read goroutine on PTY EOF
 		batcher := NewBatcher(16*time.Millisecond, 64*1024, func(data []byte) {
 			writeMu.Lock()
-			conn.WriteMessage(websocket.BinaryMessage, data)
+			err := conn.WriteMessage(websocket.BinaryMessage, data)
 			writeMu.Unlock()
+			if err != nil {
+				ptmx.Close() // signal PTY read to exit
+			}
 		})
 		defer batcher.Stop()
 		buf := make([]byte, 4096)
@@ -90,6 +94,7 @@ func (r *Relay) HandleWebSocket(w http.ResponseWriter, req *http.Request) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer ptmx.Close() // wake PTY read goroutine on WS disconnect
 		for {
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
