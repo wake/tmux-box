@@ -21,6 +21,9 @@ export const useSessionStore = create<SessionState>()(
       },
       setActive: (id) => set({ activeId: id }),
     }),
-    { name: 'tbox-sessions' },
+    {
+      name: 'tbox-sessions',
+      partialize: (state) => ({ activeId: state.activeId }),
+    },
   ),
 )

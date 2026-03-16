@@ -12,9 +12,11 @@ export function connectTerminal(
   const ws = new WebSocket(url)
   ws.binaryType = 'arraybuffer'
 
-  ws.onmessage = (e) => onData(e.data)
+  ws.onmessage = (e) => {
+    if (e.data instanceof ArrayBuffer) onData(e.data)
+  }
+  ws.onerror = () => {}
   ws.onclose = () => onClose()
-  ws.onerror = () => onClose()
 
   return {
     send: (data) => {

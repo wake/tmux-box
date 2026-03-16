@@ -39,10 +39,15 @@ export default function TerminalView({ wsUrl }: Props) {
     term.onData((data) => conn.send(data))
     term.onResize(({ cols, rows }) => conn.resize(cols, rows))
 
-    const observer = new ResizeObserver(() => fitAddon.fit())
+    let rafId = 0
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(rafId)
+      rafId = requestAnimationFrame(() => fitAddon.fit())
+    })
     observer.observe(containerRef.current)
 
     return () => {
+      cancelAnimationFrame(rafId)
       observer.disconnect()
       conn.close()
       term.dispose()
