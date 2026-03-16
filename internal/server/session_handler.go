@@ -26,10 +26,70 @@ func NewSessionHandler(s *store.Store, t tmux.Executor, sm *stream.Manager) *Ses
 	return &SessionHandler{store: s, tmux: t, streams: sm}
 }
 
+type switchModeReq struct {
+	Mode string `json:"mode"`
+}
+
 // SwitchMode switches a session between term and stream modes.
-// Not yet implemented — placeholder for Task 5.
 func (h *SessionHandler) SwitchMode(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, "not implemented", 501)
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", 400)
+		return
+	}
+
+	var req switchModeReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", 400)
+		return
+	}
+
+	if req.Mode != "term" && req.Mode != "stream" {
+		http.Error(w, "mode must be term or stream", 400)
+		return
+	}
+
+	sess, err := h.store.GetSession(id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.Error(w, "not found", 404)
+		} else {
+			http.Error(w, err.Error(), 500)
+		}
+		return
+	}
+
+	if sess.Mode == req.Mode {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]string{"status": "already in mode " + req.Mode})
+		return
+	}
+
+	// Switching from stream → term: stop stream process
+	if sess.Mode == "stream" && req.Mode == "term" {
+		h.streams.Stop(sess.Name)
+	}
+
+	// Switching from term → stream: start claude -p
+	if sess.Mode == "term" && req.Mode == "stream" {
+		claudeArgs := []string{
+			"-p", "placeholder",
+			"--input-format", "stream-json",
+			"--output-format", "stream-json",
+			"--verbose",
+		}
+		if err := h.streams.Start(sess.Name, "claude", claudeArgs, sess.Cwd); err != nil {
+			http.Error(w, "start stream: "+err.Error(), 500)
+			return
+		}
+	}
+
+	// Update mode in store
+	h.store.UpdateSession(id, store.SessionUpdate{Mode: &req.Mode})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "switched to " + req.Mode})
 }
 
 type createReq struct {
