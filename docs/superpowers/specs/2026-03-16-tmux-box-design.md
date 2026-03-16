@@ -99,7 +99,7 @@ Go daemon
 ### Daemon 設定
 
 ```toml
-# ~/.config/tmux-box/config.toml
+# ~/.config/tbox/config.toml
 
 bind = "100.64.0.2"
 port = 7860
@@ -114,7 +114,7 @@ allow = [
 # 留空則僅依賴 IP 白名單
 token = ""
 
-data_dir = "~/.config/tmux-box"
+data_dir = "~/.config/tbox"
 
 # File API 允許存取的根目錄（限制在這些路徑下）
 # 空陣列 = 僅允許各 session 的 cwd 及其子目錄
@@ -124,7 +124,7 @@ allowed_paths = []
 ### 安全模型
 
 - **網路層**：Tailscale 網路隔離 + IP 白名單（CIDR）
-- **應用層**：可選的 pre-shared token（HTTP header `Authorization: Bearer <token>`）
+- **應用層**：`tbox auth create` 產生金鑰組；CORS 全開（安全由網路層 + 金鑰處理）
 - **File API 沙盒**：每個 session 的檔案操作限制在其 cwd 及子目錄下；`allowed_paths` 可額外開放指定目錄；拒絕 symlink 逃逸
 - **前提假設**：部署在受信任的 Tailscale 網路內，單一使用者場景
 
@@ -285,8 +285,8 @@ daemon 轉發 `claude -p` 的 control_request 到前端 WebSocket，前端渲染
 
 tmux-box 擁有自己的資料層，不依賴 tsm 安裝：
 
-- **SQLite**：`~/.config/tmux-box/state.db`
-- **設定**：`~/.config/tmux-box/config.toml`
+- **SQLite**：`~/.config/tbox/state.db`
+- **設定**：`~/.config/tbox/config.toml`
 - **與 tsm 的關係**：後續版本可選擇性橋接 tsm 的 SQLite（共享群組/metadata），但初始版本完全獨立
 
 ---
@@ -318,31 +318,53 @@ tmux-box 擁有自己的資料層，不依賴 tsm 安裝：
 | 樣式 | Tailwind CSS |
 | Markdown | react-markdown + rehype-highlight |
 
+### 架構分離
+
+Daemon 和 SPA 完全分離部署：
+- **tbox daemon**：純 API server（REST + WebSocket），不含任何前端檔案
+- **tbox spa**：獨立 React app，可封裝為 Electron（桌機）或放在獨立主機上 serve（手機+桌機）
+
 ### 桌面封裝
 
 | 領域 | 選擇 |
 |------|------|
 | 框架 | Electron |
 | 附加功能 | 系統通知、全域快捷鍵、Dock/Tray icon |
-| SPA 來源 | 連接遠端 daemon HTTP（非本機打包） |
+| SPA 來源 | 連接遠端 daemon（非本機打包） |
 
 ---
 
 ## 部署
 
-單一 binary 部署到各主機：
+### Daemon 部署
 
 ```bash
-# 編譯（含 SPA 靜態檔）
-make build    # → bin/tmux-box
+# 編譯
+make build    # → bin/tbox
 
 # 部署到遠端
-scp bin/tmux-box user@host:~/.local/bin/
+scp bin/tbox user@host:~/.local/bin/
+
+# 產生認證金鑰
+tbox auth create --name "my-macbook"
 
 # 啟動
-tmux-box daemon
+tbox daemon
 # 或
-tmux-box daemon --bind 100.64.0.2 --port 7860
+tbox daemon --bind 100.64.0.2 --port 7860
+```
+
+### SPA 部署
+
+```bash
+cd spa/
+pnpm build    # → dist/
+
+# 選項 A: Electron 封裝
+pnpm electron:build
+
+# 選項 B: 靜態檔部署到任意 web server
+rsync -av dist/ server:/var/www/tbox/
 ```
 
 ---
