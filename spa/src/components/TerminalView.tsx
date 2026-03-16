@@ -47,8 +47,8 @@ export default function TerminalView({ wsUrl }: Props) {
       wsUrl,
       (data) => {
         term.write(new Uint8Array(data))
-        // Reveal on first data — terminal has rendered
-        reveal()
+        // Reveal shortly after first data — give tmux time to finish rendering
+        if (!revealed) setTimeout(reveal, 300)
       },
       () => term.write('\r\n\x1b[31m[disconnected]\x1b[0m\r\n'),
       () => {
