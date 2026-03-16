@@ -57,4 +57,16 @@ describe('SessionPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: /dev/i }))
     expect(setActive).toHaveBeenCalledWith(1)
   })
+
+  it('shows terminal icon for term mode', () => {
+    useSessionStore.setState({
+      sessions: [
+        { id: 1, name: 'dev', tmux_target: 'dev:0', cwd: '/tmp', mode: 'term', group_id: 0, sort_order: 0 },
+      ],
+      activeId: null,
+    })
+    render(<SessionPanel />)
+    // Terminal icon should be present (Phosphor Terminal icon)
+    expect(screen.getByTestId('session-icon-1')).toBeInTheDocument()
+  })
 })
