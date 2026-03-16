@@ -31,3 +31,13 @@ export async function deleteSession(base: string, id: number): Promise<void> {
   const res = await fetch(`${base}/api/sessions/${id}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
 }
+
+export async function switchMode(base: string, id: number, mode: string): Promise<Session> {
+  const res = await fetch(`${base}/api/sessions/${id}/mode`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode }),
+  })
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  return res.json()
+}

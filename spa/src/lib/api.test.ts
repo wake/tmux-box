@@ -1,6 +1,6 @@
 // spa/src/lib/api.test.ts
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { listSessions, createSession, deleteSession, type Session } from './api'
+import { listSessions, createSession, deleteSession, switchMode, type Session } from './api'
 
 const mockSession: Session = {
   id: 1, name: 'test', tmux_target: 'test:0',
@@ -48,5 +48,31 @@ describe('deleteSession', () => {
       'http://localhost:7860/api/sessions/1',
       expect.objectContaining({ method: 'DELETE' })
     )
+  })
+})
+
+describe('switchMode', () => {
+  it('sends PUT request with mode and returns updated session', async () => {
+    const updated: Session = { ...mockSession, mode: 'stream' }
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify(updated), { status: 200 })
+    )
+    const result = await switchMode('http://localhost:7860', 1, 'stream')
+    expect(result.mode).toBe('stream')
+    expect(spy).toHaveBeenCalledWith(
+      'http://localhost:7860/api/sessions/1/mode',
+      expect.objectContaining({
+        method: 'PUT',
+        headers: expect.objectContaining({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ mode: 'stream' }),
+      })
+    )
+  })
+
+  it('throws on error status', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('error', { status: 400, statusText: 'Bad Request' })
+    )
+    await expect(switchMode('http://localhost:7860', 1, 'invalid')).rejects.toThrow('400')
   })
 })
