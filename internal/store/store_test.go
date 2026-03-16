@@ -93,4 +93,27 @@ func TestGroupCRUD(t *testing.T) {
 	}
 }
 
+func TestGetSession(t *testing.T) {
+	db := openTestDB(t)
+
+	s := store.Session{Name: "myapp", TmuxTarget: "myapp:0", Cwd: "/tmp", Mode: "term"}
+	id, _ := db.CreateSession(s)
+
+	got, err := db.GetSession(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "myapp" {
+		t.Errorf("want myapp, got %s", got.Name)
+	}
+}
+
+func TestGetSessionNotFound(t *testing.T) {
+	db := openTestDB(t)
+	_, err := db.GetSession(999)
+	if err != store.ErrNotFound {
+		t.Errorf("want ErrNotFound, got %v", err)
+	}
+}
+
 func ptr(s string) *string { return &s }

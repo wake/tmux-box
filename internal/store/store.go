@@ -149,6 +149,20 @@ func (s *Store) DeleteSession(id int64) error {
 	return nil
 }
 
+func (s *Store) GetSession(id int64) (Session, error) {
+	var sess Session
+	err := s.db.QueryRow(
+		"SELECT id, name, tmux_target, cwd, mode, group_id, sort_order FROM sessions WHERE id = ?", id,
+	).Scan(&sess.ID, &sess.Name, &sess.TmuxTarget, &sess.Cwd, &sess.Mode, &sess.GroupID, &sess.SortOrder)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return sess, ErrNotFound
+		}
+		return sess, err
+	}
+	return sess, nil
+}
+
 func (s *Store) CreateGroup(name string) (int64, error) {
 	res, err := s.db.Exec("INSERT INTO groups (name) VALUES (?)", name)
 	if err != nil {
