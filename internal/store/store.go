@@ -2,9 +2,12 @@
 package store
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/base32"
 	"errors"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -15,12 +18,20 @@ type Store struct{ db *sql.DB }
 
 type Session struct {
 	ID         int64  `json:"id"`
+	UID        string `json:"uid"`
 	Name       string `json:"name"`
 	TmuxTarget string `json:"tmux_target"`
 	Cwd        string `json:"cwd"`
 	Mode       string `json:"mode"`
 	GroupID    int64  `json:"group_id"`
 	SortOrder  int    `json:"sort_order"`
+}
+
+// generateUID creates a short URL-safe unique ID (8 chars, ~40 bits entropy).
+func generateUID() string {
+	b := make([]byte, 5) // 5 bytes = 40 bits
+	rand.Read(b)
+	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b))
 }
 
 type SessionUpdate struct {
@@ -54,6 +65,7 @@ func migrate(db *sql.DB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS sessions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			uid TEXT NOT NULL DEFAULT '',
 			name TEXT NOT NULL,
 			tmux_target TEXT NOT NULL DEFAULT '',
 			cwd TEXT NOT NULL DEFAULT '',
@@ -68,13 +80,41 @@ func migrate(db *sql.DB) error {
 			collapsed INTEGER NOT NULL DEFAULT 0
 		);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Migration: add uid column if missing (existing DBs)
+	var hasUID bool
+	rows, _ := db.Query("PRAGMA table_info(sessions)")
+	if rows != nil {
+		defer rows.Close()
+		for rows.Next() {
+			var cid int
+			var name, typ string
+			var notnull int
+			var dflt sql.NullString
+			var pk int
+			rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk)
+			if name == "uid" {
+				hasUID = true
+			}
+		}
+	}
+	if !hasUID {
+		db.Exec("ALTER TABLE sessions ADD COLUMN uid TEXT NOT NULL DEFAULT ''")
+	}
+	// Backfill empty UIDs
+	db.Exec("UPDATE sessions SET uid = hex(randomblob(4)) WHERE uid = ''")
+	return nil
 }
 
 func (s *Store) CreateSession(sess Session) (int64, error) {
+	if sess.UID == "" {
+		sess.UID = generateUID()
+	}
 	res, err := s.db.Exec(
-		"INSERT INTO sessions (name, tmux_target, cwd, mode, group_id) VALUES (?, ?, ?, ?, ?)",
-		sess.Name, sess.TmuxTarget, sess.Cwd, sess.Mode, sess.GroupID,
+		"INSERT INTO sessions (uid, name, tmux_target, cwd, mode, group_id) VALUES (?, ?, ?, ?, ?, ?)",
+		sess.UID, sess.Name, sess.TmuxTarget, sess.Cwd, sess.Mode, sess.GroupID,
 	)
 	if err != nil {
 		return 0, err
@@ -83,7 +123,7 @@ func (s *Store) CreateSession(sess Session) (int64, error) {
 }
 
 func (s *Store) ListSessions() ([]Session, error) {
-	rows, err := s.db.Query("SELECT id, name, tmux_target, cwd, mode, group_id, sort_order FROM sessions ORDER BY sort_order")
+	rows, err := s.db.Query("SELECT id, uid, name, tmux_target, cwd, mode, group_id, sort_order FROM sessions ORDER BY sort_order")
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +131,7 @@ func (s *Store) ListSessions() ([]Session, error) {
 	var out []Session
 	for rows.Next() {
 		var v Session
-		if err := rows.Scan(&v.ID, &v.Name, &v.TmuxTarget, &v.Cwd, &v.Mode, &v.GroupID, &v.SortOrder); err != nil {
+		if err := rows.Scan(&v.ID, &v.UID, &v.Name, &v.TmuxTarget, &v.Cwd, &v.Mode, &v.GroupID, &v.SortOrder); err != nil {
 			return nil, err
 		}
 		out = append(out, v)
@@ -152,8 +192,8 @@ func (s *Store) DeleteSession(id int64) error {
 func (s *Store) GetSession(id int64) (Session, error) {
 	var sess Session
 	err := s.db.QueryRow(
-		"SELECT id, name, tmux_target, cwd, mode, group_id, sort_order FROM sessions WHERE id = ?", id,
-	).Scan(&sess.ID, &sess.Name, &sess.TmuxTarget, &sess.Cwd, &sess.Mode, &sess.GroupID, &sess.SortOrder)
+		"SELECT id, uid, name, tmux_target, cwd, mode, group_id, sort_order FROM sessions WHERE id = ?", id,
+	).Scan(&sess.ID, &sess.UID, &sess.Name, &sess.TmuxTarget, &sess.Cwd, &sess.Mode, &sess.GroupID, &sess.SortOrder)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return sess, ErrNotFound

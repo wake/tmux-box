@@ -8,19 +8,53 @@ import { useSessionStore } from './stores/useSessionStore'
 import { useStreamStore } from './stores/useStreamStore'
 import { useConfigStore } from './stores/useConfigStore'
 import { connectSessionEvents } from './lib/session-events'
-import { switchMode, handoff } from './lib/api'
+import { handoff } from './lib/api'
 
 // TODO: daemonBase should come from host management (localStorage)
 const daemonBase = 'http://100.64.0.2:7860'
 const wsBase = daemonBase.replace(/^http/, 'ws')
 
+// --- Hash Router: #/{uid}/{mode} ---
+// Uses short auto-generated UID (stable across renames, URL-safe)
+
+function parseHash(): { uid: string | null; mode: string } {
+  const hash = window.location.hash.replace(/^#\/?/, '')
+  if (!hash) return { uid: null, mode: 'term' }
+  const parts = hash.split('/')
+  const uid = parts[0] || null
+  const mode = parts[1] || 'term'
+  return { uid, mode }
+}
+
+function setHash(uid: string, mode: string) {
+  const newHash = `#/${uid}/${mode}`
+  if (window.location.hash !== newHash) {
+    window.location.hash = newHash
+  }
+}
+
 export default function App() {
-  const { sessions, activeId, fetch: fetchSessions } = useSessionStore()
+  const { sessions, fetch: fetchSessions } = useSessionStore()
   const conn = useStreamStore((s) => s.conn)
   const { config, fetch: fetchConfig } = useConfigStore()
-  const active = sessions.find((s) => s.id === activeId)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [activePreset, setActivePreset] = useState('')
+
+  // Hash-based routing state
+  const [route, setRoute] = useState(parseHash)
+
+  // Listen for hash changes (browser back/forward)
+  useEffect(() => {
+    function onHashChange() {
+      setRoute(parseHash())
+    }
+    window.addEventListener('hashchange', onHashChange)
+    return () => window.removeEventListener('hashchange', onHashChange)
+  }, [])
+
+  // Derive active session from route (by UID)
+  const active = sessions.find((s) => s.uid === route.uid) || null
+  const currentMode = route.mode
 
   // Fetch sessions and config on mount
   useEffect(() => {
@@ -28,14 +62,13 @@ export default function App() {
     fetchConfig(daemonBase)
   }, [fetchSessions, fetchConfig])
 
-  // Connect session-events WS on mount (for status updates)
+  // Connect session-events WS on mount
   useEffect(() => {
     const conn = connectSessionEvents(
       `${wsBase}/ws/session-events`,
       (event) => {
         if (event.type === 'status') {
           useStreamStore.getState().setSessionStatus(event.session, event.value)
-          // Refresh sessions on status change
           fetchSessions(daemonBase)
         }
         if (event.type === 'handoff') {
@@ -55,23 +88,25 @@ export default function App() {
     return () => conn.close()
   }, [fetchSessions])
 
-  // Switch to term mode
-  const handleModeChange = useCallback(async (newMode: string) => {
-    if (!active || active.mode === newMode) return
-    try {
-      await switchMode(daemonBase, active.id, newMode)
-      await fetchSessions(daemonBase)
-    } catch (e) {
-      console.error('mode switch failed:', e)
-    }
-  }, [active, fetchSessions])
+  // Select session → update hash
+  const handleSelectSession = useCallback((id: number) => {
+    const sess = sessions.find((s) => s.id === id)
+    if (sess) setHash(sess.uid, 'term')
+  }, [sessions])
 
-  // Handoff for stream/jsonl modes
+  // Switch mode via hash (term button)
+  const handleModeChange = useCallback((newMode: string) => {
+    if (!active) return
+    setHash(active.uid, newMode)
+  }, [active])
+
+  // Handoff for stream modes → update hash immediately
   const handleHandoff = useCallback(async (mode: string, preset: string) => {
     if (!active) return
+    setHash(active.uid, mode)
+    setActivePreset(preset)
     try {
       useStreamStore.getState().setHandoffState('handoff-in-progress')
-      setActivePreset(preset)
       await handoff(daemonBase, active.id, mode, preset)
       await fetchSessions(daemonBase)
     } catch (e) {
@@ -85,19 +120,21 @@ export default function App() {
   }, [conn])
 
   // Derive presets from config
-  const streamPresets = config?.stream?.presets || [{ name: 'cc', command: 'claude --dangerously-skip-permissions' }]
-  const jsonlPresets = config?.jsonl?.presets || [{ name: 'cc-jsonl', command: 'claude --output-format stream-json' }]
+  const streamPresets = config?.stream?.presets || [{ name: 'cc', command: 'claude -p --input-format stream-json --output-format stream-json' }]
 
   return (
-    <div className="h-screen bg-gray-950 text-gray-200 flex">
-      <SessionPanel onSettingsOpen={() => setSettingsOpen(true)} />
+    <div className="h-screen bg-[#191919] text-gray-200 flex">
+      <SessionPanel
+        onSettingsOpen={() => setSettingsOpen(true)}
+        onSelectSession={handleSelectSession}
+        activeSessionUid={route.uid}
+      />
       <div className="flex-1 flex flex-col h-full overflow-hidden">
         {active && (
           <TopBar
             sessionName={active.name}
-            mode={active.mode}
+            mode={currentMode}
             streamPresets={streamPresets}
-            jsonlPresets={jsonlPresets}
             activePreset={activePreset}
             onModeChange={handleModeChange}
             onHandoff={handleHandoff}
@@ -106,7 +143,7 @@ export default function App() {
         )}
         <div className="flex-1 overflow-hidden">
           {active ? (
-            active.mode === 'stream' ? (
+            currentMode === 'stream' ? (
               <ConversationView
                 wsUrl={`${wsBase}/ws/cli-bridge-sub/${encodeURIComponent(active.name)}`}
                 sessionName={active.name}
@@ -126,7 +163,6 @@ export default function App() {
         </div>
       </div>
 
-      {/* Settings Panel overlay */}
       {settingsOpen && (
         <SettingsPanel
           daemonBase={daemonBase}

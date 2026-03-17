@@ -13,7 +13,6 @@ function SessionIcon({ mode, id }: { mode: string; id: number }) {
   }
 }
 
-/** Derive a simple status from session mode (fallback when session-events WS has not reported) */
 function deriveStatus(mode: string): SessionStatus {
   switch (mode) {
     case 'stream': return 'cc-running'
@@ -22,7 +21,6 @@ function deriveStatus(mode: string): SessionStatus {
   }
 }
 
-/** Map raw session-events status string to SessionStatus type */
 function mapStatus(raw: string): SessionStatus {
   switch (raw) {
     case 'cc-idle': return 'cc-idle'
@@ -36,11 +34,21 @@ function mapStatus(raw: string): SessionStatus {
 
 interface Props {
   onSettingsOpen?: () => void
+  onSelectSession?: (id: number) => void
+  activeSessionUid?: string | null
 }
 
-export default function SessionPanel({ onSettingsOpen }: Props) {
+export default function SessionPanel({ onSettingsOpen, onSelectSession, activeSessionUid }: Props) {
   const { sessions, activeId, setActive } = useSessionStore()
   const sessionStatus = useStreamStore((s) => s.sessionStatus)
+
+  function handleClick(id: number) {
+    setActive(id)
+    onSelectSession?.(id)
+  }
+
+  const isActive = (s: { id: number; uid: string }) =>
+    activeSessionUid != null ? s.uid === activeSessionUid : activeId === s.id
 
   return (
     <div className="w-56 bg-gray-900 border-r border-gray-800 flex flex-col">
@@ -55,9 +63,9 @@ export default function SessionPanel({ onSettingsOpen }: Props) {
             return (
               <button
                 key={s.id}
-                onClick={() => setActive(s.id)}
+                onClick={() => handleClick(s.id)}
                 className={`w-full text-left px-2 py-1.5 rounded text-sm cursor-pointer flex items-center gap-2 ${
-                  activeId === s.id ? 'bg-gray-800 text-gray-100' : 'text-gray-400 hover:bg-gray-800/50'
+                  isActive(s) ? 'bg-gray-800 text-gray-100' : 'text-gray-400 hover:bg-gray-800/50'
                 }`}
               >
                 <SessionIcon mode={s.mode} id={s.id} />
@@ -69,7 +77,6 @@ export default function SessionPanel({ onSettingsOpen }: Props) {
           })}
         </div>
       </div>
-      {/* Settings button — fixed at bottom */}
       <div className="p-3 border-t border-gray-800">
         <button
           data-testid="settings-btn"

@@ -1,6 +1,7 @@
 // spa/src/lib/api.ts
 export interface Session {
   id: number
+  uid: string
   name: string
   tmux_target: string
   cwd: string

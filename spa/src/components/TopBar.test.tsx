@@ -6,8 +6,7 @@ import TopBar from './TopBar'
 const defaultProps = {
   sessionName: 'test',
   mode: 'term',
-  streamPresets: [{ name: 'cc', command: 'claude --dangerously-skip-permissions' }],
-  jsonlPresets: [{ name: 'cc-jsonl', command: 'claude --output-format stream-json' }],
+  streamPresets: [{ name: 'cc', command: 'claude -p --input-format stream-json --output-format stream-json' }],
   onModeChange: vi.fn(),
   onHandoff: vi.fn(),
   onInterrupt: vi.fn(),
@@ -26,10 +25,9 @@ describe('TopBar', () => {
     expect(screen.getByText('my-project')).toBeInTheDocument()
   })
 
-  it('shows all three mode buttons', () => {
+  it('shows term and stream mode buttons', () => {
     render(<TopBar {...defaultProps} />)
     expect(screen.getByTestId('mode-btn-term')).toBeInTheDocument()
-    expect(screen.getByTestId('mode-btn-jsonl')).toBeInTheDocument()
     expect(screen.getByTestId('mode-btn-stream')).toBeInTheDocument()
   })
 
@@ -86,21 +84,6 @@ describe('TopBar', () => {
     expect(screen.queryByTestId('dropdown-stream')).toBeNull()
   })
 
-  it('shows interrupt button in stream mode', () => {
-    render(<TopBar {...defaultProps} mode="stream" />)
-    expect(screen.getByTestId('interrupt-btn')).toBeInTheDocument()
-  })
-
-  it('shows interrupt button in jsonl mode', () => {
-    render(<TopBar {...defaultProps} mode="jsonl" />)
-    expect(screen.getByTestId('interrupt-btn')).toBeInTheDocument()
-  })
-
-  it('hides interrupt button in term mode', () => {
-    render(<TopBar {...defaultProps} mode="term" />)
-    expect(screen.queryByTestId('interrupt-btn')).toBeNull()
-  })
-
   it('shows dropdown caret only with multiple presets', () => {
     render(<TopBar {...defaultProps} streamPresets={[{ name: 'cc', command: 'claude' }]} />)
     const btn = screen.getByTestId('mode-btn-stream')
@@ -117,14 +100,12 @@ describe('TopBar', () => {
     expect(btn.textContent).toContain('▾')
   })
 
-  it('renders buttons in order: term → stream → jsonl', () => {
+  it('renders buttons in order: term → stream', () => {
     render(<TopBar {...defaultProps} />)
     const modeSwitch = screen.getByTestId('mode-switch')
     const buttons = modeSwitch.querySelectorAll('button')
-    // First button = term, second = stream, third = jsonl
     expect(buttons[0].textContent).toContain('term')
     expect(buttons[1].textContent).toContain('stream')
-    expect(buttons[2].textContent).toContain('jsonl')
   })
 
   it('closes dropdown on Escape key', () => {
