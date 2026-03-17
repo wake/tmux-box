@@ -125,4 +125,53 @@ func TestGetSessionNotFound(t *testing.T) {
 	}
 }
 
+func TestCCSessionID(t *testing.T) {
+	db := openTestDB(t)
+
+	// Create session — cc_session_id defaults to empty
+	id, err := db.CreateSession(store.Session{
+		Name: "test", TmuxTarget: "test:0", Cwd: "/tmp", Mode: "term",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Get — verify default empty
+	sess, err := db.GetSession(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.CCSessionID != "" {
+		t.Errorf("want empty cc_session_id, got %q", sess.CCSessionID)
+	}
+
+	// Update — write session ID
+	ccID := "01abc234-5678-9def-0123-456789abcdef"
+	err = db.UpdateSession(id, store.SessionUpdate{CCSessionID: ptr(ccID)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sess, _ = db.GetSession(id)
+	if sess.CCSessionID != ccID {
+		t.Errorf("want %q, got %q", ccID, sess.CCSessionID)
+	}
+
+	// List — also includes cc_session_id
+	sessions, _ := db.ListSessions()
+	if sessions[0].CCSessionID != ccID {
+		t.Errorf("list: want %q, got %q", ccID, sessions[0].CCSessionID)
+	}
+
+	// Clear
+	err = db.UpdateSession(id, store.SessionUpdate{CCSessionID: ptr("")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, _ = db.GetSession(id)
+	if sess.CCSessionID != "" {
+		t.Errorf("want empty after clear, got %q", sess.CCSessionID)
+	}
+}
+
 func ptr(s string) *string { return &s }

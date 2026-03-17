@@ -24,7 +24,8 @@ type Session struct {
 	Cwd        string `json:"cwd"`
 	Mode       string `json:"mode"`
 	GroupID    int64  `json:"group_id"`
-	SortOrder  int    `json:"sort_order"`
+	SortOrder   int    `json:"sort_order"`
+	CCSessionID string `json:"cc_session_id"`
 }
 
 // generateUID creates a short URL-safe unique ID (8 chars, ~40 bits entropy).
@@ -35,9 +36,10 @@ func generateUID() string {
 }
 
 type SessionUpdate struct {
-	Name    *string `json:"name,omitempty"`
-	Mode    *string `json:"mode,omitempty"`
-	GroupID *int64  `json:"group_id,omitempty"`
+	Name        *string `json:"name,omitempty"`
+	Mode        *string `json:"mode,omitempty"`
+	GroupID     *int64  `json:"group_id,omitempty"`
+	CCSessionID *string `json:"cc_session_id,omitempty"`
 }
 
 type Group struct {
@@ -121,6 +123,28 @@ func migrate(db *sql.DB) error {
 	}
 	// Ensure UID uniqueness
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_uid ON sessions(uid) WHERE uid != ''")
+	// Migration: add cc_session_id column if missing
+	var hasCCSessionID bool
+	rows3, _ := db.Query("PRAGMA table_info(sessions)")
+	if rows3 != nil {
+		defer rows3.Close()
+		for rows3.Next() {
+			var cid int
+			var name, typ string
+			var notnull int
+			var dflt sql.NullString
+			var pk int
+			rows3.Scan(&cid, &name, &typ, &notnull, &dflt, &pk)
+			if name == "cc_session_id" {
+				hasCCSessionID = true
+			}
+		}
+	}
+	if !hasCCSessionID {
+		if _, err := db.Exec("ALTER TABLE sessions ADD COLUMN cc_session_id TEXT NOT NULL DEFAULT ''"); err != nil {
+			return fmt.Errorf("add cc_session_id column: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -139,7 +163,7 @@ func (s *Store) CreateSession(sess Session) (int64, error) {
 }
 
 func (s *Store) ListSessions() ([]Session, error) {
-	rows, err := s.db.Query("SELECT id, uid, name, tmux_target, cwd, mode, group_id, sort_order FROM sessions ORDER BY sort_order")
+	rows, err := s.db.Query("SELECT id, uid, name, tmux_target, cwd, mode, group_id, sort_order, cc_session_id FROM sessions ORDER BY sort_order")
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +171,7 @@ func (s *Store) ListSessions() ([]Session, error) {
 	var out []Session
 	for rows.Next() {
 		var v Session
-		if err := rows.Scan(&v.ID, &v.UID, &v.Name, &v.TmuxTarget, &v.Cwd, &v.Mode, &v.GroupID, &v.SortOrder); err != nil {
+		if err := rows.Scan(&v.ID, &v.UID, &v.Name, &v.TmuxTarget, &v.Cwd, &v.Mode, &v.GroupID, &v.SortOrder, &v.CCSessionID); err != nil {
 			return nil, err
 		}
 		out = append(out, v)
@@ -187,6 +211,16 @@ func (s *Store) UpdateSession(id int64, u SessionUpdate) error {
 			updated = true
 		}
 	}
+	if u.CCSessionID != nil {
+		res, err := s.db.Exec("UPDATE sessions SET cc_session_id = ? WHERE id = ?", *u.CCSessionID, id)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n > 0 {
+			updated = true
+		}
+	}
 	if !updated {
 		return ErrNotFound
 	}
@@ -208,8 +242,8 @@ func (s *Store) DeleteSession(id int64) error {
 func (s *Store) GetSession(id int64) (Session, error) {
 	var sess Session
 	err := s.db.QueryRow(
-		"SELECT id, uid, name, tmux_target, cwd, mode, group_id, sort_order FROM sessions WHERE id = ?", id,
-	).Scan(&sess.ID, &sess.UID, &sess.Name, &sess.TmuxTarget, &sess.Cwd, &sess.Mode, &sess.GroupID, &sess.SortOrder)
+		"SELECT id, uid, name, tmux_target, cwd, mode, group_id, sort_order, cc_session_id FROM sessions WHERE id = ?", id,
+	).Scan(&sess.ID, &sess.UID, &sess.Name, &sess.TmuxTarget, &sess.Cwd, &sess.Mode, &sess.GroupID, &sess.SortOrder, &sess.CCSessionID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return sess, ErrNotFound
