@@ -2,48 +2,63 @@
 package server
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"net/http"
+	"sync"
+	"time"
 
+	"github.com/wake/tmux-box/internal/bridge"
 	"github.com/wake/tmux-box/internal/config"
+	"github.com/wake/tmux-box/internal/detect"
 	"github.com/wake/tmux-box/internal/store"
-	"github.com/wake/tmux-box/internal/stream"
 	"github.com/wake/tmux-box/internal/terminal"
 	"github.com/wake/tmux-box/internal/tmux"
 )
 
 type Server struct {
-	cfg     config.Config
-	store   *store.Store
-	tmux    tmux.Executor
-	streams *stream.Manager
-	mux     *http.ServeMux
+	cfg          config.Config
+	cfgMu        sync.RWMutex
+	cfgPath      string
+	store        *store.Store
+	tmux         tmux.Executor
+	bridge       *bridge.Bridge
+	events       *EventsBroadcaster
+	detector     *detect.Detector
+	handoffLocks *handoffLocks
+	mux          *http.ServeMux
 }
 
-func New(cfg config.Config, st *store.Store, tx tmux.Executor, sm *stream.Manager) *Server {
-	s := &Server{cfg: cfg, store: st, tmux: tx, streams: sm, mux: http.NewServeMux()}
+func New(cfg config.Config, st *store.Store, tx tmux.Executor, cfgPath string) *Server {
+	s := &Server{
+		cfg:          cfg,
+		cfgPath:      cfgPath,
+		store:        st,
+		tmux:         tx,
+		bridge:       bridge.New(),
+		events:       NewEventsBroadcaster(),
+		detector:     detect.New(tx, cfg.Detect.CCCommands),
+		handoffLocks: newHandoffLocks(),
+		mux:          http.NewServeMux(),
+	}
 	s.routes()
 	return s
 }
 
 func (s *Server) routes() {
-	sh := NewSessionHandler(s.store, s.tmux, s.streams)
+	sh := NewSessionHandler(s.store, s.tmux)
 	s.mux.HandleFunc("GET /api/sessions", sh.List)
 	s.mux.HandleFunc("POST /api/sessions", sh.Create)
 	s.mux.HandleFunc("DELETE /api/sessions/{id}", sh.Delete)
 	s.mux.HandleFunc("POST /api/sessions/{id}/mode", sh.SwitchMode)
+	s.mux.HandleFunc("POST /api/sessions/{id}/handoff", s.handleHandoff)
 	s.mux.HandleFunc("/ws/terminal/{session}", s.handleTerminal)
-	s.mux.HandleFunc("/ws/stream/{session}", s.handleStream)
-}
-
-func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("session")
-	sess := s.streams.Get(name)
-	if sess == nil {
-		http.Error(w, "stream session not found", 404)
-		return
-	}
-	HandleStreamWS(w, r, sess)
+	s.mux.HandleFunc("/ws/cli-bridge/{session}", s.handleCliBridge)
+	s.mux.HandleFunc("/ws/cli-bridge-sub/{session}", s.handleCliBridgeSubscribe)
+	s.mux.HandleFunc("/ws/session-events", s.handleSessionEvents)
+	s.mux.HandleFunc("GET /api/config", s.handleGetConfig)
+	s.mux.HandleFunc("PUT /api/config", s.handlePutConfig)
 }
 
 func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
@@ -68,4 +83,50 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) ListenAndServe() error {
 	addr := fmt.Sprintf("%s:%d", s.cfg.Bind, s.cfg.Port)
 	return http.ListenAndServe(addr, s.Handler())
+}
+
+// BroadcastEvent exposes the events broadcaster for external callers (e.g. tests, handoff).
+func (s *Server) BroadcastEvent(session, eventType, value string) {
+	s.events.Broadcast(session, eventType, value)
+}
+
+// StartStatusPoller starts a background goroutine that polls tmux session status
+// and broadcasts changes to connected WebSocket subscribers. The goroutine exits
+// when the context is cancelled.
+func (s *Server) StartStatusPoller(ctx context.Context) {
+	interval := s.cfg.Detect.PollInterval
+	if interval <= 0 {
+		interval = 2
+	}
+	ticker := time.NewTicker(time.Duration(interval) * time.Second)
+
+	go func() {
+		defer ticker.Stop()
+
+		lastStatus := make(map[string]detect.Status)
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if !s.events.HasSubscribers() {
+					continue // skip polling when nobody is listening
+				}
+				sessions, err := s.store.ListSessions()
+				if err != nil {
+					log.Printf("status poller: list sessions: %v", err)
+					continue
+				}
+
+				for _, sess := range sessions {
+					status := s.detector.Detect(sess.Name)
+					if prev, ok := lastStatus[sess.Name]; !ok || prev != status {
+						lastStatus[sess.Name] = status
+						s.events.Broadcast(sess.Name, "status", string(status))
+					}
+				}
+			}
+		}
+	}()
 }

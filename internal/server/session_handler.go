@@ -10,27 +10,25 @@ import (
 	"strconv"
 
 	"github.com/wake/tmux-box/internal/store"
-	"github.com/wake/tmux-box/internal/stream"
 	"github.com/wake/tmux-box/internal/tmux"
 )
 
 var validSessionName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 type SessionHandler struct {
-	store   *store.Store
-	tmux    tmux.Executor
-	streams *stream.Manager
+	store *store.Store
+	tmux  tmux.Executor
 }
 
-func NewSessionHandler(s *store.Store, t tmux.Executor, sm *stream.Manager) *SessionHandler {
-	return &SessionHandler{store: s, tmux: t, streams: sm}
+func NewSessionHandler(s *store.Store, t tmux.Executor) *SessionHandler {
+	return &SessionHandler{store: s, tmux: t}
 }
 
 type switchModeReq struct {
 	Mode string `json:"mode"`
 }
 
-// SwitchMode switches a session between term and stream modes.
+// SwitchMode switches a session between term, stream, and jsonl modes.
 func (h *SessionHandler) SwitchMode(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -44,8 +42,8 @@ func (h *SessionHandler) SwitchMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Mode != "term" && req.Mode != "stream" {
-		http.Error(w, "mode must be term or stream", 400)
+	if req.Mode != "term" && req.Mode != "stream" && req.Mode != "jsonl" {
+		http.Error(w, "mode must be term, stream, or jsonl", 400)
 		return
 	}
 
@@ -66,31 +64,7 @@ func (h *SessionHandler) SwitchMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Switching from stream → term: stop stream process
-	if sess.Mode == "stream" && req.Mode == "term" {
-		h.streams.Stop(sess.Name)
-	}
-
-	// Switching from term → stream: start claude -p
-	if sess.Mode == "term" && req.Mode == "stream" {
-		claudeArgs := []string{
-			"-p", "placeholder",
-			"--input-format", "stream-json",
-			"--output-format", "stream-json",
-			"--verbose",
-		}
-		if err := h.streams.Start(sess.Name, "claude", claudeArgs, sess.Cwd); err != nil {
-			http.Error(w, "start stream: "+err.Error(), 500)
-			return
-		}
-	}
-
-	// Update mode in store
 	if err := h.store.UpdateSession(id, store.SessionUpdate{Mode: &req.Mode}); err != nil {
-		// Rollback: if we just started a stream, stop it
-		if req.Mode == "stream" {
-			h.streams.Stop(sess.Name)
-		}
 		http.Error(w, "update session: "+err.Error(), 500)
 		return
 	}
@@ -207,7 +181,6 @@ func (h *SessionHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, s := range sessions {
 		if s.ID == id {
-			h.streams.Stop(s.Name)
 			h.tmux.KillSession(s.Name)
 			break
 		}

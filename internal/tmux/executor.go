@@ -22,6 +22,8 @@ type Executor interface {
 	KillSession(name string) error
 	HasSession(name string) bool
 	SendKeys(target, keys string) error
+	PaneCurrentCommand(target string) (string, error)
+	CapturePaneContent(target string, lastN int) (string, error)
 }
 
 // --- Real Executor ---
@@ -81,14 +83,39 @@ func (r *RealExecutor) SendKeys(target, keys string) error {
 	return exec.Command("tmux", "send-keys", "-t", target, keys, "Enter").Run()
 }
 
+func (r *RealExecutor) PaneCurrentCommand(target string) (string, error) {
+	out, err := exec.Command("tmux", "list-panes", "-t", target, "-F", "#{pane_current_command}").Output()
+	if err != nil {
+		return "", fmt.Errorf("tmux list-panes: %w", err)
+	}
+	// Return the first line (active pane's command).
+	line := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]
+	return strings.TrimSpace(line), nil
+}
+
+func (r *RealExecutor) CapturePaneContent(target string, lastN int) (string, error) {
+	arg := fmt.Sprintf("-%d", lastN)
+	out, err := exec.Command("tmux", "capture-pane", "-t", target, "-p", "-S", arg).Output()
+	if err != nil {
+		return "", fmt.Errorf("tmux capture-pane: %w", err)
+	}
+	return string(out), nil
+}
+
 // --- Fake Executor ---
 
 type FakeExecutor struct {
-	sessions map[string]TmuxSession
+	sessions     map[string]TmuxSession
+	paneCommands map[string]string // target → command name
+	paneContents map[string]string // target → captured text
 }
 
 func NewFakeExecutor() *FakeExecutor {
-	return &FakeExecutor{sessions: make(map[string]TmuxSession)}
+	return &FakeExecutor{
+		sessions:     make(map[string]TmuxSession),
+		paneCommands: make(map[string]string),
+		paneContents: make(map[string]string),
+	}
 }
 
 func (f *FakeExecutor) AddSession(name, cwd string) {
@@ -122,3 +149,27 @@ func (f *FakeExecutor) HasSession(name string) bool {
 }
 
 func (f *FakeExecutor) SendKeys(_, _ string) error { return nil }
+
+func (f *FakeExecutor) SetPaneCommand(target, cmd string) {
+	f.paneCommands[target] = cmd
+}
+
+func (f *FakeExecutor) SetPaneContent(target, content string) {
+	f.paneContents[target] = content
+}
+
+func (f *FakeExecutor) PaneCurrentCommand(target string) (string, error) {
+	cmd, ok := f.paneCommands[target]
+	if !ok {
+		return "", fmt.Errorf("no pane command for target %q", target)
+	}
+	return cmd, nil
+}
+
+func (f *FakeExecutor) CapturePaneContent(target string, lastN int) (string, error) {
+	content, ok := f.paneContents[target]
+	if !ok {
+		return "", fmt.Errorf("no pane content for target %q", target)
+	}
+	return content, nil
+}

@@ -1,4 +1,5 @@
 .superpowers/
+.worktrees/
 bin/
 spa/node_modules/
 spa/dist/
