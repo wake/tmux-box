@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/wake/tmux-box/internal/bridge"
@@ -18,6 +19,8 @@ import (
 
 type Server struct {
 	cfg          config.Config
+	cfgMu        sync.RWMutex
+	cfgPath      string
 	store        *store.Store
 	tmux         tmux.Executor
 	bridge       *bridge.Bridge
@@ -27,9 +30,10 @@ type Server struct {
 	mux          *http.ServeMux
 }
 
-func New(cfg config.Config, st *store.Store, tx tmux.Executor) *Server {
+func New(cfg config.Config, st *store.Store, tx tmux.Executor, cfgPath string) *Server {
 	s := &Server{
 		cfg:          cfg,
+		cfgPath:      cfgPath,
 		store:        st,
 		tmux:         tx,
 		bridge:       bridge.New(),
@@ -53,6 +57,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/ws/cli-bridge/{session}", s.handleCliBridge)
 	s.mux.HandleFunc("/ws/cli-bridge-sub/{session}", s.handleCliBridgeSubscribe)
 	s.mux.HandleFunc("/ws/session-events", s.handleSessionEvents)
+	s.mux.HandleFunc("GET /api/config", s.handleGetConfig)
+	s.mux.HandleFunc("PUT /api/config", s.handlePutConfig)
 }
 
 func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {

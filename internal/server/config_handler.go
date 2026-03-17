@@ -1,0 +1,90 @@
+// internal/server/config_handler.go
+package server
+
+import (
+	"encoding/json"
+	"net/http"
+	"os"
+
+	"github.com/BurntSushi/toml"
+	"github.com/wake/tmux-box/internal/config"
+)
+
+// handleGetConfig returns the current config as JSON with the token field redacted.
+func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
+	s.cfgMu.RLock()
+	cfg := s.cfg // struct copy
+	s.cfgMu.RUnlock()
+
+	// Redact sensitive fields
+	cfg.Token = ""
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(cfg)
+}
+
+// configUpdateRequest defines the fields that can be updated via PUT /api/config.
+type configUpdateRequest struct {
+	Stream *config.StreamConfig `json:"stream,omitempty"`
+	JSONL  *config.JSONLConfig  `json:"jsonl,omitempty"`
+	Detect *detectUpdateRequest `json:"detect,omitempty"`
+}
+
+// detectUpdateRequest allows partial updates to detect config.
+// Using pointers so we can distinguish "not provided" from "zero value".
+type detectUpdateRequest struct {
+	CCCommands   *[]string `json:"cc_commands,omitempty"`
+	PollInterval *int      `json:"poll_interval,omitempty"`
+}
+
+// handlePutConfig accepts a partial config update, persists it to disk, and returns the updated config.
+func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
+	var req configUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+
+	// Apply updates — only the allowed fields
+	if req.Stream != nil {
+		s.cfg.Stream = *req.Stream
+	}
+	if req.JSONL != nil {
+		s.cfg.JSONL = *req.JSONL
+	}
+	if req.Detect != nil {
+		if req.Detect.CCCommands != nil {
+			s.cfg.Detect.CCCommands = *req.Detect.CCCommands
+		}
+		if req.Detect.PollInterval != nil && *req.Detect.PollInterval > 0 {
+			s.cfg.Detect.PollInterval = *req.Detect.PollInterval
+		}
+	}
+
+	// Write back to config file
+	if s.cfgPath != "" {
+		if err := writeConfig(s.cfgPath, s.cfg); err != nil {
+			http.Error(w, "failed to save config: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Return updated config (redacted)
+	cfg := s.cfg
+	cfg.Token = ""
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(cfg)
+}
+
+// writeConfig serialises the config to TOML and writes it to the given path.
+func writeConfig(path string, cfg config.Config) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return toml.NewEncoder(f).Encode(cfg)
+}

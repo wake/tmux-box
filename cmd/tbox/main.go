@@ -65,7 +65,13 @@ func runServe(args []string) {
 
 	tx := tmux.NewRealExecutor()
 
-	s := server.New(cfg, st, tx)
+	// Resolve config path for config API write-back.
+	resolvedCfgPath := *cfgPath
+	if resolvedCfgPath == "" {
+		resolvedCfgPath = filepath.Join(cfg.DataDir, "config.toml")
+	}
+
+	s := server.New(cfg, st, tx, resolvedCfgPath)
 
 	// Context for background goroutines (status poller).
 	ctx, cancel := context.WithCancel(context.Background())

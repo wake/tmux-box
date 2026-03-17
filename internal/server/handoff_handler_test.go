@@ -46,7 +46,7 @@ func newHandoffTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 		},
 	}
 
-	s := server.New(cfg, db, fakeTmux)
+	s := server.New(cfg, db, fakeTmux, "")
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
 

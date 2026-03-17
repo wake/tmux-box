@@ -25,7 +25,7 @@ func setupServer(t *testing.T) *httptest.Server {
 	}
 	t.Cleanup(func() { db.Close() })
 	cfg := config.Config{} // no token/IP restriction for tests
-	s := server.New(cfg, db, tmux.NewFakeExecutor())
+	s := server.New(cfg, db, tmux.NewFakeExecutor(), "")
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
 	return srv

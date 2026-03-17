@@ -27,15 +27,15 @@ type DetectConfig struct {
 }
 
 type Config struct {
-	Bind         string       `toml:"bind"`
-	Port         int          `toml:"port"`
-	Token        string       `toml:"token"`
-	Allow        []string     `toml:"allow"`
-	DataDir      string       `toml:"data_dir"`
-	AllowedPaths []string     `toml:"allowed_paths"`
-	Stream       StreamConfig `toml:"stream"`
-	JSONL        JSONLConfig  `toml:"jsonl"`
-	Detect       DetectConfig `toml:"detect"`
+	Bind         string       `toml:"bind"           json:"bind"`
+	Port         int          `toml:"port"           json:"port"`
+	Token        string       `toml:"token"          json:"token"`
+	Allow        []string     `toml:"allow"          json:"allow"`
+	DataDir      string       `toml:"data_dir"       json:"data_dir"`
+	AllowedPaths []string     `toml:"allowed_paths"  json:"allowed_paths"`
+	Stream       StreamConfig `toml:"stream"         json:"stream"`
+	JSONL        JSONLConfig  `toml:"jsonl"          json:"jsonl"`
+	Detect       DetectConfig `toml:"detect"         json:"detect"`
 }
 
 func defaults() Config {
