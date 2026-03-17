@@ -273,11 +273,88 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 	broadcast("connected")
 }
 
-// runHandoffToTerm handles the handoff from stream/jsonl back to terminal mode.
-// This is a stub that will be fully implemented in a later task.
+// runHandoffToTerm handles the handoff from stream back to interactive terminal mode.
+// It shuts down the relay, waits for shell, then launches claude --resume.
 func (s *Server) runHandoffToTerm(sess store.Session, handoffID string) {
 	defer s.handoffLocks.Unlock(sess.Name)
-	s.events.Broadcast(sess.Name, "handoff", "failed:not implemented")
+
+	broadcast := func(value string) {
+		s.events.Broadcast(sess.Name, "handoff", value)
+	}
+
+	// Step 1: Get session ID from DB
+	current, err := s.store.GetSession(sess.ID)
+	if err != nil || current.CCSessionID == "" {
+		broadcast("failed:no session ID available")
+		return
+	}
+	sessionID := current.CCSessionID
+
+	// Step 2: Shut down relay
+	if s.bridge.HasRelay(sess.Name) {
+		broadcast("stopping-relay")
+		s.bridge.SubscriberToRelay(sess.Name, []byte(`{"type":"shutdown"}`))
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if !s.bridge.HasRelay(sess.Name) {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		if s.bridge.HasRelay(sess.Name) {
+			broadcast("failed:relay did not disconnect")
+			return
+		}
+	}
+
+	// Step 3: Wait for shell
+	broadcast("waiting-shell")
+	shellDeadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(shellDeadline) {
+		if s.detector.Detect(sess.Name) == detect.StatusNormal {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if s.detector.Detect(sess.Name) != detect.StatusNormal {
+		broadcast("failed:shell did not recover")
+		return
+	}
+
+	// Step 4: Launch interactive CC with --resume
+	broadcast("launching-cc")
+	resumeCmd := fmt.Sprintf("claude --resume %s", sessionID)
+	if err := s.tmux.SendKeys(sess.Name, resumeCmd); err != nil {
+		broadcast("failed:send-keys error: " + err.Error())
+		return
+	}
+
+	// Step 5: Verify CC started
+	ccDeadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(ccDeadline) {
+		st := s.detector.Detect(sess.Name)
+		if st == detect.StatusCCIdle || st == detect.StatusCCRunning || st == detect.StatusCCWaiting {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	finalSt := s.detector.Detect(sess.Name)
+	if finalSt != detect.StatusCCIdle && finalSt != detect.StatusCCRunning && finalSt != detect.StatusCCWaiting {
+		broadcast("failed:CC did not start")
+		return
+	}
+
+	// Step 6: Update DB (mode=term, clear cc_session_id)
+	termMode := "term"
+	emptyID := ""
+	if err := s.store.UpdateSession(sess.ID, store.SessionUpdate{
+		Mode:        &termMode,
+		CCSessionID: &emptyID,
+	}); err != nil {
+		broadcast("failed:db update error: " + err.Error())
+		return
+	}
+	broadcast("connected")
 }
 
 func generateHandoffID() string {
