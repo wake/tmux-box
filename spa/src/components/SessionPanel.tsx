@@ -37,7 +37,7 @@ export default function SessionPanel() {
       </div>
       {/* Settings button — fixed at bottom */}
       <div className="p-3 border-t border-gray-800">
-        <button className="flex items-center gap-2 text-gray-500 hover:text-gray-300 text-sm cursor-pointer w-full">
+        <button className="flex items-center gap-2 text-gray-400 hover:text-gray-300 text-sm cursor-pointer w-full">
           <GearSix size={16} />
           <span>Settings</span>
         </button>

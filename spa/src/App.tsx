@@ -20,9 +20,8 @@ export default function App() {
     fetch(daemonBase)
   }, [fetch])
 
-  const handleModeSwitch = useCallback(async () => {
-    if (!active) return
-    const newMode = active.mode === 'stream' ? 'term' : 'stream'
+  const handleModeChange = useCallback(async (newMode: string) => {
+    if (!active || active.mode === newMode) return
     try {
       await switchMode(daemonBase, active.id, newMode)
       await fetch(daemonBase) // refresh sessions
@@ -43,7 +42,7 @@ export default function App() {
           <TopBar
             sessionName={active.name}
             mode={active.mode}
-            onModeSwitch={handleModeSwitch}
+            onModeChange={handleModeChange}
             onInterrupt={handleInterrupt}
           />
         )}
