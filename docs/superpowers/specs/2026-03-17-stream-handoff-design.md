@@ -218,7 +218,7 @@ CC `/status` 的預期輸出類似：
 
 ```
 ╭─ Status ──────────────────────────────────╮
-│ Session: 01abc234-5678-9def-0123-456789ab │
+│ Session ID: 4dd75bf4-98e6-4f08-b753-08153d91c5fa │
 │ Model: claude-sonnet-4-20250514             │
 │ Tools: Read, Edit, Write, Bash, Glob ...  │
 │ Context: 45,231 / 200,000 tokens          │
@@ -235,12 +235,12 @@ func ExtractSessionID(paneContent string) (string, error)
 
 解析邏輯：
 1. 逐行掃描 pane 內容
-2. 匹配 `Session:` 關鍵字後的 UUID 格式（`[0-9a-f]{8}-...-[0-9a-f]{12}`）
+2. 匹配 `Session ID:` 關鍵字後的 UUID 格式（`[0-9a-f]{8}-...-[0-9a-f]{12}`）
 3. 若無匹配 → 回傳 error
 
 正規表達式草案：
 ```go
-var sessionIDRegex = regexp.MustCompile(`Session:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`)
+var sessionIDRegex = regexp.MustCompile(`Session ID:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`)
 ```
 
 **重要**：此格式基於推測，**實作前必須在實際環境中執行 `/status` 並記錄輸出**。若格式不符預期，需調整正規表達式。建議在 implementation plan 中將此列為第一步的驗證任務。同時驗證 `/status` 輸出後是否需要 `Escape` 跳離（若為 inline 輸出則 Escape 為 no-op，無害但可節省 500ms 延遲）。

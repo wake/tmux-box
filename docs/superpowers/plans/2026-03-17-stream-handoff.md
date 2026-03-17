@@ -213,13 +213,11 @@ func TestExtractSessionID(t *testing.T) {
 	}{
 		{
 			name: "standard /status output",
-			content: `╭─ Status ──────────────────────────────────╮
-│ Session: 01abc234-5678-9def-0123-456789abcdef │
-│ Model: claude-sonnet-4-20250514             │
-│ Context: 45,231 / 200,000 tokens          │
-╰───────────────────────────────────────────╯
+			content: `  Session ID: 4dd75bf4-98e6-4f08-b753-08153d91c5fa
+  cwd: /private/tmp
+  Model:Default Opus 4.6 with 1M context
 ❯ `,
-			wantID: "01abc234-5678-9def-0123-456789abcdef",
+			wantID: "4dd75bf4-98e6-4f08-b753-08153d91c5fa",
 		},
 		{
 			name:    "no session ID in content",
@@ -234,7 +232,7 @@ func TestExtractSessionID(t *testing.T) {
 		{
 			name: "session ID buried in noise",
 			content: `lots of output here
-Session: deadbeef-1234-5678-9abc-def012345678
+  Session ID: deadbeef-1234-5678-9abc-def012345678
 more output`,
 			wantID: "deadbeef-1234-5678-9abc-def012345678",
 		},
@@ -284,7 +282,7 @@ var errNoSessionID = errors.New("session ID not found in pane content")
 // sessionIDRegex matches "Session: <uuid>" in CC /status output.
 // Adjust this regex after verifying actual /status output format (Task 0).
 var sessionIDRegex = regexp.MustCompile(
-	`Session:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`,
+	`Session ID:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`,
 )
 
 // ExtractSessionID parses CC /status output to find the session UUID.
@@ -733,7 +731,7 @@ if status == detect.StatusNormal || status == detect.StatusNotInCC {
 在 `newHandoffTestServer` 中修改：
 ```go
 fakeTmux.SetPaneCommand("test-session", "claude")  // CC running
-fakeTmux.SetPaneContent("test-session", "Session: deadbeef-1234-5678-9abc-def012345678\n❯ ")  // /status 輸出 + idle prompt
+fakeTmux.SetPaneContent("test-session", "  Session ID: deadbeef-1234-5678-9abc-def012345678\n❯ ")  // /status 輸出 + idle prompt
 ```
 
 這讓 detector 偵測為 `cc-idle`，且 `ExtractSessionID` 能解析 session ID。
