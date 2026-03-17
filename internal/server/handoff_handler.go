@@ -260,8 +260,8 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 		os.Remove(tokenFile)
 	})
 
-	relayCmd := fmt.Sprintf("tbox relay --session %s --daemon ws://127.0.0.1:%d --token-file %s -- %s --resume %s",
-		sess.Name, port, tokenFile, command, sessionID)
+	relayCmd := fmt.Sprintf("tbox relay --session %s --daemon ws://%s:%d --token-file %s -- %s --resume %s",
+		sess.Name, bind, port, tokenFile, command, sessionID)
 	if err := s.tmux.SendKeys(sess.Name, relayCmd); err != nil {
 		os.Remove(tokenFile)
 		broadcast("failed:send-keys error: " + err.Error())
