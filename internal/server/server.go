@@ -17,24 +17,26 @@ import (
 )
 
 type Server struct {
-	cfg      config.Config
-	store    *store.Store
-	tmux     tmux.Executor
-	bridge   *bridge.Bridge
-	events   *EventsBroadcaster
-	detector *detect.Detector
-	mux      *http.ServeMux
+	cfg          config.Config
+	store        *store.Store
+	tmux         tmux.Executor
+	bridge       *bridge.Bridge
+	events       *EventsBroadcaster
+	detector     *detect.Detector
+	handoffLocks *handoffLocks
+	mux          *http.ServeMux
 }
 
 func New(cfg config.Config, st *store.Store, tx tmux.Executor) *Server {
 	s := &Server{
-		cfg:      cfg,
-		store:    st,
-		tmux:     tx,
-		bridge:   bridge.New(),
-		events:   NewEventsBroadcaster(),
-		detector: detect.New(tx, cfg.Detect.CCCommands),
-		mux:      http.NewServeMux(),
+		cfg:          cfg,
+		store:        st,
+		tmux:         tx,
+		bridge:       bridge.New(),
+		events:       NewEventsBroadcaster(),
+		detector:     detect.New(tx, cfg.Detect.CCCommands),
+		handoffLocks: newHandoffLocks(),
+		mux:          http.NewServeMux(),
 	}
 	s.routes()
 	return s
@@ -46,6 +48,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/sessions", sh.Create)
 	s.mux.HandleFunc("DELETE /api/sessions/{id}", sh.Delete)
 	s.mux.HandleFunc("POST /api/sessions/{id}/mode", sh.SwitchMode)
+	s.mux.HandleFunc("POST /api/sessions/{id}/handoff", s.handleHandoff)
 	s.mux.HandleFunc("/ws/terminal/{session}", s.handleTerminal)
 	s.mux.HandleFunc("/ws/cli-bridge/{session}", s.handleCliBridge)
 	s.mux.HandleFunc("/ws/cli-bridge-sub/{session}", s.handleCliBridgeSubscribe)
