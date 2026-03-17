@@ -175,11 +175,67 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 		return
 	}
 
-	// Step 3: Kill CC process with Ctrl+C
-	// Clear any pending input first, then send Ctrl+C repeatedly to exit.
-	// Ctrl+C preserves the session state so --continue can resume it.
-	broadcast("stopping-cc")
-	s.tmux.SendKeysRaw(sess.Name, "C-u")
+	// Step 3: If CC is busy (not idle), interrupt to idle
+	if status != detect.StatusCCIdle {
+		broadcast("stopping-cc")
+		if err := s.tmux.SendKeysRaw(sess.Name, "C-u"); err != nil {
+			broadcast("failed:send C-u: " + err.Error())
+			return
+		}
+		if err := s.tmux.SendKeysRaw(sess.Name, "C-c"); err != nil {
+			broadcast("failed:send C-c: " + err.Error())
+			return
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			time.Sleep(500 * time.Millisecond)
+			st := s.detector.Detect(sess.Name)
+			if st == detect.StatusCCIdle {
+				break
+			}
+		}
+		if s.detector.Detect(sess.Name) != detect.StatusCCIdle {
+			broadcast("failed:could not reach CC idle")
+			return
+		}
+	}
+
+	// Step 4: Extract session ID via /status
+	// Send /status then rapidly capture full pane content. The /status dialog
+	// may auto-dismiss quickly, so retry capture several times.
+	broadcast("extracting-id")
+	if err := s.tmux.SendKeys(sess.Name, "/status"); err != nil {
+		broadcast("failed:send /status: " + err.Error())
+		return
+	}
+	var sessionID string
+	for attempt := 0; attempt < 6; attempt++ {
+		time.Sleep(500 * time.Millisecond)
+		paneContent, err := s.tmux.CapturePaneContent(sess.Name, 200)
+		if err != nil {
+			continue
+		}
+		id, err := detect.ExtractSessionID(paneContent)
+		if err == nil {
+			sessionID = id
+			break
+		}
+	}
+	if sessionID == "" {
+		broadcast("failed:could not extract session ID")
+		return
+	}
+
+	// Step 5: Kill CC process — Escape dismisses /status dialog, then Ctrl+C to terminate.
+	// IMPORTANT: Do NOT use /exit — it properly ends the session, making --resume unable
+	// to continue the conversation. Ctrl+C kills the process but preserves session state.
+	broadcast("exiting-cc")
+	if err := s.tmux.SendKeysRaw(sess.Name, "Escape"); err != nil {
+		broadcast("failed:send Escape: " + err.Error())
+		return
+	}
+	time.Sleep(500 * time.Millisecond)
+	// Send Ctrl+C repeatedly to ensure CC exits (first may just cancel current input)
 	for i := 0; i < 3; i++ {
 		if err := s.tmux.SendKeysRaw(sess.Name, "C-c"); err != nil {
 			broadcast("failed:send C-c: " + err.Error())
@@ -199,9 +255,7 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 		return
 	}
 
-	// Step 4: Launch tbox relay with --continue
-	// Uses --continue to resume the most recent session in this directory.
-	// Since we just killed CC, it IS the most recent session.
+	// Step 6: Launch tbox relay with --resume
 	broadcast("launching")
 	tokenFile := filepath.Join(os.TempDir(), fmt.Sprintf("tbox-token-%s", handoffID))
 	if err := os.WriteFile(tokenFile, []byte(token), 0600); err != nil {
@@ -212,8 +266,8 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 		os.Remove(tokenFile)
 	})
 
-	relayCmd := fmt.Sprintf("tbox relay --session %s --daemon ws://%s:%d --token-file %s -- %s --continue",
-		sess.Name, bind, port, tokenFile, command)
+	relayCmd := fmt.Sprintf("tbox relay --session %s --daemon ws://%s:%d --token-file %s -- %s --resume %s",
+		sess.Name, bind, port, tokenFile, command, sessionID)
 	if err := s.tmux.SendKeys(sess.Name, relayCmd); err != nil {
 		os.Remove(tokenFile)
 		broadcast("failed:send-keys error: " + err.Error())
@@ -234,8 +288,9 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 		return
 	}
 
-	// Step 6: Update DB and broadcast success
-	if err := s.store.UpdateSession(sess.ID, store.SessionUpdate{Mode: &mode}); err != nil {
+	// Step 8: Update DB (mode + cc_session_id together) and broadcast success
+	ccID := sessionID
+	if err := s.store.UpdateSession(sess.ID, store.SessionUpdate{Mode: &mode, CCSessionID: &ccID}); err != nil {
 		broadcast("failed:db update: " + err.Error())
 		return
 	}
@@ -251,7 +306,19 @@ func (s *Server) runHandoffToTerm(sess store.Session, handoffID string) {
 		s.events.Broadcast(sess.Name, "handoff", value)
 	}
 
-	// Step 1: Shut down relay
+	// Step 1: Get session ID from DB
+	current, err := s.store.GetSession(sess.ID)
+	if err != nil {
+		broadcast("failed:db lookup error: " + err.Error())
+		return
+	}
+	if current.CCSessionID == "" {
+		broadcast("failed:no CC session ID stored")
+		return
+	}
+	sessionID := current.CCSessionID
+
+	// Step 2: Shut down relay
 	if s.bridge.HasRelay(sess.Name) {
 		broadcast("stopping-relay")
 		s.bridge.SubscriberToRelay(sess.Name, []byte(`{"type":"shutdown"}`))
@@ -282,15 +349,15 @@ func (s *Server) runHandoffToTerm(sess store.Session, handoffID string) {
 		return
 	}
 
-	// Step 3: Launch interactive CC with --continue
+	// Step 4: Launch interactive CC with --resume
 	broadcast("launching-cc")
-	resumeCmd := "claude --continue"
+	resumeCmd := fmt.Sprintf("claude --resume %s", sessionID)
 	if err := s.tmux.SendKeys(sess.Name, resumeCmd); err != nil {
 		broadcast("failed:send-keys error: " + err.Error())
 		return
 	}
 
-	// Step 4: Verify CC started
+	// Step 5: Verify CC started
 	ccDeadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(ccDeadline) {
 		st := s.detector.Detect(sess.Name)
@@ -305,10 +372,12 @@ func (s *Server) runHandoffToTerm(sess store.Session, handoffID string) {
 		return
 	}
 
-	// Step 5: Update DB
+	// Step 6: Update DB (mode=term, clear cc_session_id)
 	termMode := "term"
+	emptyID := ""
 	if err := s.store.UpdateSession(sess.ID, store.SessionUpdate{
-		Mode: &termMode,
+		Mode:        &termMode,
+		CCSessionID: &emptyID,
 	}); err != nil {
 		broadcast("failed:db update error: " + err.Error())
 		return
