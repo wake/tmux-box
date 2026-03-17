@@ -9,9 +9,17 @@ beforeEach(() => {
 
 describe('AskUserQuestion', () => {
   const defaultProps = {
-    question: 'Which option do you prefer?',
-    options: ['Option A', 'Option B', 'Option C'],
-    multiSelect: false,
+    questions: [
+      {
+        question: 'Which option do you prefer?',
+        options: [
+          { label: 'Option A' },
+          { label: 'Option B' },
+          { label: 'Option C', description: 'The best one' },
+        ],
+        multiSelect: false,
+      },
+    ],
     onSubmit: vi.fn(),
     onCancel: vi.fn(),
   }
@@ -47,9 +55,17 @@ describe('AskUserQuestion', () => {
     const onSubmit = vi.fn()
     render(
       <AskUserQuestion
-        question="Pick multiple"
-        options={['Alpha', 'Beta', 'Gamma']}
-        multiSelect={true}
+        questions={[
+          {
+            question: 'Pick multiple',
+            options: [
+              { label: 'Alpha' },
+              { label: 'Beta' },
+              { label: 'Gamma' },
+            ],
+            multiSelect: true,
+          },
+        ]}
         onSubmit={onSubmit}
         onCancel={vi.fn()}
       />
@@ -58,5 +74,21 @@ describe('AskUserQuestion', () => {
     fireEvent.click(screen.getByText('Gamma'))
     fireEvent.click(screen.getByTestId('submit-btn'))
     expect(onSubmit).toHaveBeenCalledWith('Alpha, Gamma')
+  })
+
+  it('renders option descriptions when provided', () => {
+    render(<AskUserQuestion {...defaultProps} />)
+    expect(screen.getByText(/The best one/)).toBeInTheDocument()
+  })
+
+  it('renders fallback for empty questions array', () => {
+    render(
+      <AskUserQuestion
+        questions={[]}
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+      />
+    )
+    expect(screen.getByText('Please answer:')).toBeInTheDocument()
   })
 })

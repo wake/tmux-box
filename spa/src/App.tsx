@@ -4,6 +4,7 @@ import TerminalView from './components/TerminalView'
 import ConversationView from './components/ConversationView'
 import TopBar from './components/TopBar'
 import { useSessionStore } from './stores/useSessionStore'
+import { useStreamStore } from './stores/useStreamStore'
 import { switchMode } from './lib/api'
 
 // TODO: daemonBase should come from host management (localStorage)
@@ -12,6 +13,7 @@ const wsBase = daemonBase.replace(/^http/, 'ws')
 
 export default function App() {
   const { sessions, activeId, fetch } = useSessionStore()
+  const conn = useStreamStore((s) => s.conn)
   const active = sessions.find((s) => s.id === activeId)
 
   useEffect(() => {
@@ -30,8 +32,8 @@ export default function App() {
   }, [active, fetch])
 
   const handleInterrupt = useCallback(() => {
-    ;(window as any).__streamConn?.interrupt()
-  }, [])
+    conn?.interrupt()
+  }, [conn])
 
   return (
     <div className="h-screen bg-gray-950 text-gray-200 flex">
