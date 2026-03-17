@@ -8,7 +8,7 @@ beforeEach(() => {
 })
 
 describe('PermissionPrompt', () => {
-  it('shows tool name and description', () => {
+  it('shows tool name and description in horizontal layout', () => {
     render(
       <PermissionPrompt
         tool="Bash"
@@ -19,6 +19,9 @@ describe('PermissionPrompt', () => {
     )
     expect(screen.getByText('Bash')).toBeInTheDocument()
     expect(screen.getByText('Run shell commands')).toBeInTheDocument()
+    // Horizontal layout: tool name and buttons should be in the same flex row
+    const container = screen.getByText('Bash').closest('[class*="flex items-center gap-3"]')
+    expect(container).toBeInTheDocument()
   })
 
   it('calls onAllow when Allow is clicked', () => {
@@ -31,7 +34,7 @@ describe('PermissionPrompt', () => {
         onDeny={vi.fn()}
       />
     )
-    fireEvent.click(screen.getByTestId('allow-btn'))
+    fireEvent.click(screen.getByRole('button', { name: 'Allow' }))
     expect(onAllow).toHaveBeenCalledOnce()
   })
 
@@ -45,11 +48,11 @@ describe('PermissionPrompt', () => {
         onDeny={onDeny}
       />
     )
-    fireEvent.click(screen.getByTestId('deny-btn'))
+    fireEvent.click(screen.getByRole('button', { name: 'Deny' }))
     expect(onDeny).toHaveBeenCalledOnce()
   })
 
-  it('shows ShieldWarning icon', () => {
+  it('shows WarningCircle icon', () => {
     render(
       <PermissionPrompt
         tool="Read"
@@ -58,6 +61,21 @@ describe('PermissionPrompt', () => {
         onDeny={vi.fn()}
       />
     )
-    expect(screen.getByTestId('shield-icon')).toBeInTheDocument()
+    expect(screen.getByTestId('warning-icon')).toBeInTheDocument()
+  })
+
+  it('renders Allow and Deny buttons side by side', () => {
+    render(
+      <PermissionPrompt
+        tool="Bash"
+        description="Run shell commands"
+        onAllow={vi.fn()}
+        onDeny={vi.fn()}
+      />
+    )
+    const allowBtn = screen.getByRole('button', { name: 'Allow' })
+    const denyBtn = screen.getByRole('button', { name: 'Deny' })
+    // Both buttons should share the same parent flex container
+    expect(allowBtn.parentElement).toBe(denyBtn.parentElement)
   })
 })

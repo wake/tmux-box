@@ -1,6 +1,8 @@
 // spa/src/components/SessionPanel.tsx
 import { useSessionStore } from '../stores/useSessionStore'
+import { useStreamStore } from '../stores/useStreamStore'
 import { Terminal, Lightning, CircleDashed, GearSix } from '@phosphor-icons/react'
+import SessionStatusBadge, { type SessionStatus } from './SessionStatusBadge'
 
 function SessionIcon({ mode, id }: { mode: string; id: number }) {
   const props = { size: 16, 'data-testid': `session-icon-${id}` }
@@ -11,8 +13,34 @@ function SessionIcon({ mode, id }: { mode: string; id: number }) {
   }
 }
 
-export default function SessionPanel() {
+/** Derive a simple status from session mode (fallback when session-events WS has not reported) */
+function deriveStatus(mode: string): SessionStatus {
+  switch (mode) {
+    case 'stream': return 'cc-running'
+    case 'jsonl': return 'cc-running'
+    default: return 'not-in-cc'
+  }
+}
+
+/** Map raw session-events status string to SessionStatus type */
+function mapStatus(raw: string): SessionStatus {
+  switch (raw) {
+    case 'cc-idle': return 'cc-idle'
+    case 'cc-running': return 'cc-running'
+    case 'cc-waiting': return 'cc-waiting'
+    case 'cc-unread': return 'cc-unread'
+    case 'not-in-cc': return 'not-in-cc'
+    default: return 'normal'
+  }
+}
+
+interface Props {
+  onSettingsOpen?: () => void
+}
+
+export default function SessionPanel({ onSettingsOpen }: Props) {
   const { sessions, activeId, setActive } = useSessionStore()
+  const sessionStatus = useStreamStore((s) => s.sessionStatus)
 
   return (
     <div className="w-56 bg-gray-900 border-r border-gray-800 flex flex-col">
@@ -20,24 +48,34 @@ export default function SessionPanel() {
         <h2 className="text-xs uppercase text-gray-400 mb-3">Sessions</h2>
         <div className="space-y-1">
           {sessions.length === 0 && <p className="text-sm text-gray-500">No sessions</p>}
-          {sessions.map((s) => (
-            <button
-              key={s.id}
-              onClick={() => setActive(s.id)}
-              className={`w-full text-left px-2 py-1.5 rounded text-sm cursor-pointer flex items-center gap-2 ${
-                activeId === s.id ? 'bg-gray-800 text-gray-100' : 'text-gray-400 hover:bg-gray-800/50'
-              }`}
-            >
-              <SessionIcon mode={s.mode} id={s.id} />
-              <span className="flex-1 truncate">{s.name}</span>
-              <span className="text-xs text-gray-500">{s.mode}</span>
-            </button>
-          ))}
+          {sessions.map((s) => {
+            const status = sessionStatus[s.name]
+              ? mapStatus(sessionStatus[s.name])
+              : deriveStatus(s.mode)
+            return (
+              <button
+                key={s.id}
+                onClick={() => setActive(s.id)}
+                className={`w-full text-left px-2 py-1.5 rounded text-sm cursor-pointer flex items-center gap-2 ${
+                  activeId === s.id ? 'bg-gray-800 text-gray-100' : 'text-gray-400 hover:bg-gray-800/50'
+                }`}
+              >
+                <SessionIcon mode={s.mode} id={s.id} />
+                <SessionStatusBadge status={status} />
+                <span className="flex-1 truncate">{s.name}</span>
+                <span className="text-xs text-gray-500">{s.mode}</span>
+              </button>
+            )
+          })}
         </div>
       </div>
       {/* Settings button — fixed at bottom */}
       <div className="p-3 border-t border-gray-800">
-        <button className="flex items-center gap-2 text-gray-400 hover:text-gray-300 text-sm cursor-pointer w-full">
+        <button
+          data-testid="settings-btn"
+          onClick={onSettingsOpen}
+          className="flex items-center gap-2 text-gray-400 hover:text-gray-300 text-sm cursor-pointer w-full"
+        >
           <GearSix size={16} />
           <span>Settings</span>
         </button>

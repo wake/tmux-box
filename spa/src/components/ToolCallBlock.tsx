@@ -18,19 +18,19 @@ interface Props {
 function getToolIcon(tool: string) {
   switch (tool) {
     case 'Bash':
-      return <Terminal size={14} className="text-yellow-400" />
+      return <Terminal size={14} className="text-amber-300" />
     case 'Read':
     case 'Write':
-      return <File size={14} className="text-blue-400" />
+      return <File size={14} className="text-sky-300" />
     case 'Edit':
-      return <PencilSimple size={14} className="text-green-400" />
+      return <PencilSimple size={14} className="text-emerald-300" />
     case 'WebFetch':
-      return <Globe size={14} className="text-purple-400" />
+      return <Globe size={14} className="text-violet-300" />
     case 'Grep':
     case 'Glob':
-      return <MagnifyingGlass size={14} className="text-gray-400" />
+      return <MagnifyingGlass size={14} className="text-gray-300" />
     default:
-      return <Terminal size={14} className="text-gray-400" />
+      return <Terminal size={14} className="text-gray-300" />
   }
 }
 
@@ -58,22 +58,22 @@ export default function ToolCallBlock({ tool, input }: Props) {
   const summary = getSummary(tool, input)
 
   return (
-    <div className="rounded-lg border border-gray-700 bg-gray-900 text-sm my-1 overflow-hidden">
+    <div className="rounded-lg border border-[#404040] bg-[#1e1e1e] text-sm my-1 overflow-hidden">
       {/* Header */}
       <button
         data-testid="tool-header"
-        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-800 cursor-pointer text-left"
+        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-[#2a2a2a] cursor-pointer text-left"
         onClick={() => setExpanded(v => !v)}
       >
         {expanded ? (
-          <CaretDown size={12} className="text-gray-500 flex-shrink-0" />
+          <CaretDown size={12} className="text-gray-400 flex-shrink-0" />
         ) : (
-          <CaretRight size={12} className="text-gray-500 flex-shrink-0" />
+          <CaretRight size={12} className="text-gray-400 flex-shrink-0" />
         )}
         {getToolIcon(tool)}
-        <span className="text-gray-300 font-medium">{tool}</span>
+        <span className="text-[#e0e0e0] font-medium">{tool}</span>
         {summary && (
-          <span className="text-gray-500 truncate flex-1 min-w-0">{summary}</span>
+          <span className="text-[#888] truncate flex-1 min-w-0">{summary}</span>
         )}
       </button>
 
@@ -81,9 +81,9 @@ export default function ToolCallBlock({ tool, input }: Props) {
       {expanded && (
         <div
           data-testid="tool-detail"
-          className="border-t border-gray-700 px-3 py-2 bg-gray-950"
+          className="border-t border-[#404040] px-3 py-2 bg-[#161616]"
         >
-          <pre className="text-xs text-gray-300 whitespace-pre-wrap break-all overflow-auto max-h-60">
+          <pre className="text-xs text-[#ccc] whitespace-pre-wrap break-all overflow-auto max-h-60">
             {JSON.stringify(input, null, 2)}
           </pre>
         </div>

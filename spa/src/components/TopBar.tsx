@@ -1,52 +1,144 @@
 // spa/src/components/TopBar.tsx
+import { useState, useEffect } from 'react'
 import { Terminal, Lightning, CircleDashed, Stop } from '@phosphor-icons/react'
+
+interface Preset {
+  name: string
+  command: string
+}
 
 interface Props {
   sessionName: string
   mode: string
+  streamPresets: Preset[]
+  jsonlPresets: Preset[]
+  activePreset?: string
   onModeChange: (mode: string) => void
+  onHandoff: (mode: string, preset: string) => void
   onInterrupt: () => void
 }
 
-const modes = [
-  { id: 'term', label: 'term', Icon: Terminal },
-  { id: 'jsonl', label: 'jsonl', Icon: CircleDashed },
-  { id: 'stream', label: 'stream', Icon: Lightning },
-]
+export default function TopBar({ sessionName, mode, streamPresets, jsonlPresets, activePreset, onModeChange, onHandoff, onInterrupt }: Props) {
+  const [openDropdown, setOpenDropdown] = useState<string | null>(null)
 
-export default function TopBar({ sessionName, mode, onModeChange, onInterrupt }: Props) {
+  // Click-outside + Escape to close dropdown
+  useEffect(() => {
+    if (!openDropdown) return
+    function handleClick(e: MouseEvent) {
+      if (!(e.target as Element).closest('[data-testid="mode-switch"]')) {
+        setOpenDropdown(null)
+      }
+    }
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpenDropdown(null)
+    }
+    document.addEventListener('mousedown', handleClick)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', handleClick)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [openDropdown])
+
+  function handleModeClick(m: string, presets: Preset[]) {
+    if (m === 'term') {
+      onModeChange('term')
+      setOpenDropdown(null)
+      return
+    }
+    // If only one preset, handoff directly
+    if (presets.length <= 1) {
+      onHandoff(m, presets[0]?.name || 'cc')
+      setOpenDropdown(null)
+      return
+    }
+    // Toggle dropdown
+    setOpenDropdown(openDropdown === m ? null : m)
+  }
+
+  function handlePresetClick(m: string, presetName: string) {
+    onHandoff(m, presetName)
+    setOpenDropdown(null)
+  }
+
   return (
-    <div className="h-10 bg-gray-800/80 border-b border-gray-700 flex items-center px-3 gap-3">
-      <span className="text-sm text-gray-200 font-medium truncate">{sessionName}</span>
-
+    <div className="h-10 bg-[#242424] border-b border-[#404040] flex items-center px-3 gap-3 relative">
+      <span className="text-sm text-[#e5e5e5] font-medium truncate">{sessionName}</span>
       <div className="flex-1" />
 
-      {/* Mode buttons */}
+      {/* Mode buttons: term → stream → jsonl */}
       <div className="flex items-center gap-1" data-testid="mode-switch">
-        {modes.map(({ id, label, Icon }) => (
+        {/* Term — simple button */}
+        <button
+          onClick={() => handleModeClick('term', [])}
+          data-testid="mode-btn-term"
+          className={`flex items-center gap-1 px-2 py-1 rounded text-xs cursor-pointer transition-colors ${
+            mode === 'term' ? 'bg-[#404040] text-[#f0f0f0]' : 'text-[#888] hover:text-[#ccc] hover:bg-[#333]'
+          }`}
+        >
+          <Terminal size={14} weight={mode === 'term' ? 'fill' : 'regular'} />
+          <span>term</span>
+        </button>
+
+        {/* Stream — with dropdown */}
+        <div className="relative">
           <button
-            key={id}
-            onClick={() => onModeChange(id)}
-            data-testid={`mode-btn-${id}`}
+            onClick={() => handleModeClick('stream', streamPresets)}
+            data-testid="mode-btn-stream"
             className={`flex items-center gap-1 px-2 py-1 rounded text-xs cursor-pointer transition-colors ${
-              mode === id
-                ? 'bg-gray-700 text-gray-100'
-                : 'text-gray-500 hover:text-gray-300 hover:bg-gray-700/50'
+              mode === 'stream' ? 'bg-[#404040] text-[#f0f0f0]' : 'text-[#888] hover:text-[#ccc] hover:bg-[#333]'
             }`}
           >
-            <Icon size={14} weight={mode === id ? 'fill' : 'regular'} />
-            <span>{label}</span>
+            <Lightning size={14} weight={mode === 'stream' ? 'fill' : 'regular'} />
+            <span>stream</span>
+            {streamPresets.length > 1 && <span className="text-[10px]">&#9662;</span>}
           </button>
-        ))}
+          {openDropdown === 'stream' && (
+            <div data-testid="dropdown-stream" className="absolute top-full right-0 mt-1 bg-[#2a2a2a] border border-[#404040] rounded-lg py-1 min-w-[140px] z-10 shadow-lg">
+              {streamPresets.map(p => (
+                <button key={p.name} onClick={() => handlePresetClick('stream', p.name)}
+                  className={`block w-full text-left px-3 py-1.5 text-xs ${
+                    p.name === activePreset ? 'bg-[#404040] text-white' : 'text-[#ddd] hover:bg-[#404040]'
+                  }`}>
+                  {p.name}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* JSONL — with dropdown */}
+        <div className="relative">
+          <button
+            onClick={() => handleModeClick('jsonl', jsonlPresets)}
+            data-testid="mode-btn-jsonl"
+            className={`flex items-center gap-1 px-2 py-1 rounded text-xs cursor-pointer transition-colors ${
+              mode === 'jsonl' ? 'bg-[#404040] text-[#f0f0f0]' : 'text-[#888] hover:text-[#ccc] hover:bg-[#333]'
+            }`}
+          >
+            <CircleDashed size={14} weight={mode === 'jsonl' ? 'fill' : 'regular'} />
+            <span>jsonl</span>
+            {jsonlPresets.length > 1 && <span className="text-[10px]">&#9662;</span>}
+          </button>
+          {openDropdown === 'jsonl' && (
+            <div data-testid="dropdown-jsonl" className="absolute top-full right-0 mt-1 bg-[#2a2a2a] border border-[#404040] rounded-lg py-1 min-w-[140px] z-10 shadow-lg">
+              {jsonlPresets.map(p => (
+                <button key={p.name} onClick={() => handlePresetClick('jsonl', p.name)}
+                  className={`block w-full text-left px-3 py-1.5 text-xs ${
+                    p.name === activePreset ? 'bg-[#404040] text-white' : 'text-[#ddd] hover:bg-[#404040]'
+                  }`}>
+                  {p.name}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* Interrupt — stream mode only */}
-      {mode === 'stream' && (
-        <button
-          data-testid="interrupt-btn"
-          onClick={onInterrupt}
-          className="flex items-center gap-1 px-2 py-1 rounded text-xs cursor-pointer text-red-400 hover:bg-gray-700"
-        >
+      {/* Interrupt — stream/jsonl mode only */}
+      {(mode === 'stream' || mode === 'jsonl') && (
+        <button data-testid="interrupt-btn" onClick={onInterrupt}
+          className="flex items-center gap-1 px-2 py-1 rounded text-xs cursor-pointer text-red-400 hover:bg-[#333]">
           <Stop size={14} weight="fill" />
           <span>Stop</span>
         </button>

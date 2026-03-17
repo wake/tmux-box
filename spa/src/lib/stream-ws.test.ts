@@ -1,6 +1,6 @@
 // spa/src/lib/stream-ws.test.ts
-import { describe, it, expect, vi } from 'vitest'
-import { parseStreamMessage, type StreamMessage } from './stream-ws'
+import { describe, it, expect } from 'vitest'
+import { parseStreamMessage, type AssistantMessage } from './stream-ws'
 
 describe('parseStreamMessage', () => {
   it('parses assistant text message', () => {
@@ -15,7 +15,8 @@ describe('parseStreamMessage', () => {
     const msg = parseStreamMessage(raw)
     expect(msg?.type).toBe('assistant')
     if (msg?.type === 'assistant') {
-      expect(msg.message.content[0]).toEqual({ type: 'text', text: 'Hello world' })
+      const am = msg as AssistantMessage
+      expect(am.message.content[0]).toEqual({ type: 'text', text: 'Hello world' })
     }
   })
 

@@ -1,9 +1,12 @@
 // spa/src/components/ConversationView.tsx
-import { useEffect, useRef, useCallback } from 'react'
+import { useEffect, useRef, useCallback, useState } from 'react'
 import { useStreamStore } from '../stores/useStreamStore'
 import {
   connectStream,
   type StreamMessage,
+  type AssistantMessage,
+  type UserMessage,
+  type SystemMessage,
   type ControlRequest,
 } from '../lib/stream-ws'
 import MessageBubble from './MessageBubble'
@@ -11,19 +14,30 @@ import ToolCallBlock from './ToolCallBlock'
 import PermissionPrompt from './PermissionPrompt'
 import AskUserQuestion from './AskUserQuestion'
 import StreamInput from './StreamInput'
+import ThinkingIndicator from './ThinkingIndicator'
+import FileAttachment, { type AttachedFile } from './FileAttachment'
+import HandoffButton from './HandoffButton'
 
 interface Props {
   wsUrl: string
   sessionName: string
+  presetName: string
+  onHandoff?: () => void
 }
 
-export default function ConversationView({ wsUrl }: Props) {
+export default function ConversationView({ wsUrl, presetName, onHandoff }: Props) {
   const connRef = useRef<ReturnType<typeof connectStream> | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([])
+  const [isDragging, setIsDragging] = useState(false)
+  const dragCounter = useRef(0)
   const {
     messages,
     pendingControlRequests,
     isStreaming,
+    handoffState,
+    handoffProgress,
     addMessage,
     addControlRequest,
     resolveControlRequest,
@@ -31,8 +45,13 @@ export default function ConversationView({ wsUrl }: Props) {
     setSessionInfo,
     addCost,
     setConn,
+    setHandoffState,
     clear,
   } = useStreamStore()
+
+  // ThinkingIndicator: visible when streaming and no assistant messages yet
+  const hasAssistantMessage = messages.some((m) => m.type === 'assistant')
+  const showThinking = isStreaming && !hasAssistantMessage
 
   useEffect(() => {
     clear()
@@ -40,11 +59,12 @@ export default function ConversationView({ wsUrl }: Props) {
     const conn = connectStream(
       wsUrl,
       (msg) => {
-        if (msg.type === 'system' && 'subtype' in msg && msg.subtype === 'init') {
-          setSessionInfo(
-            (msg as Record<string, unknown>).session_id as string,
-            (msg as Record<string, unknown>).model as string,
-          )
+        if (msg.type === 'system') {
+          const sys = msg as SystemMessage
+          if (sys.subtype === 'init') {
+            setSessionInfo(sys.session_id ?? '', sys.model ?? '')
+            setHandoffState('connected')
+          }
           return
         }
         if (msg.type === 'control_request') {
@@ -52,7 +72,7 @@ export default function ConversationView({ wsUrl }: Props) {
           return
         }
         if (msg.type === 'result' && 'total_cost_usd' in msg) {
-          addCost(((msg as Record<string, unknown>).total_cost_usd as number) || 0)
+          addCost((msg as { total_cost_usd?: number }).total_cost_usd || 0)
           setStreaming(false)
           return
         }
@@ -60,7 +80,10 @@ export default function ConversationView({ wsUrl }: Props) {
           addMessage(msg)
         }
       },
-      () => setStreaming(false),
+      () => {
+        setStreaming(false)
+        setHandoffState('disconnected')
+      },
       // onOpen: intentionally no-op — isStreaming is set in handleSend
     )
     connRef.current = conn
@@ -95,6 +118,8 @@ export default function ConversationView({ wsUrl }: Props) {
       },
     } as StreamMessage)
     setStreaming(true)
+    // Clear attached files after send
+    setAttachedFiles([])
   }, [addMessage, setStreaming])
 
   const handleAllow = useCallback((req: ControlRequest) => {
@@ -129,8 +154,115 @@ export default function ConversationView({ wsUrl }: Props) {
     resolveControlRequest(req.request_id)
   }, [resolveControlRequest])
 
+  const handleRemoveFile = useCallback((index: number) => {
+    setAttachedFiles((prev) => prev.filter((_, i) => i !== index))
+  }, [])
+
+  // File attachment helpers
+  function processFiles(files: FileList | File[]) {
+    Array.from(files).forEach((file) => {
+      if (file.type.startsWith('image/')) {
+        const reader = new FileReader()
+        reader.onload = (ev) => {
+          setAttachedFiles((prev) => [...prev, {
+            name: file.name,
+            type: file.type,
+            url: (ev.target?.result as string) || '',
+          }])
+        }
+        reader.readAsDataURL(file)
+      } else {
+        setAttachedFiles((prev) => [...prev, { name: file.name, type: file.type, url: '' }])
+      }
+    })
+  }
+
+  function handleAttach() {
+    fileInputRef.current?.click()
+  }
+
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    if (e.target.files) {
+      processFiles(e.target.files)
+    }
+    e.target.value = '' // reset for re-select
+  }
+
+  // Drag-drop handlers
+  function handleDragEnter(e: React.DragEvent) {
+    e.preventDefault()
+    dragCounter.current++
+    setIsDragging(true)
+  }
+
+  function handleDragOver(e: React.DragEvent) {
+    e.preventDefault()
+  }
+
+  function handleDragLeave(e: React.DragEvent) {
+    e.preventDefault()
+    dragCounter.current--
+    if (dragCounter.current <= 0) {
+      setIsDragging(false)
+      dragCounter.current = 0
+    }
+  }
+
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault()
+    setIsDragging(false)
+    dragCounter.current = 0
+    if (e.dataTransfer.files.length > 0) {
+      processFiles(e.dataTransfer.files)
+    }
+  }
+
+  const handleHandoff = useCallback(() => {
+    if (onHandoff) {
+      onHandoff()
+    } else {
+      setHandoffState('handoff-in-progress')
+    }
+  }, [onHandoff, setHandoffState])
+
+  // When handoffState is not 'connected', show the HandoffButton overlay
+  if (handoffState !== 'connected') {
+    return (
+      <div className="flex flex-col h-full">
+        <HandoffButton
+          presetName={presetName || 'session'}
+          state={handoffState}
+          progress={handoffProgress}
+          onHandoff={handleHandoff}
+        />
+      </div>
+    )
+  }
+
   return (
-    <div className="flex flex-col h-full">
+    <div
+      className="flex flex-col h-full relative"
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {/* Drag overlay */}
+      {isDragging && (
+        <div className="absolute inset-0 bg-blue-500/10 border-2 border-dashed border-blue-400 z-20 flex items-center justify-center pointer-events-none">
+          <span className="text-blue-400 font-medium">Drop files here</span>
+        </div>
+      )}
+
+      {/* Hidden file input */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={handleFileChange}
+      />
+
       {/* Messages area */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.length === 0 && !isStreaming && (
@@ -141,7 +273,8 @@ export default function ConversationView({ wsUrl }: Props) {
         {messages.map((msg, i) => {
           const key = `${wsUrl}-${i}`
           if (msg.type === 'assistant' && 'message' in msg) {
-            const content = msg.message.content
+            const am = msg as AssistantMessage
+            const content = am.message.content
             return (
               <div key={key}>
                 {content.map((block, j) => {
@@ -159,15 +292,19 @@ export default function ConversationView({ wsUrl }: Props) {
             )
           }
           if (msg.type === 'user' && 'message' in msg) {
-            const textBlock = msg.message.content.find(
-              (b: { type: string }) => b.type === 'text',
+            const um = msg as UserMessage
+            const textBlock = um.message.content.find(
+              (b) => b.type === 'text',
             )
-            if (textBlock && 'text' in textBlock) {
-              return <MessageBubble key={key} role="user" content={textBlock.text as string} />
+            if (textBlock && textBlock.text) {
+              return <MessageBubble key={key} role="user" content={textBlock.text} />
             }
           }
           return null
         })}
+
+        {/* Thinking indicator */}
+        <ThinkingIndicator visible={showThinking} />
 
         {/* Pending control requests */}
         {pendingControlRequests.map((req) => {
@@ -204,8 +341,11 @@ export default function ConversationView({ wsUrl }: Props) {
         })}
       </div>
 
+      {/* File attachments */}
+      <FileAttachment files={attachedFiles} onRemove={handleRemoveFile} />
+
       {/* Input area */}
-      <StreamInput onSend={handleSend} disabled={isStreaming} />
+      <StreamInput onSend={handleSend} onAttach={handleAttach} disabled={isStreaming} />
     </div>
   )
 }

@@ -1,7 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render } from '@testing-library/react'
 import TerminalView from './TerminalView'
-import { connectTerminal } from '../lib/ws'
 
 const { mockClose } = vi.hoisted(() => ({ mockClose: vi.fn() }))
 

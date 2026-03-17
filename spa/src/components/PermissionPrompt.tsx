@@ -1,5 +1,5 @@
 // spa/src/components/PermissionPrompt.tsx
-import { ShieldWarning } from '@phosphor-icons/react'
+import { WarningCircle } from '@phosphor-icons/react'
 
 interface Props {
   tool: string
@@ -10,40 +10,31 @@ interface Props {
 
 export default function PermissionPrompt({ tool, description, onAllow, onDeny }: Props) {
   return (
-    <div className="rounded-xl border border-yellow-600/40 bg-yellow-950/30 px-4 py-3 mx-4 my-2">
-      <div className="flex items-start gap-3">
-        {/* Icon */}
-        <ShieldWarning
-          size={20}
-          weight="fill"
-          className="text-yellow-400 flex-shrink-0 mt-0.5"
-          data-testid="shield-icon"
-        />
-
-        {/* Body */}
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-semibold text-yellow-200 mb-0.5">
-            Permission required: <span className="font-mono">{tool}</span>
-          </p>
-          <p className="text-sm text-yellow-300/80">{description}</p>
+    <div className="flex items-center gap-3 rounded-lg border border-yellow-800/60 bg-yellow-950/30 px-3 py-2.5 my-1">
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-1.5">
+          <WarningCircle
+            size={16}
+            weight="fill"
+            className="text-yellow-400 flex-shrink-0"
+            data-testid="warning-icon"
+          />
+          <span className="text-sm font-medium text-yellow-300">{tool}</span>
         </div>
+        <p className="text-xs text-gray-400 font-mono truncate mt-0.5">{description}</p>
       </div>
-
-      {/* Buttons */}
-      <div className="flex gap-2 mt-3 justify-end">
+      <div className="flex gap-2 flex-shrink-0">
         <button
-          data-testid="deny-btn"
-          onClick={onDeny}
-          className="px-3 py-1.5 rounded-md text-sm font-medium bg-gray-800 text-gray-300 hover:bg-gray-700 cursor-pointer"
-        >
-          Deny
-        </button>
-        <button
-          data-testid="allow-btn"
           onClick={onAllow}
-          className="px-3 py-1.5 rounded-md text-sm font-medium bg-yellow-600 text-white hover:bg-yellow-500 cursor-pointer"
+          className="px-3 py-1 rounded-md text-xs font-medium bg-green-900 text-green-400 hover:bg-green-800 cursor-pointer"
         >
           Allow
+        </button>
+        <button
+          onClick={onDeny}
+          className="px-3 py-1 rounded-md text-xs font-medium bg-red-900 text-red-400 hover:bg-red-800 cursor-pointer"
+        >
+          Deny
         </button>
       </div>
     </div>

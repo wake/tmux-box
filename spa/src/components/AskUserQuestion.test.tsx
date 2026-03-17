@@ -36,22 +36,24 @@ describe('AskUserQuestion', () => {
     expect(screen.getByText('Option C')).toBeInTheDocument()
   })
 
-  it('submits selected single option', () => {
+  it('submits selected single option on Enter key', () => {
     const onSubmit = vi.fn()
     render(<AskUserQuestion {...defaultProps} onSubmit={onSubmit} />)
     fireEvent.click(screen.getByText('Option B'))
-    fireEvent.click(screen.getByTestId('submit-btn'))
+    fireEvent.keyDown(screen.getByText('Option B').closest('[data-testid="ask-container"]')!, {
+      key: 'Enter',
+    })
     expect(onSubmit).toHaveBeenCalledWith('Option B')
   })
 
-  it('calls onCancel when cancel is clicked', () => {
+  it('calls onCancel on Escape key', () => {
     const onCancel = vi.fn()
     render(<AskUserQuestion {...defaultProps} onCancel={onCancel} />)
-    fireEvent.click(screen.getByTestId('cancel-btn'))
+    fireEvent.keyDown(screen.getByTestId('ask-container'), { key: 'Escape' })
     expect(onCancel).toHaveBeenCalledOnce()
   })
 
-  it('submits comma-separated labels for multi-select', () => {
+  it('submits comma-separated labels for multi-select on Enter', () => {
     const onSubmit = vi.fn()
     render(
       <AskUserQuestion
@@ -72,7 +74,7 @@ describe('AskUserQuestion', () => {
     )
     fireEvent.click(screen.getByText('Alpha'))
     fireEvent.click(screen.getByText('Gamma'))
-    fireEvent.click(screen.getByTestId('submit-btn'))
+    fireEvent.keyDown(screen.getByTestId('ask-container'), { key: 'Enter' })
     expect(onSubmit).toHaveBeenCalledWith('Alpha, Gamma')
   })
 
@@ -90,5 +92,45 @@ describe('AskUserQuestion', () => {
       />
     )
     expect(screen.getByText('Please answer:')).toBeInTheDocument()
+  })
+
+  it('shows free-text input when no options', () => {
+    render(
+      <AskUserQuestion
+        questions={[{ question: 'What is your name?' }]}
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+      />
+    )
+    expect(screen.getByPlaceholderText('Type your answer…')).toBeInTheDocument()
+  })
+
+  it('submits free-text on Enter', () => {
+    const onSubmit = vi.fn()
+    render(
+      <AskUserQuestion
+        questions={[{ question: 'What is your name?' }]}
+        onSubmit={onSubmit}
+        onCancel={vi.fn()}
+      />
+    )
+    const input = screen.getByPlaceholderText('Type your answer…')
+    fireEvent.change(input, { target: { value: 'Claude' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(onSubmit).toHaveBeenCalledWith('Claude')
+  })
+
+  it('does not submit empty free-text on Enter', () => {
+    const onSubmit = vi.fn()
+    render(
+      <AskUserQuestion
+        questions={[{ question: 'What is your name?' }]}
+        onSubmit={onSubmit}
+        onCancel={vi.fn()}
+      />
+    )
+    const input = screen.getByPlaceholderText('Type your answer…')
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(onSubmit).not.toHaveBeenCalled()
   })
 })
