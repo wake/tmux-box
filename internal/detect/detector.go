@@ -128,11 +128,15 @@ func (d *Detector) detectCCSubState(session string) Status {
 		return StatusCCWaiting
 	}
 
-	// Check for idle prompt (❯).
+	// Check for idle prompt (❯) in the last 5 lines — CC renders a status bar
+	// below the prompt, so ❯ is not necessarily the last line.
 	lines := strings.Split(strings.TrimSpace(content), "\n")
-	if len(lines) > 0 {
-		lastLine := strings.TrimSpace(lines[len(lines)-1])
-		if strings.HasPrefix(lastLine, "❯") {
+	start := len(lines) - 5
+	if start < 0 {
+		start = 0
+	}
+	for _, line := range lines[start:] {
+		if strings.HasPrefix(strings.TrimSpace(line), "❯") {
 			return StatusCCIdle
 		}
 	}

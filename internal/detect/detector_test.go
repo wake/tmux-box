@@ -22,6 +22,7 @@ func TestDetectStatus(t *testing.T) {
 		{"cc running", "claude", "⠋ Reading file...", StatusCCRunning},
 		{"cc waiting permission", "claude", "Allow  Deny", StatusCCWaiting},
 		{"cc alias idle", "cld", "❯ ", StatusCCIdle},
+		{"cc idle with status bar below", "claude", "❯ \n─────────\n  project [Opus 4.6] 100% left", StatusCCIdle},
 	}
 
 	for _, tt := range tests {
