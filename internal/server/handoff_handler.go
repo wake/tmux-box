@@ -385,6 +385,24 @@ func (s *Server) runHandoffToTerm(sess store.Session, handoffID string) {
 	broadcast("connected")
 }
 
+// revertModeOnRelayDisconnect reverts the session mode to "term" when a relay
+// disconnects. This prevents sessions from being stuck in stream mode after
+// a failed or interrupted handoff.
+func (s *Server) revertModeOnRelayDisconnect(sessionName string) {
+	sessions, err := s.store.ListSessions()
+	if err != nil {
+		return
+	}
+	for _, sess := range sessions {
+		if sess.Name == sessionName && sess.Mode != "term" {
+			termMode := "term"
+			s.store.UpdateSession(sess.ID, store.SessionUpdate{Mode: &termMode})
+			s.events.Broadcast(sessionName, "handoff", "failed:relay disconnected")
+			return
+		}
+	}
+}
+
 func generateHandoffID() string {
 	b := make([]byte, 8)
 	rand.Read(b)
