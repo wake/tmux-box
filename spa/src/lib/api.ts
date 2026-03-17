@@ -41,3 +41,49 @@ export async function switchMode(base: string, id: number, mode: string): Promis
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
   return res.json()
 }
+
+// --- Handoff API ---
+
+export async function handoff(
+  base: string,
+  id: number,
+  mode: string,
+  preset: string,
+): Promise<{ handoff_id: string }> {
+  const res = await fetch(`${base}/api/sessions/${id}/handoff`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode, preset }),
+  })
+  if (!res.ok) throw new Error(`handoff failed: ${res.status}`)
+  return res.json()
+}
+
+// --- Config API ---
+
+export interface ConfigData {
+  bind: string
+  port: number
+  stream: { presets: Array<{ name: string; command: string }> }
+  jsonl: { presets: Array<{ name: string; command: string }> }
+  detect: { cc_commands: string[]; poll_interval: number }
+}
+
+export async function getConfig(base: string): Promise<ConfigData> {
+  const res = await fetch(`${base}/api/config`)
+  if (!res.ok) throw new Error(`get config failed: ${res.status}`)
+  return res.json()
+}
+
+export async function updateConfig(
+  base: string,
+  updates: Partial<ConfigData>,
+): Promise<ConfigData> {
+  const res = await fetch(`${base}/api/config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  })
+  if (!res.ok) throw new Error(`update config failed: ${res.status}`)
+  return res.json()
+}

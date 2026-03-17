@@ -10,6 +10,7 @@ beforeEach(() => {
     sessionId: null,
     model: null,
     cost: 0,
+    handoffState: 'idle',
   })
 })
 
@@ -62,5 +63,21 @@ describe('useStreamStore', () => {
     })
     clear()
     expect(useStreamStore.getState().messages).toHaveLength(0)
+  })
+
+  it('tracks handoff state', () => {
+    const { setHandoffState } = useStreamStore.getState()
+    expect(useStreamStore.getState().handoffState).toBe('idle')
+    setHandoffState('handoff-in-progress')
+    expect(useStreamStore.getState().handoffState).toBe('handoff-in-progress')
+    setHandoffState('connected')
+    expect(useStreamStore.getState().handoffState).toBe('connected')
+  })
+
+  it('clear resets handoff state to idle', () => {
+    const { setHandoffState, clear } = useStreamStore.getState()
+    setHandoffState('connected')
+    clear()
+    expect(useStreamStore.getState().handoffState).toBe('idle')
   })
 })

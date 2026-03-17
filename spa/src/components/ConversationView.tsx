@@ -1,5 +1,5 @@
 // spa/src/components/ConversationView.tsx
-import { useEffect, useRef, useCallback } from 'react'
+import { useEffect, useRef, useCallback, useState } from 'react'
 import { useStreamStore } from '../stores/useStreamStore'
 import {
   connectStream,
@@ -11,19 +11,25 @@ import ToolCallBlock from './ToolCallBlock'
 import PermissionPrompt from './PermissionPrompt'
 import AskUserQuestion from './AskUserQuestion'
 import StreamInput from './StreamInput'
+import ThinkingIndicator from './ThinkingIndicator'
+import FileAttachment, { type AttachedFile } from './FileAttachment'
+import HandoffButton from './HandoffButton'
 
 interface Props {
   wsUrl: string
   sessionName: string
+  presetName?: string
 }
 
-export default function ConversationView({ wsUrl }: Props) {
+export default function ConversationView({ wsUrl, presetName }: Props) {
   const connRef = useRef<ReturnType<typeof connectStream> | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([])
   const {
     messages,
     pendingControlRequests,
     isStreaming,
+    handoffState,
     addMessage,
     addControlRequest,
     resolveControlRequest,
@@ -31,8 +37,13 @@ export default function ConversationView({ wsUrl }: Props) {
     setSessionInfo,
     addCost,
     setConn,
+    setHandoffState,
     clear,
   } = useStreamStore()
+
+  // ThinkingIndicator: visible when streaming and no assistant messages yet
+  const hasAssistantMessage = messages.some((m) => m.type === 'assistant')
+  const showThinking = isStreaming && !hasAssistantMessage
 
   useEffect(() => {
     clear()
@@ -45,6 +56,7 @@ export default function ConversationView({ wsUrl }: Props) {
             (msg as Record<string, unknown>).session_id as string,
             (msg as Record<string, unknown>).model as string,
           )
+          setHandoffState('connected')
           return
         }
         if (msg.type === 'control_request') {
@@ -60,7 +72,10 @@ export default function ConversationView({ wsUrl }: Props) {
           addMessage(msg)
         }
       },
-      () => setStreaming(false),
+      () => {
+        setStreaming(false)
+        setHandoffState('disconnected')
+      },
       // onOpen: intentionally no-op — isStreaming is set in handleSend
     )
     connRef.current = conn
@@ -95,6 +110,8 @@ export default function ConversationView({ wsUrl }: Props) {
       },
     } as StreamMessage)
     setStreaming(true)
+    // Clear attached files after send
+    setAttachedFiles([])
   }, [addMessage, setStreaming])
 
   const handleAllow = useCallback((req: ControlRequest) => {
@@ -128,6 +145,30 @@ export default function ConversationView({ wsUrl }: Props) {
     })
     resolveControlRequest(req.request_id)
   }, [resolveControlRequest])
+
+  const handleRemoveFile = useCallback((index: number) => {
+    setAttachedFiles((prev) => prev.filter((_, i) => i !== index))
+  }, [])
+
+  const handleHandoff = useCallback(() => {
+    // Handoff is triggered by the caller (App.tsx) via store or props.
+    // For now this is a placeholder — the actual handoff API call
+    // will be wired in the App-level integration task.
+    setHandoffState('handoff-in-progress')
+  }, [setHandoffState])
+
+  // When handoffState is not 'connected', show the HandoffButton overlay
+  if (handoffState !== 'connected') {
+    return (
+      <div className="flex flex-col h-full">
+        <HandoffButton
+          presetName={presetName || 'session'}
+          state={handoffState}
+          onHandoff={handleHandoff}
+        />
+      </div>
+    )
+  }
 
   return (
     <div className="flex flex-col h-full">
@@ -169,6 +210,9 @@ export default function ConversationView({ wsUrl }: Props) {
           return null
         })}
 
+        {/* Thinking indicator */}
+        <ThinkingIndicator visible={showThinking} />
+
         {/* Pending control requests */}
         {pendingControlRequests.map((req) => {
           if (req.request.tool_name === 'AskUserQuestion') {
@@ -203,6 +247,9 @@ export default function ConversationView({ wsUrl }: Props) {
           )
         })}
       </div>
+
+      {/* File attachments */}
+      <FileAttachment files={attachedFiles} onRemove={handleRemoveFile} />
 
       {/* Input area */}
       <StreamInput onSend={handleSend} disabled={isStreaming} />
