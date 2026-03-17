@@ -86,12 +86,19 @@ func (s *Server) handleHandoff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Find preset command
-	var command string
+	// Snapshot config under read lock
+	s.cfgMu.RLock()
 	presets := s.cfg.Stream.Presets
 	if req.Mode == "jsonl" {
 		presets = s.cfg.JSONL.Presets
 	}
+	token := s.cfg.Token
+	port := s.cfg.Port
+	bind := s.cfg.Bind
+	s.cfgMu.RUnlock()
+
+	// Find preset command
+	var command string
 	for _, p := range presets {
 		if p.Name == req.Preset {
 			command = p.Command
@@ -118,7 +125,7 @@ func (s *Server) handleHandoff(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"handoff_id": handoffID})
 
 	// Run async handoff in goroutine
-	go s.runHandoff(sess, req.Mode, command, handoffID)
+	go s.runHandoff(sess, req.Mode, command, handoffID, token, port, bind)
 }
 
 // runHandoff executes the handoff sequence asynchronously:
@@ -128,7 +135,7 @@ func (s *Server) handleHandoff(w http.ResponseWriter, r *http.Request) {
 //  4. Launch tbox relay with the preset command
 //  5. Wait for relay to connect back via cli-bridge
 //  6. Update DB mode and broadcast success
-func (s *Server) runHandoff(sess store.Session, mode, command, handoffID string) {
+func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token string, port int, bind string) {
 	defer s.handoffLocks.Unlock(sess.Name)
 
 	broadcast := func(value string) {
@@ -181,13 +188,17 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID string)
 	// C3 fix: Write token to a temporary file instead of embedding in command line.
 	// The relay reads and deletes the file, so the token never appears in pane/history.
 	tokenFile := filepath.Join(os.TempDir(), fmt.Sprintf("tbox-token-%s", handoffID))
-	if err := os.WriteFile(tokenFile, []byte(s.cfg.Token), 0600); err != nil {
+	if err := os.WriteFile(tokenFile, []byte(token), 0600); err != nil {
 		broadcast("failed:write token file: " + err.Error())
 		return
 	}
+	// Safety net: delete token file after 30s in case relay never reads it.
+	time.AfterFunc(30*time.Second, func() {
+		os.Remove(tokenFile) // no-op if already deleted by relay
+	})
 
 	relayCmd := fmt.Sprintf("tbox relay --session %s --daemon ws://127.0.0.1:%d --token-file %s -- %s",
-		sess.Name, s.cfg.Port, tokenFile, command)
+		sess.Name, port, tokenFile, command)
 	if err := s.tmux.SendKeys(sess.Name, relayCmd); err != nil {
 		os.Remove(tokenFile)
 		broadcast("failed:send-keys error: " + err.Error())
