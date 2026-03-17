@@ -26,7 +26,8 @@ func newHandoffTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Cleanup(func() { db.Close() })
 
 	fakeTmux := tmux.NewFakeExecutor()
-	fakeTmux.SetPaneCommand("test-session", "zsh") // normal shell state
+	fakeTmux.SetPaneCommand("test-session", "claude") // CC running (idle)
+	fakeTmux.SetPaneContent("test-session", "  Session ID: deadbeef-1234-5678-9abc-def012345678\n❯ ")
 
 	cfg := config.Config{
 		Port: 7860,
