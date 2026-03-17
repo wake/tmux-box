@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/wake/tmux-box/internal/bridge"
 	"github.com/wake/tmux-box/internal/config"
 	"github.com/wake/tmux-box/internal/store"
 	"github.com/wake/tmux-box/internal/terminal"
@@ -12,14 +13,15 @@ import (
 )
 
 type Server struct {
-	cfg   config.Config
-	store *store.Store
-	tmux  tmux.Executor
-	mux   *http.ServeMux
+	cfg    config.Config
+	store  *store.Store
+	tmux   tmux.Executor
+	bridge *bridge.Bridge
+	mux    *http.ServeMux
 }
 
 func New(cfg config.Config, st *store.Store, tx tmux.Executor) *Server {
-	s := &Server{cfg: cfg, store: st, tmux: tx, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, store: st, tmux: tx, bridge: bridge.New(), mux: http.NewServeMux()}
 	s.routes()
 	return s
 }
@@ -31,6 +33,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/sessions/{id}", sh.Delete)
 	s.mux.HandleFunc("POST /api/sessions/{id}/mode", sh.SwitchMode)
 	s.mux.HandleFunc("/ws/terminal/{session}", s.handleTerminal)
+	s.mux.HandleFunc("/ws/cli-bridge/{session}", s.handleCliBridge)
+	s.mux.HandleFunc("/ws/cli-bridge-sub/{session}", s.handleCliBridgeSubscribe)
 }
 
 func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
