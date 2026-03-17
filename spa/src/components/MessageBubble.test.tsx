@@ -27,13 +27,25 @@ describe('MessageBubble', () => {
     expect(codeEl).toBeInTheDocument()
   })
 
-  it('shows user icon for user role', () => {
-    render(<MessageBubble role="user" content="test" />)
-    expect(screen.getByTestId('icon-user')).toBeInTheDocument()
+  it('user message container has justify-end (right-aligned)', () => {
+    const { container } = render(<MessageBubble role="user" content="test" />)
+    const outerDiv = container.firstElementChild as HTMLElement
+    expect(outerDiv.className).toContain('justify-end')
   })
 
-  it('shows robot icon for assistant role', () => {
-    render(<MessageBubble role="assistant" content="test" />)
-    expect(screen.getByTestId('icon-assistant')).toBeInTheDocument()
+  it('does not render any avatar elements', () => {
+    const { container: userContainer } = render(
+      <MessageBubble role="user" content="test" />,
+    )
+    expect(userContainer.querySelector('[data-testid="icon-user"]')).toBeNull()
+    expect(userContainer.querySelector('[data-testid="icon-assistant"]')).toBeNull()
+
+    cleanup()
+
+    const { container: assistantContainer } = render(
+      <MessageBubble role="assistant" content="test" />,
+    )
+    expect(assistantContainer.querySelector('[data-testid="icon-user"]')).toBeNull()
+    expect(assistantContainer.querySelector('[data-testid="icon-assistant"]')).toBeNull()
   })
 })
