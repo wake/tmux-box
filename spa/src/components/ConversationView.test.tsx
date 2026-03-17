@@ -21,7 +21,7 @@ beforeEach(() => {
 
 describe('ConversationView', () => {
   it('renders empty state when connected', () => {
-    render(<ConversationView wsUrl="ws://test" sessionName="test" presetName="cc" />)
+    render(<ConversationView wsUrl="ws://test"  />)
     // After mount, clear() runs and resets handoffState to idle.
     // Set connected after mount.
     act(() => {
@@ -31,7 +31,7 @@ describe('ConversationView', () => {
   })
 
   it('renders messages', () => {
-    render(<ConversationView wsUrl="ws://test" sessionName="test" presetName="cc" />)
+    render(<ConversationView wsUrl="ws://test"  />)
     act(() => {
       useStreamStore.getState().setHandoffState('connected')
       useStreamStore.getState().addMessage({
@@ -47,7 +47,7 @@ describe('ConversationView', () => {
   })
 
   it('shows ThinkingIndicator when streaming with no assistant messages', () => {
-    render(<ConversationView wsUrl="ws://test" sessionName="test" presetName="cc" />)
+    render(<ConversationView wsUrl="ws://test"  />)
     act(() => {
       useStreamStore.getState().setHandoffState('connected')
       useStreamStore.getState().setStreaming(true)
@@ -56,7 +56,7 @@ describe('ConversationView', () => {
   })
 
   it('hides ThinkingIndicator when assistant message arrives', () => {
-    render(<ConversationView wsUrl="ws://test" sessionName="test" presetName="cc" />)
+    render(<ConversationView wsUrl="ws://test"  />)
     act(() => {
       useStreamStore.getState().setHandoffState('connected')
       useStreamStore.getState().setStreaming(true)
@@ -74,12 +74,12 @@ describe('ConversationView', () => {
 
   it('shows HandoffButton when handoffState is idle', () => {
     // clear() in useEffect sets handoffState to idle, so it shows HandoffButton by default
-    render(<ConversationView wsUrl="ws://test" sessionName="test" presetName="cc" sessionStatus="cc-idle" />)
+    render(<ConversationView wsUrl="ws://test"  sessionStatus="cc-idle" />)
     expect(screen.getByText('Handoff')).toBeInTheDocument()
   })
 
   it('shows HandoffButton when handoffState is disconnected', () => {
-    render(<ConversationView wsUrl="ws://test" sessionName="test" presetName="cc" />)
+    render(<ConversationView wsUrl="ws://test"  />)
     act(() => {
       useStreamStore.getState().setHandoffState('disconnected')
     })
@@ -87,7 +87,7 @@ describe('ConversationView', () => {
   })
 
   it('hides HandoffButton when handoffState is connected', () => {
-    render(<ConversationView wsUrl="ws://test" sessionName="test" presetName="cc" />)
+    render(<ConversationView wsUrl="ws://test"  />)
     act(() => {
       useStreamStore.getState().setHandoffState('connected')
     })

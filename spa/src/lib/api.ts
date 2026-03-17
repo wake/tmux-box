@@ -59,7 +59,10 @@ export async function handoff(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
-  if (!res.ok) throw new Error(`handoff failed: ${res.status}`)
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`handoff failed: ${res.status} ${text}`.trim())
+  }
   return res.json()
 }
 

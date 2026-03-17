@@ -178,8 +178,14 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 	// Step 3: If CC is busy (not idle), interrupt to idle
 	if status != detect.StatusCCIdle {
 		broadcast("stopping-cc")
-		s.tmux.SendKeysRaw(sess.Name, "C-u")
-		s.tmux.SendKeysRaw(sess.Name, "C-c")
+		if err := s.tmux.SendKeysRaw(sess.Name, "C-u"); err != nil {
+			broadcast("failed:send C-u: " + err.Error())
+			return
+		}
+		if err := s.tmux.SendKeysRaw(sess.Name, "C-c"); err != nil {
+			broadcast("failed:send C-c: " + err.Error())
+			return
+		}
 		deadline := time.Now().Add(10 * time.Second)
 		for time.Now().Before(deadline) {
 			time.Sleep(500 * time.Millisecond)
@@ -214,7 +220,10 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 
 	// Step 5: Exit CC gracefully
 	broadcast("exiting-cc")
-	s.tmux.SendKeysRaw(sess.Name, "Escape")
+	if err := s.tmux.SendKeysRaw(sess.Name, "Escape"); err != nil {
+		broadcast("failed:send Escape: " + err.Error())
+		return
+	}
 	time.Sleep(500 * time.Millisecond)
 	if err := s.tmux.SendKeys(sess.Name, "/exit"); err != nil {
 		broadcast("failed:send /exit: " + err.Error())
@@ -260,6 +269,7 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 		time.Sleep(500 * time.Millisecond)
 	}
 	if !s.bridge.HasRelay(sess.Name) {
+		os.Remove(tokenFile)
 		broadcast("failed:relay did not connect within 15s")
 		return
 	}
@@ -284,8 +294,12 @@ func (s *Server) runHandoffToTerm(sess store.Session, handoffID string) {
 
 	// Step 1: Get session ID from DB
 	current, err := s.store.GetSession(sess.ID)
-	if err != nil || current.CCSessionID == "" {
-		broadcast("failed:no session ID available")
+	if err != nil {
+		broadcast("failed:db lookup error: " + err.Error())
+		return
+	}
+	if current.CCSessionID == "" {
+		broadcast("failed:no CC session ID stored")
 		return
 	}
 	sessionID := current.CCSessionID

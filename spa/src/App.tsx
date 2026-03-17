@@ -120,13 +120,14 @@ export default function App() {
 
   const handleHandoffToTerm = useCallback(async () => {
     if (!active) return
+    setHash(active.uid, 'term')
     try {
       useStreamStore.getState().setHandoffState('handoff-in-progress')
       await handoff(daemonBase, active.id, 'term')
-      setHash(active.uid, 'term')
       await fetchSessions(daemonBase)
     } catch (e) {
       console.error('handoff to term failed:', e)
+      useStreamStore.getState().setHandoffState('disconnected')
     }
   }, [active, fetchSessions])
 
@@ -166,8 +167,6 @@ export default function App() {
               }}>
                 <ConversationView
                   wsUrl={`${wsBase}/ws/cli-bridge-sub/${encodeURIComponent(active.name)}`}
-                  sessionName={active.name}
-                  presetName={activePreset || streamPresets[0]?.name || 'cc'}
                   sessionStatus={sessionStatus}
                   onHandoff={() => handleHandoff('stream', activePreset || streamPresets[0]?.name || 'cc')}
                   onHandoffToTerm={handleHandoffToTerm}

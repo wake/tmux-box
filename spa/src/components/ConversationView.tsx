@@ -20,8 +20,6 @@ import HandoffButton from './HandoffButton'
 
 interface Props {
   wsUrl: string
-  sessionName: string
-  presetName: string
   sessionStatus?: string
   onHandoff?: () => void
   onHandoffToTerm?: () => void
