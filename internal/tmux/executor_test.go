@@ -63,3 +63,33 @@ func TestHasSession(t *testing.T) {
 		t.Error("want false")
 	}
 }
+
+func TestSendKeysRaw(t *testing.T) {
+	fake := tmux.NewFakeExecutor()
+	fake.AddSession("test", "/tmp")
+
+	err := fake.SendKeysRaw("test", "C-u")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	keys := fake.RawKeysSent()
+	if len(keys) != 1 || keys[0].Target != "test" || keys[0].Keys[0] != "C-u" {
+		t.Errorf("unexpected raw keys: %+v", keys)
+	}
+}
+
+func TestSendKeysRawMultiple(t *testing.T) {
+	fake := tmux.NewFakeExecutor()
+	fake.AddSession("test", "/tmp")
+
+	err := fake.SendKeysRaw("test", "C-u", "C-c")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	keys := fake.RawKeysSent()
+	if len(keys) != 1 || len(keys[0].Keys) != 2 {
+		t.Errorf("want 1 call with 2 keys, got %+v", keys)
+	}
+}
