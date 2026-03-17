@@ -17,35 +17,66 @@ type sessionEvent struct {
 	Value   string `json:"value"`
 }
 
+// eventSubscriber wraps a WebSocket connection with a buffered send channel.
+// A dedicated goroutine per subscriber handles all writes to avoid concurrent
+// WriteMessage calls (gorilla/websocket requires one concurrent writer max).
+type eventSubscriber struct {
+	conn *websocket.Conn
+	send chan []byte
+}
+
 // EventsBroadcaster manages WebSocket subscribers for session events.
 type EventsBroadcaster struct {
 	mu          sync.RWMutex
-	subscribers map[*websocket.Conn]struct{}
+	subscribers map[*eventSubscriber]struct{}
 }
 
 // NewEventsBroadcaster creates a new EventsBroadcaster.
 func NewEventsBroadcaster() *EventsBroadcaster {
 	return &EventsBroadcaster{
-		subscribers: make(map[*websocket.Conn]struct{}),
+		subscribers: make(map[*eventSubscriber]struct{}),
 	}
 }
 
-// Add registers a WebSocket connection as subscriber.
-func (eb *EventsBroadcaster) Add(conn *websocket.Conn) {
+// Add registers a WebSocket connection as subscriber and starts its write pump.
+// Returns the subscriber handle (needed for Remove).
+func (eb *EventsBroadcaster) Add(conn *websocket.Conn) *eventSubscriber {
+	sub := &eventSubscriber{
+		conn: conn,
+		send: make(chan []byte, 64),
+	}
 	eb.mu.Lock()
-	defer eb.mu.Unlock()
-	eb.subscribers[conn] = struct{}{}
+	eb.subscribers[sub] = struct{}{}
+	eb.mu.Unlock()
+
+	// Start write pump — the only goroutine that calls WriteMessage on this conn.
+	go func() {
+		for msg := range sub.send {
+			if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+				// Write failed — close send channel won't help here since we're
+				// the reader; the read loop in handleSessionEvents will detect
+				// the broken connection and call Remove.
+				return
+			}
+		}
+	}()
+
+	return sub
 }
 
-// Remove unregisters a WebSocket connection.
-func (eb *EventsBroadcaster) Remove(conn *websocket.Conn) {
+// Remove unregisters a subscriber and closes its send channel.
+func (eb *EventsBroadcaster) Remove(sub *eventSubscriber) {
 	eb.mu.Lock()
 	defer eb.mu.Unlock()
-	delete(eb.subscribers, conn)
+	if _, ok := eb.subscribers[sub]; ok {
+		delete(eb.subscribers, sub)
+		close(sub.send)
+		sub.conn.Close()
+	}
 }
 
 // Broadcast sends a JSON event to all subscribers.
-// Failed writes cause the connection to be removed.
+// Messages are sent non-blocking; slow subscribers that have a full buffer are dropped.
 func (eb *EventsBroadcaster) Broadcast(session, eventType, value string) {
 	msg, err := json.Marshal(sessionEvent{
 		Type:    eventType,
@@ -58,25 +89,14 @@ func (eb *EventsBroadcaster) Broadcast(session, eventType, value string) {
 	}
 
 	eb.mu.RLock()
-	conns := make([]*websocket.Conn, 0, len(eb.subscribers))
-	for c := range eb.subscribers {
-		conns = append(conns, c)
-	}
-	eb.mu.RUnlock()
+	defer eb.mu.RUnlock()
 
-	var failed []*websocket.Conn
-	for _, c := range conns {
-		if err := c.WriteMessage(websocket.TextMessage, msg); err != nil {
-			failed = append(failed, c)
+	for sub := range eb.subscribers {
+		select {
+		case sub.send <- msg:
+		default:
+			// Subscriber too slow — drop this message.
 		}
-	}
-
-	if len(failed) > 0 {
-		eb.mu.Lock()
-		for _, c := range failed {
-			delete(eb.subscribers, c)
-		}
-		eb.mu.Unlock()
 	}
 }
 
@@ -93,10 +113,9 @@ func (s *Server) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	defer conn.Close()
 
-	s.events.Add(conn)
-	defer s.events.Remove(conn)
+	sub := s.events.Add(conn)
+	defer s.events.Remove(sub)
 
 	// Keep connection alive — read (and discard) messages to detect disconnect.
 	for {

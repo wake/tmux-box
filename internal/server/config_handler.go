@@ -58,6 +58,8 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	if req.Detect != nil {
 		if req.Detect.CCCommands != nil {
 			s.cfg.Detect.CCCommands = *req.Detect.CCCommands
+			// I5 fix: propagate updated commands to the live detector.
+			s.detector.UpdateCommands(*req.Detect.CCCommands)
 		}
 		if req.Detect.PollInterval != nil && *req.Detect.PollInterval > 0 {
 			s.cfg.Detect.PollInterval = *req.Detect.PollInterval

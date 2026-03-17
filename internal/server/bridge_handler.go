@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/gorilla/websocket"
@@ -15,6 +16,9 @@ var bridgeUpgrader = websocket.Upgrader{
 // Only one relay per session is allowed.
 func (s *Server) handleCliBridge(w http.ResponseWriter, r *http.Request) {
 	sessionName := r.PathValue("session")
+
+	// Pre-check to return HTTP 409 before WebSocket upgrade.
+	// RegisterRelay below is the authoritative atomic check.
 	if s.bridge.HasRelay(sessionName) {
 		http.Error(w, "relay already connected", http.StatusConflict)
 		return
@@ -26,14 +30,21 @@ func (s *Server) handleCliBridge(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	relayCh := s.bridge.RegisterRelay(sessionName)
+	relayCh, err := s.bridge.RegisterRelay(sessionName)
+	if err != nil {
+		// Race: another relay registered between HasRelay and here.
+		conn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, err.Error()))
+		return
+	}
 	defer s.bridge.UnregisterRelay(sessionName)
 
-	done := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	// Relay WS → bridge (subprocess stdout → SPA subscribers)
 	go func() {
-		defer close(done)
+		defer cancel()
 		for {
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
@@ -44,15 +55,19 @@ func (s *Server) handleCliBridge(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Bridge → relay WS (SPA user input → subprocess stdin)
-	go func() {
-		for msg := range relayCh {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg, ok := <-relayCh:
+			if !ok {
+				return
+			}
 			if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 				return
 			}
 		}
-	}()
-
-	<-done
+	}
 }
 
 // handleCliBridgeSubscribe handles WebSocket from SPA clients (consumer).
@@ -76,20 +91,12 @@ func (s *Server) handleCliBridgeSubscribe(w http.ResponseWriter, r *http.Request
 	}
 	defer s.bridge.Unsubscribe(sessionName, id)
 
-	done := make(chan struct{})
-
-	// Bridge → SPA WS (relay output → browser)
-	go func() {
-		defer close(done)
-		for msg := range subCh {
-			if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
-				return
-			}
-		}
-	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	// SPA WS → bridge (user input → relay stdin)
 	go func() {
+		defer cancel()
 		for {
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
@@ -99,5 +106,18 @@ func (s *Server) handleCliBridgeSubscribe(w http.ResponseWriter, r *http.Request
 		}
 	}()
 
-	<-done
+	// Bridge → SPA WS (relay output → browser)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg, ok := <-subCh:
+			if !ok {
+				return
+			}
+			if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+				return
+			}
+		}
+	}
 }

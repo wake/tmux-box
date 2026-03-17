@@ -105,6 +105,7 @@ func runRelay(args []string) {
 	fs := flag.NewFlagSet("relay", flag.ExitOnError)
 	session := fs.String("session", "", "session name (required)")
 	daemon := fs.String("daemon", "ws://127.0.0.1:7860", "daemon WebSocket address")
+	tokenFile := fs.String("token-file", "", "path to file containing auth token (read and deleted)")
 	fs.Parse(args)
 
 	if *session == "" {
@@ -125,6 +126,7 @@ func runRelay(args []string) {
 		SessionName: *session,
 		DaemonURL:   wsURL,
 		Token:       token,
+		TokenFile:   *tokenFile,
 		Command:     cmdArgs,
 	}
 

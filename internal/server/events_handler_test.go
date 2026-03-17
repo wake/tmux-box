@@ -30,10 +30,9 @@ func TestEventsBroadcasterAddRemove(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
 
-		eb.Add(conn)
-		defer eb.Remove(conn)
+		sub := eb.Add(conn)
+		defer eb.Remove(sub)
 
 		// Keep alive
 		for {
@@ -69,10 +68,9 @@ func TestEventsBroadcasterBroadcast(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
 
-		eb.Add(conn)
-		defer eb.Remove(conn)
+		sub := eb.Add(conn)
+		defer eb.Remove(sub)
 
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
@@ -122,10 +120,9 @@ func TestEventsBroadcasterFanOut(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
 
-		eb.Add(conn)
-		defer eb.Remove(conn)
+		sub := eb.Add(conn)
+		defer eb.Remove(sub)
 
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
@@ -224,10 +221,9 @@ func TestSessionEventsDisconnectedSubscriber(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
 
-		eb.Add(conn)
-		defer eb.Remove(conn)
+		sub := eb.Add(conn)
+		defer eb.Remove(sub)
 
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -21,6 +22,7 @@ type Relay struct {
 	SessionName string
 	DaemonURL   string
 	Token       string
+	TokenFile   string // If set and Token is empty, read token from this file then delete it.
 	Command     []string
 }
 
@@ -31,10 +33,22 @@ func (r *Relay) Run(ctx context.Context) error {
 		return fmt.Errorf("no command specified")
 	}
 
+	// Resolve token: prefer Token field, fallback to TokenFile.
+	token := r.Token
+	if token == "" && r.TokenFile != "" {
+		data, err := os.ReadFile(r.TokenFile)
+		if err != nil {
+			return fmt.Errorf("read token file: %w", err)
+		}
+		token = string(data)
+		// Remove token file after reading for security.
+		os.Remove(r.TokenFile)
+	}
+
 	// Connect to daemon WebSocket
 	header := http.Header{}
-	if r.Token != "" {
-		header.Set("Authorization", "Bearer "+r.Token)
+	if token != "" {
+		header.Set("Authorization", "Bearer "+token)
 	}
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, r.DaemonURL, header)
 	if err != nil {
@@ -42,8 +56,9 @@ func (r *Relay) Run(ctx context.Context) error {
 	}
 	defer conn.Close()
 
-	// Start subprocess
-	cmd := exec.CommandContext(ctx, r.Command[0], r.Command[1:]...)
+	// Start subprocess — use plain exec.Command (NOT CommandContext) to avoid
+	// SIGKILL on context cancel. We handle graceful shutdown manually below.
+	cmd := exec.Command(r.Command[0], r.Command[1:]...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("stdin pipe: %w", err)
@@ -58,6 +73,19 @@ func (r *Relay) Run(ctx context.Context) error {
 		return fmt.Errorf("start command: %w", err)
 	}
 
+	// Graceful shutdown: on context cancel, send SIGTERM then SIGKILL after 5s.
+	go func() {
+		<-ctx.Done()
+		if cmd.Process != nil {
+			cmd.Process.Signal(syscall.SIGTERM)
+			time.AfterFunc(5*time.Second, func() {
+				if cmd.Process != nil {
+					cmd.Process.Kill()
+				}
+			})
+		}
+	}()
+
 	var wg sync.WaitGroup
 
 	// Subprocess stdout → line-buffered tee to stderr + send to daemon WS
@@ -70,10 +98,14 @@ func (r *Relay) Run(ctx context.Context) error {
 		scanner := bufio.NewScanner(stdout)
 		scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB max line
 		for scanner.Scan() {
-			line := scanner.Bytes()
-			os.Stderr.Write(line)
-			os.Stderr.Write([]byte("\n"))
-			conn.WriteMessage(websocket.TextMessage, line)
+			// I2 fix: scanner.Text() returns a string copy, avoiding buffer aliasing.
+			line := scanner.Text()
+			os.Stderr.WriteString(line)
+			os.Stderr.WriteString("\n")
+			// I1 fix: break on write error.
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(line)); err != nil {
+				return
+			}
 		}
 	}()
 
@@ -98,8 +130,13 @@ func (r *Relay) Run(ctx context.Context) error {
 				}
 				return
 			}
-			stdin.Write(msg)
-			stdin.Write([]byte("\n"))
+			// I1 fix: break on write error.
+			if _, err := stdin.Write(msg); err != nil {
+				return
+			}
+			if _, err := stdin.Write([]byte("\n")); err != nil {
+				return
+			}
 		}
 	}()
 

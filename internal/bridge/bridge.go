@@ -1,7 +1,10 @@
 // internal/bridge/bridge.go
 package bridge
 
-import "sync"
+import (
+	"fmt"
+	"sync"
+)
 
 // SubID is an opaque subscriber identifier used for unsubscription.
 // ID-based tracking is used instead of channel comparison because
@@ -26,17 +29,21 @@ func New() *Bridge {
 	return &Bridge{sessions: make(map[string]*sessionBridge)}
 }
 
-// RegisterRelay registers a relay producer for the named session.
+// RegisterRelay atomically registers a relay producer for the named session.
 // Returns a channel from which the relay reads SPA user input.
-func (b *Bridge) RegisterRelay(name string) <-chan []byte {
+// Returns an error if a relay is already registered for this session.
+func (b *Bridge) RegisterRelay(name string) (<-chan []byte, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if _, exists := b.sessions[name]; exists {
+		return nil, fmt.Errorf("relay already registered for session %q", name)
+	}
 	sb := &sessionBridge{
 		relayCh:     make(chan []byte, 64),
 		subscribers: make(map[uint64]chan []byte),
 	}
 	b.sessions[name] = sb
-	return sb.relayCh
+	return sb.relayCh, nil
 }
 
 // UnregisterRelay removes a relay and closes all subscriber channels.

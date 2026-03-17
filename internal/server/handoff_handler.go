@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -175,9 +177,19 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID string)
 
 	// Step 4: Launch tbox relay
 	broadcast("launching")
-	relayCmd := fmt.Sprintf("TBOX_TOKEN=%s tbox relay --session %s --daemon ws://127.0.0.1:%d -- %s",
-		s.cfg.Token, sess.Name, s.cfg.Port, command)
+
+	// C3 fix: Write token to a temporary file instead of embedding in command line.
+	// The relay reads and deletes the file, so the token never appears in pane/history.
+	tokenFile := filepath.Join(os.TempDir(), fmt.Sprintf("tbox-token-%s", handoffID))
+	if err := os.WriteFile(tokenFile, []byte(s.cfg.Token), 0600); err != nil {
+		broadcast("failed:write token file: " + err.Error())
+		return
+	}
+
+	relayCmd := fmt.Sprintf("tbox relay --session %s --daemon ws://127.0.0.1:%d --token-file %s -- %s",
+		sess.Name, s.cfg.Port, tokenFile, command)
 	if err := s.tmux.SendKeys(sess.Name, relayCmd); err != nil {
+		os.Remove(tokenFile)
 		broadcast("failed:send-keys error: " + err.Error())
 		return
 	}
@@ -196,7 +208,10 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID string)
 	}
 
 	// Step 6: Update DB mode and broadcast success
-	s.store.UpdateSession(sess.ID, store.SessionUpdate{Mode: &mode})
+	if err := s.store.UpdateSession(sess.ID, store.SessionUpdate{Mode: &mode}); err != nil {
+		broadcast("failed:db update error: " + err.Error())
+		return
+	}
 	broadcast("connected")
 }
 

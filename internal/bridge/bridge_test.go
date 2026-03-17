@@ -9,7 +9,10 @@ import (
 func TestBridgeFanOut(t *testing.T) {
 	b := New()
 
-	relayCh := b.RegisterRelay("test-session")
+	relayCh, err := b.RegisterRelay("test-session")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer b.UnregisterRelay("test-session")
 
 	id1, sub1 := b.Subscribe("test-session")
@@ -64,11 +67,27 @@ func TestBridgeNoRelay(t *testing.T) {
 
 func TestBridgeUnregisterClosesSubscribers(t *testing.T) {
 	b := New()
-	b.RegisterRelay("test")
+	if _, err := b.RegisterRelay("test"); err != nil {
+		t.Fatal(err)
+	}
 	_, sub := b.Subscribe("test")
 	b.UnregisterRelay("test")
 	_, ok := <-sub
 	if ok {
 		t.Fatal("expected subscriber channel to be closed")
+	}
+}
+
+func TestBridgeRegisterRelayDuplicate(t *testing.T) {
+	b := New()
+	_, err := b.RegisterRelay("dup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.UnregisterRelay("dup")
+
+	_, err = b.RegisterRelay("dup")
+	if err == nil {
+		t.Fatal("expected error for duplicate relay registration")
 	}
 }

@@ -3,6 +3,7 @@ package detect
 
 import (
 	"strings"
+	"sync"
 
 	"github.com/wake/tmux-box/internal/tmux"
 )
@@ -16,7 +17,10 @@ const (
 	StatusCCIdle    Status = "cc-idle"    // CC is running, showing input prompt
 	StatusCCRunning Status = "cc-running" // CC is executing a tool / generating
 	StatusCCWaiting Status = "cc-waiting" // CC is waiting for user permission
-	StatusCCUnread  Status = "cc-unread"  // set externally by bridge, not detected here
+	// TODO(Phase 3): StatusCCUnread requires per-session subscriber tracking in the
+	// bridge to know when nobody is watching + last-seen position tracking per session.
+	// This is genuinely complex and is deferred to Phase 3.
+	StatusCCUnread Status = "cc-unread" // set externally by bridge, not detected here
 )
 
 // defaultShells lists common shell names for detecting "normal" (shell idle) state.
@@ -26,6 +30,7 @@ var defaultShells = map[string]bool{
 
 // Detector inspects tmux pane state to determine session status.
 type Detector struct {
+	mu         sync.RWMutex
 	tmux       tmux.Executor
 	ccCommands map[string]bool
 }
@@ -40,6 +45,17 @@ func New(executor tmux.Executor, ccCommands []string) *Detector {
 	return &Detector{tmux: executor, ccCommands: cmds}
 }
 
+// UpdateCommands replaces the set of CC command names used for detection.
+// This is called when the config API updates detect.cc_commands.
+func (d *Detector) UpdateCommands(cmds []string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.ccCommands = make(map[string]bool, len(cmds))
+	for _, c := range cmds {
+		d.ccCommands[c] = true
+	}
+}
+
 // Detect returns the current Status for the given tmux session/target.
 func (d *Detector) Detect(session string) Status {
 	cmd, err := d.tmux.PaneCurrentCommand(session)
@@ -48,8 +64,12 @@ func (d *Detector) Detect(session string) Status {
 	}
 	cmd = strings.TrimSpace(cmd)
 
+	d.mu.RLock()
+	isCC := d.ccCommands[cmd]
+	d.mu.RUnlock()
+
 	// Check if it's a known CC command.
-	if !d.ccCommands[cmd] {
+	if !isCC {
 		if defaultShells[cmd] {
 			return StatusNormal
 		}
