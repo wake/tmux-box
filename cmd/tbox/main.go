@@ -67,6 +67,12 @@ func runServe(args []string) {
 
 	s := server.New(cfg, st, tx)
 
+	// Context for background goroutines (status poller).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s.StartStatusPoller(ctx)
+
 	addr := fmt.Sprintf("%s:%d", cfg.Bind, cfg.Port)
 	srv := &http.Server{
 		Addr:    addr,
@@ -79,6 +85,7 @@ func runServe(args []string) {
 	go func() {
 		<-sigCh
 		fmt.Println("\nshutting down...")
+		cancel() // stop status poller
 		srv.Shutdown(context.Background())
 	}()
 
