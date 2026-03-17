@@ -8,13 +8,34 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+type Preset struct {
+	Name    string `toml:"name"    json:"name"`
+	Command string `toml:"command" json:"command"`
+}
+
+type StreamConfig struct {
+	Presets []Preset `toml:"presets" json:"presets"`
+}
+
+type JSONLConfig struct {
+	Presets []Preset `toml:"presets" json:"presets"`
+}
+
+type DetectConfig struct {
+	CCCommands   []string `toml:"cc_commands"   json:"cc_commands"`
+	PollInterval int      `toml:"poll_interval" json:"poll_interval"`
+}
+
 type Config struct {
-	Bind         string   `toml:"bind"`
-	Port         int      `toml:"port"`
-	Token        string   `toml:"token"`
-	Allow        []string `toml:"allow"`
-	DataDir      string   `toml:"data_dir"`
-	AllowedPaths []string `toml:"allowed_paths"`
+	Bind         string       `toml:"bind"`
+	Port         int          `toml:"port"`
+	Token        string       `toml:"token"`
+	Allow        []string     `toml:"allow"`
+	DataDir      string       `toml:"data_dir"`
+	AllowedPaths []string     `toml:"allowed_paths"`
+	Stream       StreamConfig `toml:"stream"`
+	JSONL        JSONLConfig  `toml:"jsonl"`
+	Detect       DetectConfig `toml:"detect"`
 }
 
 func defaults() Config {
@@ -23,6 +44,16 @@ func defaults() Config {
 		Bind:    "127.0.0.1",
 		Port:    7860,
 		DataDir: filepath.Join(home, ".config", "tbox"),
+		Stream: StreamConfig{
+			Presets: []Preset{{
+				Name:    "cc",
+				Command: "claude -p --input-format stream-json --output-format stream-json",
+			}},
+		},
+		Detect: DetectConfig{
+			CCCommands:   []string{"claude"},
+			PollInterval: 2,
+		},
 	}
 }
 

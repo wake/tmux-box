@@ -59,6 +59,59 @@ func TestLoadAutoDefaultPath(t *testing.T) {
 	}
 }
 
+func TestLoadConfigWithPresets(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	os.WriteFile(path, []byte(`
+bind = "0.0.0.0"
+port = 8080
+
+[[stream.presets]]
+name = "cc"
+command = "claude -p --input-format stream-json --output-format stream-json"
+
+[[stream.presets]]
+name = "dangerous"
+command = "claude -p --input-format stream-json --output-format stream-json --dangerously-skip-permissions"
+
+[[jsonl.presets]]
+name = "cc"
+command = ""
+
+[detect]
+cc_commands = ["claude", "cld"]
+poll_interval = 3
+`), 0644)
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Stream.Presets) != 2 {
+		t.Fatalf("expected 2 stream presets, got %d", len(cfg.Stream.Presets))
+	}
+	if cfg.Stream.Presets[0].Name != "cc" {
+		t.Fatalf("expected first preset name 'cc', got %q", cfg.Stream.Presets[0].Name)
+	}
+	if len(cfg.Detect.CCCommands) != 2 {
+		t.Fatalf("expected 2 cc_commands, got %d", len(cfg.Detect.CCCommands))
+	}
+	if cfg.Detect.PollInterval != 3 {
+		t.Fatalf("expected poll_interval 3, got %d", cfg.Detect.PollInterval)
+	}
+}
+
+func TestLoadConfigDefaults(t *testing.T) {
+	dir := t.TempDir()
+	cfg, _ := config.Load(filepath.Join(dir, "missing.toml"))
+	if len(cfg.Stream.Presets) != 1 {
+		t.Fatalf("expected 1 default stream preset, got %d", len(cfg.Stream.Presets))
+	}
+	if cfg.Detect.PollInterval != 2 {
+		t.Fatalf("expected default poll_interval 2, got %d", cfg.Detect.PollInterval)
+	}
+}
+
 func TestLoadInvalidTOML(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bad.toml")
 	os.WriteFile(path, []byte(`not valid toml {{{{`), 0644)
