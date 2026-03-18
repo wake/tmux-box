@@ -174,4 +174,36 @@ func TestCCSessionID(t *testing.T) {
 	}
 }
 
+func TestCCModel(t *testing.T) {
+	db := openTestDB(t)
+
+	id, err := db.CreateSession(store.Session{Name: "test", Cwd: "/tmp", Mode: "term"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Default empty
+	sess, _ := db.GetSession(id)
+	if sess.CCModel != "" {
+		t.Errorf("want empty cc_model, got %q", sess.CCModel)
+	}
+
+	// Update
+	model := "claude-sonnet-4-6"
+	err = db.UpdateSession(id, store.SessionUpdate{CCModel: &model})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, _ = db.GetSession(id)
+	if sess.CCModel != "claude-sonnet-4-6" {
+		t.Fatalf("want claude-sonnet-4-6, got %q", sess.CCModel)
+	}
+
+	// List includes cc_model
+	sessions, _ := db.ListSessions()
+	if sessions[0].CCModel != "claude-sonnet-4-6" {
+		t.Fatalf("list: want claude-sonnet-4-6, got %q", sessions[0].CCModel)
+	}
+}
+
 func ptr(s string) *string { return &s }
