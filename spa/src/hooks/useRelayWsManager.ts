@@ -61,6 +61,16 @@ export function useRelayWsManager(wsBase: string) {
           }
         }
 
+        // Clean up sessions removed from relayStatus (e.g., session deleted)
+        for (const session of Object.keys(prevRelay.current)) {
+          if (!(session in relayStatus)) {
+            const existing = activeConns.get(session)
+            existing?.close()
+            useStreamStore.getState().setConn(session, null)
+            activeConns.delete(session)
+          }
+        }
+
         prevRelay.current = { ...relayStatus }
       },
     )

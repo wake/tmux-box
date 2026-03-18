@@ -19,6 +19,9 @@ func CCProjectPath(cwd string) string {
 // Only user and assistant messages are included. maxBytes limits total input read.
 // When the input exceeds maxBytes, earlier messages are dropped (tail is preserved).
 func ParseJSONL(r io.Reader, maxBytes int64) ([]map[string]interface{}, error) {
+	if maxBytes <= 0 {
+		return nil, nil
+	}
 	data, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
 	if err != nil {
 		return nil, err

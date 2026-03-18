@@ -91,7 +91,7 @@ export default function App() {
                 if (msgs.length > 0) {
                   useStreamStore.getState().loadHistory(event.session, msgs)
                 }
-              })
+              }).catch(() => { /* history fetch failed — non-critical */ })
             }
           } else if (event.value.startsWith('failed')) {
             store.setHandoffState(event.session, 'disconnected')

@@ -34,7 +34,11 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		json.NewEncoder(w).Encode([]interface{}{})
+		return
+	}
 	projectHash := history.CCProjectPath(sess.Cwd)
 	jsonlPath := filepath.Join(home, ".claude", "projects", projectHash, sess.CCSessionID+".jsonl")
 

@@ -74,15 +74,9 @@ func (s *Server) handleCliBridge(w http.ResponseWriter, r *http.Request) {
 				if json.Unmarshal(msg, &init) == nil && init.Type == "system" && init.Subtype == "init" {
 					initCaptured = true
 					if init.Model != "" {
-						sessions, err := s.store.ListSessions()
-						if err == nil {
-							for _, sess := range sessions {
-								if sess.Name == sessionName {
-									s.store.UpdateSession(sess.ID, store.SessionUpdate{CCModel: &init.Model})
-									s.events.Broadcast(sessionName, "init", init.Model)
-									break
-								}
-							}
+						if sess, err := s.store.GetSessionByName(sessionName); err == nil {
+							s.store.UpdateSession(sess.ID, store.SessionUpdate{CCModel: &init.Model})
+							s.events.Broadcast(sessionName, "init", init.Model)
 						}
 					}
 				}

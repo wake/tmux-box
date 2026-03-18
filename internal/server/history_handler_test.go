@@ -18,7 +18,10 @@ func TestHistoryEmptyCCSessionID(t *testing.T) {
 	// Create session without cc_session_id
 	id, _ := db.CreateSession(store.Session{Name: "hist-test", Cwd: "/tmp", Mode: "stream"})
 
-	resp, _ := http.Get(fmt.Sprintf("%s/api/sessions/%d/history", srv.URL, id))
+	resp, err := http.Get(fmt.Sprintf("%s/api/sessions/%d/history", srv.URL, id))
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
@@ -54,7 +57,10 @@ func TestHistoryReturnsMessages(t *testing.T) {
 	ccID := ccSessionID
 	db.UpdateSession(id, store.SessionUpdate{CCSessionID: &ccID})
 
-	resp, _ := http.Get(fmt.Sprintf("%s/api/sessions/%d/history", srv.URL, id))
+	resp, err := http.Get(fmt.Sprintf("%s/api/sessions/%d/history", srv.URL, id))
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
@@ -78,7 +84,10 @@ func TestHistoryReturnsMessages(t *testing.T) {
 func TestHistoryNotFound(t *testing.T) {
 	_, srv := setupServerWithDB(t)
 
-	resp, _ := http.Get(fmt.Sprintf("%s/api/sessions/999/history", srv.URL))
+	resp, err := http.Get(fmt.Sprintf("%s/api/sessions/999/history", srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 404 {

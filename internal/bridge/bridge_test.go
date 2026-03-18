@@ -2,6 +2,57 @@ package bridge
 
 import "testing"
 
+func TestBridgeFanOut(t *testing.T) {
+	b := New()
+	relayCh, _ := b.RegisterRelay("sess")
+	_, subCh := b.Subscribe("sess")
+	if subCh == nil {
+		t.Fatal("subscribe returned nil")
+	}
+
+	// Relay → subscribers
+	b.RelayToSubscribers("sess", []byte("hello"))
+	msg := <-subCh
+	if string(msg) != "hello" {
+		t.Fatalf("got %q", msg)
+	}
+
+	// Subscriber → relay
+	b.SubscriberToRelay("sess", []byte("world"))
+	msg = <-relayCh
+	if string(msg) != "world" {
+		t.Fatalf("got %q", msg)
+	}
+}
+
+func TestBridgeNoRelay(t *testing.T) {
+	b := New()
+	_, ch := b.Subscribe("nonexistent")
+	if ch != nil {
+		t.Fatal("subscribe without relay should return nil")
+	}
+}
+
+func TestBridgeUnregisterClosesSubscribers(t *testing.T) {
+	b := New()
+	b.RegisterRelay("sess")
+	_, subCh := b.Subscribe("sess")
+	b.UnregisterRelay("sess")
+	_, ok := <-subCh
+	if ok {
+		t.Fatal("subscriber channel should be closed")
+	}
+}
+
+func TestBridgeRegisterRelayDuplicate(t *testing.T) {
+	b := New()
+	b.RegisterRelay("sess")
+	_, err := b.RegisterRelay("sess")
+	if err == nil {
+		t.Fatal("duplicate register should error")
+	}
+}
+
 func TestRelaySessionNames(t *testing.T) {
 	b := New()
 

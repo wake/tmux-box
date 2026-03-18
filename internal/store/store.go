@@ -273,6 +273,20 @@ func (s *Store) DeleteSession(id int64) error {
 	return nil
 }
 
+func (s *Store) GetSessionByName(name string) (Session, error) {
+	var sess Session
+	err := s.db.QueryRow(
+		"SELECT id, uid, name, tmux_target, cwd, mode, group_id, sort_order, cc_session_id, cc_model FROM sessions WHERE name = ?", name,
+	).Scan(&sess.ID, &sess.UID, &sess.Name, &sess.TmuxTarget, &sess.Cwd, &sess.Mode, &sess.GroupID, &sess.SortOrder, &sess.CCSessionID, &sess.CCModel)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return sess, ErrNotFound
+		}
+		return sess, err
+	}
+	return sess, nil
+}
+
 func (s *Store) GetSession(id int64) (Session, error) {
 	var sess Session
 	err := s.db.QueryRow(

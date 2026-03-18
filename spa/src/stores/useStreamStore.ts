@@ -65,9 +65,10 @@ export const useStreamStore = create<StreamStore>()(subscribeWithSelector((set) 
   handoffState: {},
   handoffProgress: {},
 
-  addMessage: (session, msg) => set((s) => ({
-    sessions: { ...s.sessions, [session]: { ...getOrCreate(s.sessions, session), messages: [...getOrCreate(s.sessions, session).messages, msg] } },
-  })),
+  addMessage: (session, msg) => set((s) => {
+    const cur = getOrCreate(s.sessions, session)
+    return { sessions: { ...s.sessions, [session]: { ...cur, messages: [...cur.messages, msg] } } }
+  }),
 
   addControlRequest: (session, req) => set((s) => {
     const cur = getOrCreate(s.sessions, session)
@@ -79,33 +80,40 @@ export const useStreamStore = create<StreamStore>()(subscribeWithSelector((set) 
     return { sessions: { ...s.sessions, [session]: { ...cur, pendingControlRequests: cur.pendingControlRequests.filter((r) => r.request_id !== requestId) } } }
   }),
 
-  setStreaming: (session, v) => set((s) => ({
-    sessions: { ...s.sessions, [session]: { ...getOrCreate(s.sessions, session), isStreaming: v } },
-  })),
+  setStreaming: (session, v) => set((s) => {
+    const cur = getOrCreate(s.sessions, session)
+    return { sessions: { ...s.sessions, [session]: { ...cur, isStreaming: v } } }
+  }),
 
-  setSessionInfo: (session, ccSessionId, model) => set((s) => ({
-    sessions: { ...s.sessions, [session]: { ...getOrCreate(s.sessions, session), sessionInfo: { ccSessionId, model } } },
-  })),
+  setSessionInfo: (session, ccSessionId, model) => set((s) => {
+    const cur = getOrCreate(s.sessions, session)
+    return { sessions: { ...s.sessions, [session]: { ...cur, sessionInfo: { ccSessionId, model } } } }
+  }),
 
   addCost: (session, usd) => set((s) => {
     const cur = getOrCreate(s.sessions, session)
     return { sessions: { ...s.sessions, [session]: { ...cur, cost: cur.cost + usd } } }
   }),
 
-  setConn: (session, conn) => set((s) => ({
-    sessions: { ...s.sessions, [session]: { ...getOrCreate(s.sessions, session), conn } },
-  })),
-
-  loadHistory: (session, messages) => set((s) => ({
-    sessions: { ...s.sessions, [session]: { ...getOrCreate(s.sessions, session), messages } },
-  })),
-
-  clearSession: (session) => set((s) => {
-    const cur = s.sessions[session]
-    cur?.conn?.close()
-    const { [session]: _, ...rest } = s.sessions
-    return { sessions: rest }
+  setConn: (session, conn) => set((s) => {
+    const cur = getOrCreate(s.sessions, session)
+    return { sessions: { ...s.sessions, [session]: { ...cur, conn } } }
   }),
+
+  loadHistory: (session, messages) => set((s) => {
+    const cur = getOrCreate(s.sessions, session)
+    return { sessions: { ...s.sessions, [session]: { ...cur, messages } } }
+  }),
+
+  clearSession: (session) => {
+    // Close conn outside set() to avoid re-entrant mutations
+    const cur = useStreamStore.getState().sessions[session]
+    cur?.conn?.close()
+    set((s) => {
+      const { [session]: _, ...rest } = s.sessions
+      return { sessions: rest }
+    })
+  },
 
   setHandoffState: (session, state) => set((s) => ({
     handoffState: { ...s.handoffState, [session]: state },
