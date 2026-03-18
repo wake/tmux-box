@@ -18,9 +18,11 @@ import ThinkingIndicator from './ThinkingIndicator'
 import FileAttachment, { type AttachedFile } from './FileAttachment'
 import HandoffButton from './HandoffButton'
 
+import type { SessionStatus } from './SessionStatusBadge'
+
 interface Props {
   wsUrl: string
-  sessionStatus?: string
+  sessionStatus?: SessionStatus
   onHandoff?: () => void
   onHandoffToTerm?: () => void
 }

@@ -68,8 +68,9 @@ export default function StreamInput({ onSend, onAttach, onHandoffToTerm, disable
           <button
             type="button"
             onClick={onHandoffToTerm}
+            disabled={disabled}
             title="Handoff to Term"
-            className="flex items-center gap-1 px-2 py-1 rounded text-xs text-[#888] hover:text-[#ddd] hover:bg-[#333] transition-colors"
+            className="flex items-center gap-1 px-2 py-1 rounded text-xs text-[#888] hover:text-[#ddd] hover:bg-[#333] transition-colors disabled:opacity-40"
           >
             <Terminal size={14} />
             <span>Handoff to Term</span>

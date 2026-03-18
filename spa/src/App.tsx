@@ -71,7 +71,7 @@ export default function App() {
       `${wsBase}/ws/session-events`,
       (event) => {
         if (event.type === 'status') {
-          useStreamStore.getState().setSessionStatus(event.session, event.value)
+          useStreamStore.getState().setSessionStatus(event.session, event.value as import('./components/SessionStatusBadge').SessionStatus)
           fetchSessions(daemonBase)
         }
         if (event.type === 'handoff') {

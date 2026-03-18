@@ -1,11 +1,12 @@
 // spa/src/components/HandoffButton.tsx
 import { Terminal } from '@phosphor-icons/react'
 import type { HandoffState } from '../stores/useStreamStore'
+import type { SessionStatus } from './SessionStatusBadge'
 
 interface Props {
   state: HandoffState
   progress?: string
-  sessionStatus?: string
+  sessionStatus?: SessionStatus
   onHandoff: () => void
 }
 
@@ -23,7 +24,7 @@ function progressLabel(progress: string): string {
   }
 }
 
-function isCCRunning(status?: string): boolean {
+function isCCRunning(status?: SessionStatus): boolean {
   return status === 'cc-idle' || status === 'cc-running' || status === 'cc-waiting'
 }
 

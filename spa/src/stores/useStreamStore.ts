@@ -1,6 +1,7 @@
 // spa/src/stores/useStreamStore.ts
 import { create } from 'zustand'
 import type { StreamMessage, ControlRequest, StreamConnection } from '../lib/stream-ws'
+import type { SessionStatus } from '../components/SessionStatusBadge'
 
 export type HandoffState = 'idle' | 'handoff-in-progress' | 'connected' | 'disconnected'
 
@@ -14,7 +15,7 @@ interface StreamState {
   conn: StreamConnection | null
   handoffState: HandoffState
   handoffProgress: string
-  sessionStatus: Record<string, string>
+  sessionStatus: Record<string, SessionStatus>
 
   addMessage: (msg: StreamMessage) => void
   addControlRequest: (req: ControlRequest) => void
@@ -25,7 +26,7 @@ interface StreamState {
   setConn: (conn: StreamConnection | null) => void
   setHandoffState: (state: HandoffState) => void
   setHandoffProgress: (progress: string) => void
-  setSessionStatus: (session: string, status: string) => void
+  setSessionStatus: (session: string, status: SessionStatus) => void
   clear: () => void
 }
 
