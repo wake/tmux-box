@@ -4,8 +4,6 @@ import { subscribeWithSelector } from 'zustand/middleware'
 import type { StreamMessage, ControlRequest, StreamConnection } from '../lib/stream-ws'
 import type { SessionStatus } from '../components/SessionStatusBadge'
 
-export type HandoffState = 'idle' | 'handoff-in-progress' | 'connected' | 'disconnected'
-
 export interface PerSessionState {
   messages: StreamMessage[]
   pendingControlRequests: ControlRequest[]
@@ -33,7 +31,6 @@ interface StreamStore {
   // Global state (keyed by session name but not part of PerSessionState)
   sessionStatus: Record<string, SessionStatus>
   relayStatus: Record<string, boolean>
-  handoffState: Record<string, HandoffState>
   handoffProgress: Record<string, string>
 
   // Per-session actions
@@ -48,7 +45,6 @@ interface StreamStore {
   clearSession: (session: string) => void
 
   // Global-keyed actions
-  setHandoffState: (session: string, state: HandoffState) => void
   setHandoffProgress: (session: string, progress: string) => void
   setRelayStatus: (session: string, connected: boolean) => void
   setSessionStatus: (session: string, status: SessionStatus) => void
@@ -62,7 +58,6 @@ export const useStreamStore = create<StreamStore>()(subscribeWithSelector((set) 
   sessions: {},
   sessionStatus: {},
   relayStatus: {},
-  handoffState: {},
   handoffProgress: {},
 
   addMessage: (session, msg) => set((s) => {
@@ -100,6 +95,9 @@ export const useStreamStore = create<StreamStore>()(subscribeWithSelector((set) 
     return { sessions: { ...s.sessions, [session]: { ...cur, conn } } }
   }),
 
+  // Note: loadHistory replaces all messages. If live messages arrived via
+  // addMessage before history loads, they will be lost. In practice this race
+  // is narrow (CC waits for user input after --resume), but be aware.
   loadHistory: (session, messages) => set((s) => {
     const cur = getOrCreate(s.sessions, session)
     return { sessions: { ...s.sessions, [session]: { ...cur, messages } } }
@@ -114,10 +112,6 @@ export const useStreamStore = create<StreamStore>()(subscribeWithSelector((set) 
       return { sessions: rest }
     })
   },
-
-  setHandoffState: (session, state) => set((s) => ({
-    handoffState: { ...s.handoffState, [session]: state },
-  })),
 
   setHandoffProgress: (session, progress) => set((s) => ({
     handoffProgress: { ...s.handoffProgress, [session]: progress },

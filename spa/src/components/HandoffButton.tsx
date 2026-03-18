@@ -1,10 +1,9 @@
 // spa/src/components/HandoffButton.tsx
 import { Terminal } from '@phosphor-icons/react'
-import type { HandoffState } from '../stores/useStreamStore'
 import type { SessionStatus } from './SessionStatusBadge'
 
 interface Props {
-  state: HandoffState
+  inProgress: boolean
   progress?: string
   sessionStatus?: SessionStatus
   onHandoff: () => void
@@ -12,6 +11,7 @@ interface Props {
 
 function progressLabel(progress: string): string {
   switch (progress) {
+    case 'starting': return 'Starting...'
     case 'detecting': return 'Detecting CC...'
     case 'stopping-cc': return 'Stopping CC...'
     case 'extracting-id': return 'Extracting session...'
@@ -28,11 +28,8 @@ function isCCRunning(status?: SessionStatus): boolean {
   return status === 'cc-idle' || status === 'cc-running' || status === 'cc-waiting'
 }
 
-export default function HandoffButton({ state, progress = '', sessionStatus, onHandoff }: Props) {
-  if (state === 'connected') return null
-
+export default function HandoffButton({ inProgress, progress = '', sessionStatus, onHandoff }: Props) {
   const ccAvailable = isCCRunning(sessionStatus)
-  const inProgress = state === 'handoff-in-progress'
   const disabled = inProgress || !ccAvailable
 
   return (
@@ -45,9 +42,6 @@ export default function HandoffButton({ state, progress = '', sessionStatus, onH
         <Terminal size={16} />
         {inProgress ? progressLabel(progress) : 'Handoff'}
       </button>
-      {state === 'disconnected' && (
-        <p className="text-xs text-gray-500">Session disconnected. Click to reconnect.</p>
-      )}
       {!ccAvailable && !inProgress && (
         <p className="text-xs text-gray-500">No CC running</p>
       )}

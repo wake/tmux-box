@@ -12,7 +12,6 @@ const emptyState = {
   sessions: {},
   sessionStatus: {},
   relayStatus: {},
-  handoffState: {},
   handoffProgress: {},
 }
 

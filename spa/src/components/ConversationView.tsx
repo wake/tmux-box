@@ -171,17 +171,16 @@ export default function ConversationView({ sessionName, onHandoff, onHandoffToTe
     if (onHandoff) {
       onHandoff()
     } else {
-      useStreamStore.getState().setHandoffState(sessionName, 'handoff-in-progress')
+      useStreamStore.getState().setHandoffProgress(sessionName, 'starting')
     }
   }, [onHandoff, sessionName])
 
   // Show HandoffButton when relay is not connected (idle or handoff in progress)
   if (!relayConnected) {
-    const inProgress = handoffProgress !== ''
     return (
       <div className="flex flex-col h-full">
         <HandoffButton
-          state={inProgress ? 'handoff-in-progress' : 'idle'}
+          inProgress={handoffProgress !== ''}
           progress={handoffProgress}
           sessionStatus={sessionStatus}
           onHandoff={handleHandoff}
