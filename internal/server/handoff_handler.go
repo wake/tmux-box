@@ -175,9 +175,11 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 	}
 
 	// Prepare pane — exit tmux copy-mode (if active) and clear any partial
-	// input. Escape exits copy-mode, closes CC dialogs, and may interrupt a
-	// running tool (Step 3 handles the idle check regardless). C-u clears
-	// the input line. Both are safe no-ops in normal idle state.
+	// input. "send-keys -X cancel" exits copy-mode without sending keys to
+	// the underlying application (safe no-op if not in copy-mode).
+	// Escape closes CC dialogs and may interrupt a running tool (Step 3
+	// handles the idle check regardless). C-u clears the input line.
+	s.tmux.SendKeysRaw(target, "-X", "cancel") // exit copy-mode; ignore error if not in a mode
 	if err := s.tmux.SendKeysRaw(target, "Escape"); err != nil {
 		broadcast("failed:send Escape: " + err.Error())
 		return

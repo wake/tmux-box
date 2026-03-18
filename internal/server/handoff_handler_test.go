@@ -499,16 +499,19 @@ func TestHandoffSendsEscapeAndCuBeforeDetect(t *testing.T) {
 
 	time.Sleep(500 * time.Millisecond)
 
-	// Verify the first two raw key calls are Escape and C-u (pane prep)
+	// Verify the first three raw key calls: -X cancel (exit copy-mode), Escape, C-u
 	rawKeys := fakeTmux.RawKeysSent()
-	if len(rawKeys) < 2 {
-		t.Fatalf("expected at least 2 raw key calls, got %d", len(rawKeys))
+	if len(rawKeys) < 3 {
+		t.Fatalf("expected at least 3 raw key calls, got %d", len(rawKeys))
 	}
-	if len(rawKeys[0].Keys) == 0 || rawKeys[0].Keys[0] != "Escape" {
-		t.Errorf("first raw key should be Escape, got %v", rawKeys[0].Keys)
+	if len(rawKeys[0].Keys) < 2 || rawKeys[0].Keys[0] != "-X" || rawKeys[0].Keys[1] != "cancel" {
+		t.Errorf("first raw key should be [-X cancel], got %v", rawKeys[0].Keys)
 	}
-	if len(rawKeys[1].Keys) == 0 || rawKeys[1].Keys[0] != "C-u" {
-		t.Errorf("second raw key should be C-u, got %v", rawKeys[1].Keys)
+	if len(rawKeys[1].Keys) == 0 || rawKeys[1].Keys[0] != "Escape" {
+		t.Errorf("second raw key should be Escape, got %v", rawKeys[1].Keys)
+	}
+	if len(rawKeys[2].Keys) == 0 || rawKeys[2].Keys[0] != "C-u" {
+		t.Errorf("third raw key should be C-u, got %v", rawKeys[2].Keys)
 	}
 }
 
