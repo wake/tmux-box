@@ -9,12 +9,15 @@ import {
 } from '../lib/stream-ws'
 import MessageBubble from './MessageBubble'
 import ToolCallBlock from './ToolCallBlock'
+import ThinkingBlock from './ThinkingBlock'
+import ToolResultBlock from './ToolResultBlock'
 import PermissionPrompt from './PermissionPrompt'
 import AskUserQuestion from './AskUserQuestion'
 import StreamInput from './StreamInput'
 import ThinkingIndicator from './ThinkingIndicator'
 import FileAttachment, { type AttachedFile } from './FileAttachment'
 import HandoffButton from './HandoffButton'
+import { Prohibit, TerminalWindow } from '@phosphor-icons/react'
 
 interface Props {
   sessionName: string
@@ -219,34 +222,78 @@ export default function ConversationView({ sessionName, onHandoff, onHandoffToTe
         )}
         {messages.map((msg, i) => {
           const key = `${sessionName}-${i}`
+
+          {/* --- Assistant messages --- */}
           if (msg.type === 'assistant' && 'message' in msg) {
             const am = msg as AssistantMessage
-            const content = am.message.content
             return (
               <div key={key}>
-                {content.map((block, j) => {
+                {am.message.content.map((block, j) => {
+                  if (block.type === 'thinking' && block.thinking) {
+                    return <ThinkingBlock key={j} content={block.thinking} />
+                  }
                   if (block.type === 'text' && block.text) {
                     return <MessageBubble key={j} role="assistant" content={block.text} />
                   }
                   if (block.type === 'tool_use' && block.name) {
-                    return (
-                      <ToolCallBlock key={j} tool={block.name} input={block.input || {}} />
-                    )
+                    return <ToolCallBlock key={j} tool={block.name} input={block.input || {}} />
                   }
                   return null
                 })}
               </div>
             )
           }
+
+          {/* --- User messages --- */}
           if (msg.type === 'user' && 'message' in msg) {
             const um = msg as UserMessage
-            const textBlock = um.message.content.find(
-              (b) => b.type === 'text',
+            const blocks = um.message.content
+
+            return (
+              <div key={key}>
+                {blocks.map((block, j) => {
+                  {/* Tool result */}
+                  if (block.type === 'tool_result') {
+                    const content = typeof block.content === 'string' ? block.content : JSON.stringify(block.content)
+                    return <ToolResultBlock key={j} content={content} isError={block.is_error ?? false} />
+                  }
+
+                  {/* Text blocks */}
+                  if (block.type === 'text' && block.text) {
+                    {/* Interrupted */}
+                    if (block.text === '[Request interrupted by user]') {
+                      return (
+                        <div key={j} data-testid="interrupted-msg"
+                          className="flex items-center gap-1.5 bg-[#4a3038] rounded-[12px_12px_4px_12px] px-3 py-1.5 text-sm text-[#eaa] italic">
+                          <Prohibit size={14} />
+                          <span>Request interrupted by user</span>
+                        </div>
+                      )
+                    }
+
+                    {/* Slash command */}
+                    if (block.text.startsWith('/')) {
+                      return (
+                        <div key={j} className="flex justify-end">
+                          <div data-testid="command-bubble"
+                            className="flex items-center gap-1.5 bg-[#4a4028] rounded-[12px_12px_4px_12px] px-3 py-1.5 text-[13px] text-[#e0d0a0] italic font-mono">
+                            <TerminalWindow size={14} weight="bold" className="text-[#c0a060]" />
+                            <span>{block.text}</span>
+                          </div>
+                        </div>
+                      )
+                    }
+
+                    {/* Normal user text */}
+                    return <MessageBubble key={j} role="user" content={block.text} />
+                  }
+
+                  return null
+                })}
+              </div>
             )
-            if (textBlock && textBlock.text) {
-              return <MessageBubble key={key} role="user" content={textBlock.text} />
-            }
           }
+
           return null
         })}
 

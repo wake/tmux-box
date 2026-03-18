@@ -95,3 +95,184 @@ describe('ConversationView', () => {
     expect(screen.getByText(/waiting/i)).toBeInTheDocument()
   })
 })
+
+describe('ConversationView message rendering', () => {
+  it('renders thinking block for assistant thinking content', () => {
+    useStreamStore.setState({
+      sessions: {
+        [SESSION]: {
+          messages: [{
+            type: 'assistant',
+            message: {
+              role: 'assistant',
+              content: [
+                { type: 'thinking', thinking: 'Let me analyze...' },
+                { type: 'text', text: 'Here is my answer.' },
+              ],
+              stop_reason: 'end_turn',
+            },
+          }],
+          pendingControlRequests: [],
+          isStreaming: false,
+          conn: null,
+          sessionInfo: { ccSessionId: '', model: '' },
+          cost: 0,
+        },
+      },
+      handoffState: { [SESSION]: 'connected' },
+    })
+
+    render(<ConversationView sessionName={SESSION} />)
+
+    expect(screen.getByTestId('thinking-header')).toBeInTheDocument()
+    expect(screen.getByText('Here is my answer.')).toBeInTheDocument()
+  })
+
+  it('renders tool_result block for user tool results', () => {
+    useStreamStore.setState({
+      sessions: {
+        [SESSION]: {
+          messages: [{
+            type: 'user',
+            message: {
+              role: 'user',
+              content: [
+                { type: 'tool_result', tool_use_id: 'toolu_01', content: 'file contents here', is_error: false },
+              ],
+              stop_reason: null,
+            },
+          }],
+          pendingControlRequests: [],
+          isStreaming: false,
+          conn: null,
+          sessionInfo: { ccSessionId: '', model: '' },
+          cost: 0,
+        },
+      },
+      handoffState: { [SESSION]: 'connected' },
+    })
+
+    render(<ConversationView sessionName={SESSION} />)
+
+    expect(screen.getByTestId('tool-result-header')).toBeInTheDocument()
+  })
+
+  it('renders interrupted message with prohibit style', () => {
+    useStreamStore.setState({
+      sessions: {
+        [SESSION]: {
+          messages: [{
+            type: 'user',
+            message: {
+              role: 'user',
+              content: [{ type: 'text', text: '[Request interrupted by user]' }],
+              stop_reason: null,
+            },
+          }],
+          pendingControlRequests: [],
+          isStreaming: false,
+          conn: null,
+          sessionInfo: { ccSessionId: '', model: '' },
+          cost: 0,
+        },
+      },
+      handoffState: { [SESSION]: 'connected' },
+    })
+
+    render(<ConversationView sessionName={SESSION} />)
+
+    expect(screen.getByTestId('interrupted-msg')).toBeInTheDocument()
+  })
+
+  it('renders slash command with command bubble style', () => {
+    useStreamStore.setState({
+      sessions: {
+        [SESSION]: {
+          messages: [{
+            type: 'user',
+            message: {
+              role: 'user',
+              content: [{ type: 'text', text: '/exit' }],
+              stop_reason: null,
+            },
+          }],
+          pendingControlRequests: [],
+          isStreaming: false,
+          conn: null,
+          sessionInfo: { ccSessionId: '', model: '' },
+          cost: 0,
+        },
+      },
+      handoffState: { [SESSION]: 'connected' },
+    })
+
+    render(<ConversationView sessionName={SESSION} />)
+
+    expect(screen.getByTestId('command-bubble')).toBeInTheDocument()
+    expect(screen.getByTestId('command-bubble')).toHaveTextContent('/exit')
+  })
+
+  it('renders mixed assistant content blocks correctly', () => {
+    useStreamStore.setState({
+      sessions: {
+        [SESSION]: {
+          messages: [{
+            type: 'assistant',
+            message: {
+              role: 'assistant',
+              content: [
+                { type: 'thinking', thinking: 'Deep thought' },
+                { type: 'text', text: 'My response' },
+                { type: 'tool_use', id: 'toolu_01', name: 'Bash', input: { command: 'ls' } },
+              ],
+              stop_reason: 'end_turn',
+            },
+          }],
+          pendingControlRequests: [],
+          isStreaming: false,
+          conn: null,
+          sessionInfo: { ccSessionId: '', model: '' },
+          cost: 0,
+        },
+      },
+      handoffState: { [SESSION]: 'connected' },
+    })
+
+    render(<ConversationView sessionName={SESSION} />)
+
+    expect(screen.getByTestId('thinking-header')).toBeInTheDocument()
+    expect(screen.getByText('My response')).toBeInTheDocument()
+    expect(screen.getByText('Bash')).toBeInTheDocument()
+    expect(screen.getByText('ls')).toBeInTheDocument()
+  })
+
+  it('renders user tool_result with error state', () => {
+    useStreamStore.setState({
+      sessions: {
+        [SESSION]: {
+          messages: [{
+            type: 'user',
+            message: {
+              role: 'user',
+              content: [
+                { type: 'tool_result', tool_use_id: 'toolu_02', content: 'ENOENT: no such file', is_error: true },
+              ],
+              stop_reason: null,
+            },
+          }],
+          pendingControlRequests: [],
+          isStreaming: false,
+          conn: null,
+          sessionInfo: { ccSessionId: '', model: '' },
+          cost: 0,
+        },
+      },
+      handoffState: { [SESSION]: 'connected' },
+    })
+
+    render(<ConversationView sessionName={SESSION} />)
+
+    const block = screen.getByTestId('tool-result-block')
+    expect(block.className).toContain('border-[#302a2a]')
+  })
+})
