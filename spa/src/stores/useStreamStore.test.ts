@@ -7,7 +7,6 @@ const emptyState = {
   sessions: {},
   sessionStatus: {},
   relayStatus: {},
-  handoffState: {},
   handoffProgress: {},
 }
 
@@ -101,14 +100,6 @@ describe('useStreamStore (per-session)', () => {
     addCost('sess-a', 0.5)
     addCost('sess-a', 0.3)
     expect(useStreamStore.getState().sessions['sess-a'].cost).toBe(0.8)
-  })
-
-  it('handoffState is per-session', () => {
-    const { setHandoffState } = useStreamStore.getState()
-    setHandoffState('sess-a', 'connected')
-    setHandoffState('sess-b', 'handoff-in-progress')
-    expect(useStreamStore.getState().handoffState['sess-a']).toBe('connected')
-    expect(useStreamStore.getState().handoffState['sess-b']).toBe('handoff-in-progress')
   })
 
   it('handoffProgress is per-session', () => {

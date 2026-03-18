@@ -12,7 +12,6 @@ const emptyState = {
   sessions: {},
   sessionStatus: {},
   relayStatus: {},
-  handoffState: {},
   handoffProgress: {},
 }
 
@@ -22,18 +21,33 @@ beforeEach(() => {
 })
 
 describe('ConversationView', () => {
-  it('renders empty state when connected', () => {
+  it('shows conversation UI when relay is connected', () => {
     render(<ConversationView sessionName={SESSION} />)
     act(() => {
-      useStreamStore.getState().setHandoffState(SESSION, 'connected')
+      useStreamStore.getState().setRelayStatus(SESSION, true)
     })
     expect(screen.getByText(/waiting/i)).toBeInTheDocument()
+    expect(screen.queryByText('Handoff')).not.toBeInTheDocument()
   })
 
-  it('renders messages from per-session store', () => {
+  it('shows HandoffButton when relay is not connected', () => {
+    useStreamStore.getState().setSessionStatus(SESSION, 'cc-idle')
+    render(<ConversationView sessionName={SESSION} />)
+    expect(screen.getByText('Handoff')).toBeInTheDocument()
+  })
+
+  it('shows progress when handoff is in progress', () => {
     render(<ConversationView sessionName={SESSION} />)
     act(() => {
-      useStreamStore.getState().setHandoffState(SESSION, 'connected')
+      useStreamStore.getState().setHandoffProgress(SESSION, 'detecting')
+    })
+    expect(screen.getByText(/Detecting/i)).toBeInTheDocument()
+  })
+
+  it('renders messages when relay connected', () => {
+    render(<ConversationView sessionName={SESSION} />)
+    act(() => {
+      useStreamStore.getState().setRelayStatus(SESSION, true)
       useStreamStore.getState().addMessage(SESSION, {
         type: 'assistant',
         message: {
@@ -49,47 +63,19 @@ describe('ConversationView', () => {
   it('shows ThinkingIndicator when streaming with no assistant messages', () => {
     render(<ConversationView sessionName={SESSION} />)
     act(() => {
-      useStreamStore.getState().setHandoffState(SESSION, 'connected')
+      useStreamStore.getState().setRelayStatus(SESSION, true)
       useStreamStore.getState().setStreaming(SESSION, true)
     })
     expect(screen.getByTestId('thinking-indicator')).toBeInTheDocument()
   })
 
-  it('hides ThinkingIndicator when assistant message arrives', () => {
+  it('transitions from HandoffButton to conversation when relay connects', () => {
     render(<ConversationView sessionName={SESSION} />)
-    act(() => {
-      useStreamStore.getState().setHandoffState(SESSION, 'connected')
-      useStreamStore.getState().setStreaming(SESSION, true)
-      useStreamStore.getState().addMessage(SESSION, {
-        type: 'assistant',
-        message: {
-          role: 'assistant',
-          content: [{ type: 'text', text: 'Reply' }],
-          stop_reason: null,
-        },
-      } as any)
-    })
-    expect(screen.queryByTestId('thinking-indicator')).not.toBeInTheDocument()
-  })
-
-  it('shows HandoffButton when handoffState is idle', () => {
-    useStreamStore.getState().setSessionStatus(SESSION, 'cc-idle')
-    render(<ConversationView sessionName={SESSION} />)
+    // Initially: no relay → show Handoff
     expect(screen.getByText('Handoff')).toBeInTheDocument()
-  })
-
-  it('shows HandoffButton when handoffState is disconnected', () => {
-    render(<ConversationView sessionName={SESSION} />)
+    // Relay connects → show conversation
     act(() => {
-      useStreamStore.getState().setHandoffState(SESSION, 'disconnected')
-    })
-    expect(screen.getByText(/disconnected/i)).toBeInTheDocument()
-  })
-
-  it('hides HandoffButton when handoffState is connected', () => {
-    render(<ConversationView sessionName={SESSION} />)
-    act(() => {
-      useStreamStore.getState().setHandoffState(SESSION, 'connected')
+      useStreamStore.getState().setRelayStatus(SESSION, true)
     })
     expect(screen.queryByText('Handoff')).not.toBeInTheDocument()
     expect(screen.getByText(/waiting/i)).toBeInTheDocument()
@@ -119,7 +105,7 @@ describe('ConversationView message rendering', () => {
           cost: 0,
         },
       },
-      handoffState: { [SESSION]: 'connected' },
+      relayStatus: { [SESSION]: true },
     })
 
     render(<ConversationView sessionName={SESSION} />)
@@ -149,7 +135,7 @@ describe('ConversationView message rendering', () => {
           cost: 0,
         },
       },
-      handoffState: { [SESSION]: 'connected' },
+      relayStatus: { [SESSION]: true },
     })
 
     render(<ConversationView sessionName={SESSION} />)
@@ -176,7 +162,7 @@ describe('ConversationView message rendering', () => {
           cost: 0,
         },
       },
-      handoffState: { [SESSION]: 'connected' },
+      relayStatus: { [SESSION]: true },
     })
 
     render(<ConversationView sessionName={SESSION} />)
@@ -203,7 +189,7 @@ describe('ConversationView message rendering', () => {
           cost: 0,
         },
       },
-      handoffState: { [SESSION]: 'connected' },
+      relayStatus: { [SESSION]: true },
     })
 
     render(<ConversationView sessionName={SESSION} />)
@@ -235,7 +221,7 @@ describe('ConversationView message rendering', () => {
           cost: 0,
         },
       },
-      handoffState: { [SESSION]: 'connected' },
+      relayStatus: { [SESSION]: true },
     })
 
     render(<ConversationView sessionName={SESSION} />)
@@ -267,7 +253,7 @@ describe('ConversationView message rendering', () => {
           cost: 0,
         },
       },
-      handoffState: { [SESSION]: 'connected' },
+      relayStatus: { [SESSION]: true },
     })
 
     render(<ConversationView sessionName={SESSION} />)

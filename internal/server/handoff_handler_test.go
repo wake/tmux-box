@@ -440,6 +440,69 @@ func TestHandoffResizesPaneTooSmall(t *testing.T) {
 	}
 }
 
+func TestHandoffSendsEscapeAndCuBeforeDetect(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	fakeTmux := tmux.NewFakeExecutor()
+	fakeTmux.SetPaneCommand("test-session:0", "claude")
+	fakeTmux.SetPaneContent("test-session:0", "  Session ID: deadbeef-1234\n❯ ")
+
+	cfg := config.Config{
+		Port: 7860,
+		Stream: config.StreamConfig{
+			Presets: []config.Preset{
+				{Name: "cc", Command: "claude -p --input-format stream-json --output-format stream-json"},
+			},
+		},
+		Detect: config.DetectConfig{
+			CCCommands:   []string{"claude"},
+			PollInterval: 2,
+		},
+	}
+
+	s := server.New(cfg, db, fakeTmux, "")
+	srv := httptest.NewServer(s.Handler())
+	t.Cleanup(srv.Close)
+
+	_, err = db.CreateSession(store.Session{
+		Name:       "test-session",
+		TmuxTarget: "test-session:0",
+		Cwd:        "/tmp",
+		Mode:       "term",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body, _ := json.Marshal(map[string]string{"mode": "stream", "preset": "cc"})
+	resp, err := http.Post(srv.URL+"/api/sessions/1/handoff", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("want 202, got %d", resp.StatusCode)
+	}
+
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify the first two raw key calls are Escape and C-u (pane prep)
+	rawKeys := fakeTmux.RawKeysSent()
+	if len(rawKeys) < 2 {
+		t.Fatalf("expected at least 2 raw key calls, got %d", len(rawKeys))
+	}
+	if len(rawKeys[0].Keys) == 0 || rawKeys[0].Keys[0] != "Escape" {
+		t.Errorf("first raw key should be Escape, got %v", rawKeys[0].Keys)
+	}
+	if len(rawKeys[1].Keys) == 0 || rawKeys[1].Keys[0] != "C-u" {
+		t.Errorf("second raw key should be C-u, got %v", rawKeys[1].Keys)
+	}
+}
+
 func TestHandoffJSONLPreset(t *testing.T) {
 	srv, db := newHandoffTestServer(t)
 

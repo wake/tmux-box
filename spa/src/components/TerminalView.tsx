@@ -7,12 +7,18 @@ import '@xterm/xterm/css/xterm.css'
 
 interface Props {
   wsUrl: string
+  visible?: boolean
 }
 
-export default function TerminalView({ wsUrl }: Props) {
+export default function TerminalView({ wsUrl, visible = true }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
+  const fitAddonRef = useRef<FitAddon | null>(null)
+  const connRef = useRef<ReturnType<typeof connectTerminal> | null>(null)
+  const termRef = useRef<Terminal | null>(null)
   const [ready, setReady] = useState(false)
+  const prevVisible = useRef(visible)
 
+  // Initial setup — create terminal + WS connection
   useEffect(() => {
     setReady(false)
     if (!containerRef.current) return
@@ -29,6 +35,8 @@ export default function TerminalView({ wsUrl }: Props) {
     const fitAddon = new FitAddon()
     term.loadAddon(fitAddon)
     term.open(containerRef.current)
+    fitAddonRef.current = fitAddon
+    termRef.current = term
 
     try { term.loadAddon(new WebglAddon()) } catch { /* fallback to canvas */ }
 
@@ -58,6 +66,7 @@ export default function TerminalView({ wsUrl }: Props) {
         conn.resize(term.cols, term.rows)
       },
     )
+    connRef.current = conn
 
     term.onData((data) => conn.send(data))
     term.onResize(({ cols, rows }) => conn.resize(cols, rows))
@@ -81,8 +90,37 @@ export default function TerminalView({ wsUrl }: Props) {
       container.removeEventListener('contextmenu', handleContextMenu)
       conn.close()
       term.dispose()
+      fitAddonRef.current = null
+      connRef.current = null
+      termRef.current = null
     }
   }, [wsUrl])
+
+  // Re-show overlay + refit when becoming visible after being hidden
+  useEffect(() => {
+    if (visible && !prevVisible.current) {
+      // Becoming visible — show overlay, refit, then fade out
+      setReady(false)
+      requestAnimationFrame(() => {
+        fitAddonRef.current?.fit()
+        // Explicitly send resize even if fit() didn't change dimensions,
+        // because tmux window may have been resized during stream mode
+        // and onResize won't fire when cols/rows stay the same.
+        const term = termRef.current
+        const conn = connRef.current
+        if (term && conn) {
+          conn.resize(term.cols, term.rows)
+        }
+      })
+      const timer = setTimeout(() => {
+        setReady(true)
+        termRef.current?.focus()
+      }, 500)
+      prevVisible.current = visible
+      return () => clearTimeout(timer)
+    }
+    prevVisible.current = visible
+  }, [visible])
 
   return (
     <div className="w-full h-full relative" style={{ background: '#0a0a1a' }}>
@@ -90,6 +128,7 @@ export default function TerminalView({ wsUrl }: Props) {
 
       {/* Loading overlay with breathing animation */}
       <div
+        data-testid="terminal-overlay"
         className="absolute inset-0 flex items-center justify-center pointer-events-none"
         style={{
           background: '#0a0a1a',

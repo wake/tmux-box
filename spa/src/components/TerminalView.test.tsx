@@ -83,4 +83,15 @@ describe('TerminalView', () => {
     const opts = TerminalSpy.mock.calls[0][0]
     expect(opts.rightClickSelectsWord).toBe(true)
   })
+
+  it('shows overlay when visible changes from false to true', () => {
+    const { container, rerender } = render(
+      <TerminalView wsUrl="ws://localhost:7860/ws/terminal/test" visible={false} />
+    )
+    // Rerender with visible=true — overlay should be visible (opacity 1)
+    rerender(<TerminalView wsUrl="ws://localhost:7860/ws/terminal/test" visible={true} />)
+    const overlay = container.querySelector('[data-testid="terminal-overlay"]')
+    expect(overlay).toBeInTheDocument()
+    expect(overlay?.getAttribute('style')).toContain('opacity: 1')
+  })
 })
