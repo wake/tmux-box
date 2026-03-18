@@ -73,6 +73,46 @@ func TestParseJSONLEmpty(t *testing.T) {
 	}
 }
 
+func TestParseJSONLFiltersMeta(t *testing.T) {
+	input := `{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: ignore</local-command-caveat>"}}
+{"type":"user","message":{"role":"user","content":"<command-name>/exit</command-name>\n            <command-message>exit</command-message>\n            <command-args></command-args>"}}
+{"type":"user","message":{"role":"user","content":"<local-command-stdout>Catch you later!</local-command-stdout>"}}
+{"type":"assistant","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"No response requested."}],"stop_reason":"stop_sequence"}}
+{"type":"user","message":{"role":"user","content":"ping"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"pong"}],"stop_reason":"end_turn"}}
+`
+	messages, err := ParseJSONL(strings.NewReader(input), 2*1024*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should get 3 messages: /exit (parsed command), ping, pong
+	if len(messages) != 3 {
+		t.Fatalf("want 3 messages, got %d", len(messages))
+	}
+
+	// First: /exit command (extracted from <command-name>)
+	msg0 := messages[0]["message"].(map[string]interface{})
+	content0 := msg0["content"].([]interface{})
+	block0 := content0[0].(map[string]interface{})
+	if block0["text"] != "/exit" {
+		t.Errorf("want /exit, got %v", block0["text"])
+	}
+
+	// Second: ping
+	msg1 := messages[1]["message"].(map[string]interface{})
+	content1 := msg1["content"].([]interface{})
+	block1 := content1[0].(map[string]interface{})
+	if block1["text"] != "ping" {
+		t.Errorf("want ping, got %v", block1["text"])
+	}
+
+	// Third: pong
+	if messages[2]["type"] != "assistant" {
+		t.Errorf("want assistant, got %v", messages[2]["type"])
+	}
+}
+
 func TestParseJSONLSizeLimit(t *testing.T) {
 	// Create input with 100 lines
 	var sb strings.Builder

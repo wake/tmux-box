@@ -6,8 +6,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"regexp"
 	"strings"
 )
+
+var commandNameRegex = regexp.MustCompile(`<command-name>(.+?)</command-name>`)
 
 // CCProjectPath converts a working directory path to CC's project hash format.
 // Example: "/Users/wake/Workspace" → "-Users-wake-Workspace"
@@ -49,9 +52,36 @@ func ParseJSONL(r io.Reader, maxBytes int64) ([]map[string]interface{}, error) {
 			continue
 		}
 
+		// Skip isMeta messages (CC system bookkeeping)
+		if isMeta, ok := entry["isMeta"].(bool); ok && isMeta {
+			continue
+		}
+
 		msg, ok := entry["message"].(map[string]interface{})
 		if !ok {
 			continue
+		}
+
+		// Skip synthetic assistant messages (e.g. "No response requested.")
+		if typ == "assistant" {
+			if model, _ := msg["model"].(string); model == "<synthetic>" {
+				continue
+			}
+		}
+
+		// Filter CC internal markup in user string content (BEFORE normalization)
+		if typ == "user" {
+			if contentStr, ok := msg["content"].(string); ok {
+				if strings.HasPrefix(contentStr, "<local-command-stdout>") ||
+					strings.HasPrefix(contentStr, "<local-command-caveat>") {
+					continue
+				}
+				// Parse <command-name>/exit</command-name> → "/exit"
+				if m := commandNameRegex.FindStringSubmatch(contentStr); len(m) >= 2 {
+					contentStr = m[1]
+				}
+				msg["content"] = contentStr // will be normalized below
+			}
 		}
 
 		// Normalize content: string → content block array
