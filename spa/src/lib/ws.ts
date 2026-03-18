@@ -29,12 +29,10 @@ export function connectTerminal(
     ws.onclose = () => {
       if (closed) return // manual close — don't notify or reconnect
       onClose()
-      if (!closed) {
-        setTimeout(() => {
-          if (!closed) connect()
-        }, retryMs)
-        retryMs = Math.min(retryMs * 2, 30000)
-      }
+      setTimeout(() => {
+        if (!closed) connect()
+      }, retryMs)
+      retryMs = Math.min(retryMs * 2, 30000)
     }
   }
 

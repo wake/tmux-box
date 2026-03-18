@@ -121,20 +121,22 @@ describe('TerminalView', () => {
     expect(overlay?.textContent).toContain('reconnecting...')
   })
 
-  it('hides reconnecting overlay on reconnect', () => {
+  it('hides reconnecting overlay on reconnect', async () => {
     const { container } = render(
       <TerminalView wsUrl="ws://localhost:7860/ws/terminal/test" />
     )
+    // Simulate initial connect + first data → wait for reveal (300ms + margin)
     act(() => capturedCallbacks.onOpen?.())
-    act(() => capturedCallbacks.onClose?.())
+    act(() => capturedCallbacks.onData?.(new ArrayBuffer(1)))
+    await act(() => new Promise((r) => setTimeout(r, 400)))
 
-    // Overlay should be visible
+    // Disconnect
+    act(() => capturedCallbacks.onClose?.())
     let overlay = container.querySelector('[data-testid="terminal-overlay"]')
     expect(overlay?.getAttribute('style')).toContain('opacity: 1')
 
-    // Simulate reconnect
+    // Reconnect — revealed=true so onOpen sets ready=true
     act(() => capturedCallbacks.onOpen?.())
-
     overlay = container.querySelector('[data-testid="terminal-overlay"]')
     expect(overlay?.getAttribute('style')).toContain('opacity: 0')
   })

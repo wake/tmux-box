@@ -144,7 +144,7 @@ describe('connectTerminal auto-reconnect', () => {
     expect(onClose).not.toHaveBeenCalled() // onClose not called on manual close
   })
 
-  it('does not reconnect if WS never opened (initial connect failure)', () => {
+  it('retries even if WS never opened (initial connect failure)', () => {
     connectTerminal('ws://test', vi.fn(), vi.fn())
     wsInstances[0].simulateClose() // never opened
 
