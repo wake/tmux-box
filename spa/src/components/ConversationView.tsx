@@ -40,7 +40,7 @@ export default function ConversationView({ sessionName, onHandoff, onHandoffToTe
   const pendingControlRequests = useStreamStore((s) => s.sessions[sessionName]?.pendingControlRequests ?? EMPTY_CONTROLS)
   const isStreaming = useStreamStore((s) => s.sessions[sessionName]?.isStreaming ?? false)
   const conn = useStreamStore((s) => s.sessions[sessionName]?.conn ?? null)
-  const handoffState = useStreamStore((s) => s.handoffState[sessionName] ?? 'idle')
+  const relayConnected = useStreamStore((s) => s.relayStatus[sessionName] ?? false)
   const handoffProgress = useStreamStore((s) => s.handoffProgress[sessionName] ?? '')
   const sessionStatus = useStreamStore((s) => s.sessionStatus[sessionName])
 
@@ -175,12 +175,13 @@ export default function ConversationView({ sessionName, onHandoff, onHandoffToTe
     }
   }, [onHandoff, sessionName])
 
-  // When handoffState is not 'connected', show the HandoffButton overlay
-  if (handoffState !== 'connected') {
+  // Show HandoffButton when relay is not connected (idle or handoff in progress)
+  if (!relayConnected) {
+    const inProgress = handoffProgress !== ''
     return (
       <div className="flex flex-col h-full">
         <HandoffButton
-          state={handoffState}
+          state={inProgress ? 'handoff-in-progress' : 'idle'}
           progress={handoffProgress}
           sessionStatus={sessionStatus}
           onHandoff={handleHandoff}

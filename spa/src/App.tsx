@@ -81,30 +81,24 @@ export default function App() {
         if (event.type === 'handoff') {
           const store = useStreamStore.getState()
           if (event.value === 'connected') {
+            // Handoff completed — clear progress, fetch fresh data + history
             store.setHandoffProgress(event.session, '')
-            // Wait for fresh session data to determine mode before setting final state
             fetchSessions(daemonBase).then(() => {
               const sess = useSessionStore.getState().sessions.find((s) => s.name === event.session)
               if (sess && sess.mode !== 'term') {
-                // Stream/JSONL handoff — mark connected and load conversation history
-                useStreamStore.getState().setHandoffState(event.session, 'connected')
                 fetchHistory(daemonBase, sess.id).then((msgs) => {
                   useStreamStore.getState().loadHistory(event.session, msgs)
                 }).catch(() => { /* history fetch failed — non-critical */ })
               } else {
-                // Term handoff — clear stale per-session state and reset to idle
+                // Term handoff — clear stale per-session state
                 useStreamStore.getState().clearSession(event.session)
-                useStreamStore.getState().setHandoffState(event.session, 'idle')
               }
-            }).catch(() => {
-              // fetchSessions failed — fall back to idle (safe default)
-              useStreamStore.getState().setHandoffState(event.session, 'idle')
-            })
+            }).catch(() => { /* fetchSessions failed — non-critical */ })
           } else if (event.value.startsWith('failed')) {
-            store.setHandoffState(event.session, 'disconnected')
             store.setHandoffProgress(event.session, '')
             fetchSessions(daemonBase)
           } else {
+            // Progress update (detecting, stopping-cc, etc.)
             store.setHandoffProgress(event.session, event.value)
           }
         }
@@ -126,16 +120,17 @@ export default function App() {
   }, [active])
 
   // Handoff for stream modes — stay on stream page, handoff runs in background
+  // Progress is tracked via handoff events; relay connection drives UI state
   const handleHandoff = useCallback(async (mode: string, preset: string) => {
     if (!active) return
     setActivePreset(preset)
     try {
-      useStreamStore.getState().setHandoffState(active.name, 'handoff-in-progress')
+      useStreamStore.getState().setHandoffProgress(active.name, 'starting')
       await handoff(daemonBase, active.id, mode, preset)
       await fetchSessions(daemonBase)
     } catch (e) {
       console.error('handoff failed:', e)
-      useStreamStore.getState().setHandoffState(active.name, 'disconnected')
+      useStreamStore.getState().setHandoffProgress(active.name, '')
     }
   }, [active, fetchSessions])
 
@@ -143,12 +138,12 @@ export default function App() {
     if (!active) return
     setHash(active.uid, 'term')
     try {
-      useStreamStore.getState().setHandoffState(active.name, 'handoff-in-progress')
+      useStreamStore.getState().setHandoffProgress(active.name, 'starting')
       await handoff(daemonBase, active.id, 'term')
       await fetchSessions(daemonBase)
     } catch (e) {
       console.error('handoff to term failed:', e)
-      useStreamStore.getState().setHandoffState(active.name, 'disconnected')
+      useStreamStore.getState().setHandoffProgress(active.name, '')
     }
   }, [active, fetchSessions])
 
