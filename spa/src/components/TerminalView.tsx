@@ -16,11 +16,13 @@ export default function TerminalView({ wsUrl, visible = true }: Props) {
   const connRef = useRef<ReturnType<typeof connectTerminal> | null>(null)
   const termRef = useRef<Terminal | null>(null)
   const [ready, setReady] = useState(false)
+  const [disconnected, setDisconnected] = useState(false)
   const prevVisible = useRef(visible)
 
   // Initial setup — create terminal + WS connection
   useEffect(() => {
     setReady(false)
+    setDisconnected(false)
     if (!containerRef.current) return
 
     const term = new Terminal({
@@ -60,8 +62,12 @@ export default function TerminalView({ wsUrl, visible = true }: Props) {
         // Reveal shortly after first data — give tmux time to finish rendering
         if (!revealed) setTimeout(reveal, 300)
       },
-      () => term.write('\r\n\x1b[31m[disconnected]\x1b[0m\r\n'),
+      () => setDisconnected(true),
       () => {
+        setDisconnected(false)
+        // On reconnect, show terminal immediately (buffer already has content).
+        // On initial connect, let reveal() handle it after first data + 300ms.
+        if (revealed) setReady(true)
         fitAddon.fit()
         conn.resize(term.cols, term.rows)
       },
@@ -122,17 +128,19 @@ export default function TerminalView({ wsUrl, visible = true }: Props) {
     prevVisible.current = visible
   }, [visible])
 
+  const showOverlay = !ready || disconnected
+
   return (
     <div className="w-full h-full relative" style={{ background: '#0a0a1a' }}>
       <div ref={containerRef} className="w-full h-full" />
 
-      {/* Loading overlay with breathing animation */}
+      {/* Loading / reconnecting overlay */}
       <div
         data-testid="terminal-overlay"
         className="absolute inset-0 flex items-center justify-center pointer-events-none"
         style={{
-          background: '#0a0a1a',
-          opacity: ready ? 0 : 1,
+          background: disconnected ? 'rgba(10, 10, 26, 0.5)' : '#0a0a1a',
+          opacity: showOverlay ? 1 : 0,
           transition: 'opacity 0.3s ease-out',
         }}
       >
@@ -140,7 +148,7 @@ export default function TerminalView({ wsUrl, visible = true }: Props) {
           className="text-gray-500 text-sm"
           style={{ animation: 'breathing 2s ease-in-out infinite' }}
         >
-          connecting...
+          {disconnected ? 'reconnecting...' : 'connecting...'}
         </span>
         <style>{`
           @keyframes breathing {

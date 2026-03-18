@@ -10,15 +10,33 @@ export function connectTerminal(
   onClose: () => void,
   onOpen?: () => void,
 ): TerminalConnection {
-  const ws = new WebSocket(url)
-  ws.binaryType = 'arraybuffer'
+  let closed = false
+  let retryMs = 1000
+  let ws: WebSocket
 
-  ws.onopen = () => onOpen?.()
-  ws.onmessage = (e) => {
-    if (e.data instanceof ArrayBuffer) onData(e.data)
+  function connect() {
+    ws = new WebSocket(url)
+    ws.binaryType = 'arraybuffer'
+
+    ws.onopen = () => {
+      retryMs = 1000 // reset backoff on success
+      onOpen?.()
+    }
+    ws.onmessage = (e) => {
+      if (e.data instanceof ArrayBuffer) onData(e.data)
+    }
+    ws.onerror = () => {}
+    ws.onclose = () => {
+      if (closed) return // manual close — don't notify or reconnect
+      onClose()
+      setTimeout(() => {
+        if (!closed) connect()
+      }, retryMs)
+      retryMs = Math.min(retryMs * 2, 30000)
+    }
   }
-  ws.onerror = () => {}
-  ws.onclose = () => onClose()
+
+  connect()
 
   return {
     send: (data) => {
@@ -29,6 +47,9 @@ export function connectTerminal(
         ws.send(JSON.stringify({ type: 'resize', cols, rows }))
       }
     },
-    close: () => ws.close(),
+    close: () => {
+      closed = true
+      ws.close()
+    },
   }
 }
