@@ -8,58 +8,74 @@ beforeEach(() => {
 })
 
 describe('HandoffButton', () => {
-  it('renders button with preset name', () => {
-    render(<HandoffButton presetName="cc" state="idle" onHandoff={() => {}} />)
-    expect(screen.getByText('Start cc')).toBeInTheDocument()
+  it('renders button with Handoff label when CC is running', () => {
+    render(<HandoffButton state="idle" sessionStatus="cc-idle" onHandoff={() => {}} />)
+    expect(screen.getByText('Handoff')).toBeInTheDocument()
   })
 
   it('shows connecting state', () => {
-    render(<HandoffButton presetName="cc" state="handoff-in-progress" onHandoff={() => {}} />)
+    render(<HandoffButton state="handoff-in-progress" sessionStatus="cc-idle" onHandoff={() => {}} />)
     expect(screen.getByText('Connecting...')).toBeInTheDocument()
   })
 
   it('disables button during handoff-in-progress', () => {
-    render(<HandoffButton presetName="cc" state="handoff-in-progress" onHandoff={() => {}} />)
+    render(<HandoffButton state="handoff-in-progress" sessionStatus="cc-idle" onHandoff={() => {}} />)
     expect(screen.getByRole('button')).toBeDisabled()
   })
 
   it('hidden when connected', () => {
     const { container } = render(
-      <HandoffButton presetName="cc" state="connected" onHandoff={() => {}} />,
+      <HandoffButton state="connected" sessionStatus="cc-idle" onHandoff={() => {}} />,
     )
     expect(container.firstChild).toBeNull()
   })
 
-  it('calls onHandoff when clicked', () => {
+  it('calls onHandoff when clicked with CC running', () => {
     const fn = vi.fn()
-    render(<HandoffButton presetName="cc" state="idle" onHandoff={fn} />)
+    render(<HandoffButton state="idle" sessionStatus="cc-running" onHandoff={fn} />)
     fireEvent.click(screen.getByRole('button'))
     expect(fn).toHaveBeenCalled()
   })
 
   it('shows disconnect message in disconnected state', () => {
-    render(<HandoffButton presetName="cc" state="disconnected" onHandoff={() => {}} />)
+    render(<HandoffButton state="disconnected" sessionStatus="cc-idle" onHandoff={() => {}} />)
     expect(screen.getByText(/disconnected/i)).toBeInTheDocument()
-    expect(screen.getByText('Start cc')).toBeInTheDocument()
+    expect(screen.getByText('Handoff')).toBeInTheDocument()
+  })
+
+  it('disables button when no CC running', () => {
+    render(<HandoffButton state="idle" sessionStatus="shell" onHandoff={() => {}} />)
+    expect(screen.getByRole('button')).toBeDisabled()
+    expect(screen.getByText('No CC running')).toBeInTheDocument()
   })
 
   it('shows progress label for detecting', () => {
-    render(<HandoffButton presetName="cc" state="handoff-in-progress" progress="detecting" onHandoff={() => {}} />)
+    render(<HandoffButton state="handoff-in-progress" progress="detecting" sessionStatus="cc-idle" onHandoff={() => {}} />)
     expect(screen.getByText('Detecting CC...')).toBeInTheDocument()
   })
 
   it('shows progress label for stopping-cc', () => {
-    render(<HandoffButton presetName="cc" state="handoff-in-progress" progress="stopping-cc" onHandoff={() => {}} />)
+    render(<HandoffButton state="handoff-in-progress" progress="stopping-cc" sessionStatus="cc-idle" onHandoff={() => {}} />)
     expect(screen.getByText('Stopping CC...')).toBeInTheDocument()
   })
 
   it('shows progress label for launching', () => {
-    render(<HandoffButton presetName="cc" state="handoff-in-progress" progress="launching" onHandoff={() => {}} />)
+    render(<HandoffButton state="handoff-in-progress" progress="launching" sessionStatus="cc-idle" onHandoff={() => {}} />)
     expect(screen.getByText('Launching relay...')).toBeInTheDocument()
   })
 
+  it('shows progress label for extracting-id', () => {
+    render(<HandoffButton state="handoff-in-progress" progress="extracting-id" sessionStatus="cc-idle" onHandoff={() => {}} />)
+    expect(screen.getByText('Extracting session...')).toBeInTheDocument()
+  })
+
+  it('shows progress label for exiting-cc', () => {
+    render(<HandoffButton state="handoff-in-progress" progress="exiting-cc" sessionStatus="cc-idle" onHandoff={() => {}} />)
+    expect(screen.getByText('Exiting CC...')).toBeInTheDocument()
+  })
+
   it('falls back to Connecting... with empty progress', () => {
-    render(<HandoffButton presetName="cc" state="handoff-in-progress" progress="" onHandoff={() => {}} />)
+    render(<HandoffButton state="handoff-in-progress" progress="" sessionStatus="cc-idle" onHandoff={() => {}} />)
     expect(screen.getByText('Connecting...')).toBeInTheDocument()
   })
 })

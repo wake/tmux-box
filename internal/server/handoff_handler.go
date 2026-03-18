@@ -74,8 +74,8 @@ func (s *Server) handleHandoff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Mode != "stream" && req.Mode != "jsonl" {
-		http.Error(w, "mode must be stream or jsonl", http.StatusBadRequest)
+	if req.Mode != "stream" && req.Mode != "jsonl" && req.Mode != "term" {
+		http.Error(w, "mode must be stream, jsonl, or term", http.StatusBadRequest)
 		return
 	}
 
@@ -97,17 +97,19 @@ func (s *Server) handleHandoff(w http.ResponseWriter, r *http.Request) {
 	bind := s.cfg.Bind
 	s.cfgMu.RUnlock()
 
-	// Find preset command
+	// Find preset command (not required for term mode)
 	var command string
-	for _, p := range presets {
-		if p.Name == req.Preset {
-			command = p.Command
-			break
+	if req.Mode != "term" {
+		for _, p := range presets {
+			if p.Name == req.Preset {
+				command = p.Command
+				break
+			}
 		}
-	}
-	if command == "" {
-		http.Error(w, "preset not found", http.StatusBadRequest)
-		return
+		if command == "" {
+			http.Error(w, "preset not found", http.StatusBadRequest)
+			return
+		}
 	}
 
 	// Try per-session lock
@@ -125,16 +127,22 @@ func (s *Server) handleHandoff(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"handoff_id": handoffID})
 
 	// Run async handoff in goroutine
-	go s.runHandoff(sess, req.Mode, command, handoffID, token, port, bind)
+	if req.Mode == "term" {
+		go s.runHandoffToTerm(sess, handoffID)
+	} else {
+		go s.runHandoff(sess, req.Mode, command, handoffID, token, port, bind)
+	}
 }
 
-// runHandoff executes the handoff sequence asynchronously:
+// runHandoff executes the handoff-to-stream sequence asynchronously:
 //  1. Disconnect existing relay if present
-//  2. Detect current session state
-//  3. Stop CC if running (send C-c and poll)
-//  4. Launch tbox relay with the preset command
-//  5. Wait for relay to connect back via cli-bridge
-//  6. Update DB mode and broadcast success
+//  2. Verify CC is running (prerequisite)
+//  3. If CC is busy, interrupt to idle
+//  4. Extract session ID via /status
+//  5. Exit CC gracefully
+//  6. Launch tbox relay with --resume
+//  7. Wait for relay to connect back via cli-bridge
+//  8. Update DB (mode + cc_session_id) and broadcast success
 func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token string, port int, bind string) {
 	defer s.handoffLocks.Unlock(sess.Name)
 
@@ -146,7 +154,6 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 	if s.bridge.HasRelay(sess.Name) {
 		broadcast("stopping-relay")
 		s.bridge.SubscriberToRelay(sess.Name, []byte(`{"type":"shutdown"}`))
-		// Wait for relay disconnect (max 5s)
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
 			if !s.bridge.HasRelay(sess.Name) {
@@ -160,70 +167,236 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 		}
 	}
 
-	// Step 2: Detect current state
+	// Step 2: Prerequisite — CC must be running
 	broadcast("detecting")
 	status := s.detector.Detect(sess.Name)
+	if status == detect.StatusNormal || status == detect.StatusNotInCC {
+		broadcast("failed:no CC running")
+		return
+	}
 
-	// Step 3: If CC running, stop it
-	if status != detect.StatusNormal && status != detect.StatusNotInCC {
+	// Step 3: If CC is busy (not idle), interrupt to idle
+	if status != detect.StatusCCIdle {
 		broadcast("stopping-cc")
-		s.tmux.SendKeys(sess.Name, "C-c")
+		if err := s.tmux.SendKeysRaw(sess.Name, "C-u"); err != nil {
+			broadcast("failed:send C-u: " + err.Error())
+			return
+		}
+		if err := s.tmux.SendKeysRaw(sess.Name, "C-c"); err != nil {
+			broadcast("failed:send C-c: " + err.Error())
+			return
+		}
 		deadline := time.Now().Add(10 * time.Second)
 		for time.Now().Before(deadline) {
 			time.Sleep(500 * time.Millisecond)
 			st := s.detector.Detect(sess.Name)
-			if st == detect.StatusNormal {
+			if st == detect.StatusCCIdle {
 				break
 			}
 		}
-		if s.detector.Detect(sess.Name) != detect.StatusNormal {
-			broadcast("failed:could not stop CC within 10s")
+		if s.detector.Detect(sess.Name) != detect.StatusCCIdle {
+			broadcast("failed:could not reach CC idle")
 			return
 		}
 	}
 
-	// Step 4: Launch tbox relay
-	broadcast("launching")
+	// Step 4: Extract session ID via /status
+	// Send /status then rapidly capture full pane content. The /status dialog
+	// may auto-dismiss quickly, so retry capture several times.
+	broadcast("extracting-id")
+	if err := s.tmux.SendKeys(sess.Name, "/status"); err != nil {
+		broadcast("failed:send /status: " + err.Error())
+		return
+	}
+	var sessionID string
+	for attempt := 0; attempt < 6; attempt++ {
+		time.Sleep(500 * time.Millisecond)
+		paneContent, err := s.tmux.CapturePaneContent(sess.Name, 200)
+		if err != nil {
+			continue
+		}
+		id, err := detect.ExtractSessionID(paneContent)
+		if err == nil {
+			sessionID = id
+			break
+		}
+	}
+	if sessionID == "" {
+		broadcast("failed:could not extract session ID")
+		return
+	}
 
-	// C3 fix: Write token to a temporary file instead of embedding in command line.
-	// The relay reads and deletes the file, so the token never appears in pane/history.
+	// Step 5: Exit CC — Escape dismisses /status dialog, then /exit to quit gracefully.
+	// Both /exit and Ctrl+C preserve session state for --resume. /exit is preferred
+	// because a command is more stable than a key combination.
+	broadcast("exiting-cc")
+	if err := s.tmux.SendKeysRaw(sess.Name, "Escape"); err != nil {
+		broadcast("failed:send Escape: " + err.Error())
+		return
+	}
+	time.Sleep(500 * time.Millisecond)
+	if err := s.tmux.SendKeys(sess.Name, "/exit"); err != nil {
+		broadcast("failed:send /exit: " + err.Error())
+		return
+	}
+	exitDeadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(exitDeadline) {
+		time.Sleep(500 * time.Millisecond)
+		if s.detector.Detect(sess.Name) == detect.StatusNormal {
+			break
+		}
+	}
+	if s.detector.Detect(sess.Name) != detect.StatusNormal {
+		broadcast("failed:CC did not exit")
+		return
+	}
+
+	// Step 6: Launch tbox relay with --resume
+	broadcast("launching")
 	tokenFile := filepath.Join(os.TempDir(), fmt.Sprintf("tbox-token-%s", handoffID))
 	if err := os.WriteFile(tokenFile, []byte(token), 0600); err != nil {
 		broadcast("failed:write token file: " + err.Error())
 		return
 	}
-	// Safety net: delete token file after 30s in case relay never reads it.
 	time.AfterFunc(30*time.Second, func() {
-		os.Remove(tokenFile) // no-op if already deleted by relay
+		os.Remove(tokenFile)
 	})
 
-	relayCmd := fmt.Sprintf("tbox relay --session %s --daemon ws://127.0.0.1:%d --token-file %s -- %s",
-		sess.Name, port, tokenFile, command)
+	relayCmd := fmt.Sprintf("tbox relay --session %s --daemon ws://%s:%d --token-file %s -- %s --resume %s",
+		sess.Name, bind, port, tokenFile, command, sessionID)
 	if err := s.tmux.SendKeys(sess.Name, relayCmd); err != nil {
 		os.Remove(tokenFile)
 		broadcast("failed:send-keys error: " + err.Error())
 		return
 	}
 
-	// Step 5: Wait for relay to connect to cli-bridge
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
+	// Step 7: Wait for relay to connect
+	relayDeadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(relayDeadline) {
 		if s.bridge.HasRelay(sess.Name) {
 			break
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 	if !s.bridge.HasRelay(sess.Name) {
+		os.Remove(tokenFile)
 		broadcast("failed:relay did not connect within 15s")
 		return
 	}
 
-	// Step 6: Update DB mode and broadcast success
-	if err := s.store.UpdateSession(sess.ID, store.SessionUpdate{Mode: &mode}); err != nil {
+	// Step 8: Update DB (mode + cc_session_id together) and broadcast success
+	ccID := sessionID
+	if err := s.store.UpdateSession(sess.ID, store.SessionUpdate{Mode: &mode, CCSessionID: &ccID}); err != nil {
+		broadcast("failed:db update: " + err.Error())
+		return
+	}
+	broadcast("connected")
+}
+
+// runHandoffToTerm handles the handoff from stream back to interactive terminal mode.
+// It shuts down the relay, waits for shell, then launches claude --resume.
+func (s *Server) runHandoffToTerm(sess store.Session, handoffID string) {
+	defer s.handoffLocks.Unlock(sess.Name)
+
+	broadcast := func(value string) {
+		s.events.Broadcast(sess.Name, "handoff", value)
+	}
+
+	// Step 1: Get session ID from DB
+	current, err := s.store.GetSession(sess.ID)
+	if err != nil {
+		broadcast("failed:db lookup error: " + err.Error())
+		return
+	}
+	if current.CCSessionID == "" {
+		broadcast("failed:no CC session ID stored")
+		return
+	}
+	sessionID := current.CCSessionID
+
+	// Step 2: Shut down relay
+	if s.bridge.HasRelay(sess.Name) {
+		broadcast("stopping-relay")
+		s.bridge.SubscriberToRelay(sess.Name, []byte(`{"type":"shutdown"}`))
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if !s.bridge.HasRelay(sess.Name) {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		if s.bridge.HasRelay(sess.Name) {
+			broadcast("failed:relay did not disconnect")
+			return
+		}
+	}
+
+	// Step 3: Wait for shell
+	broadcast("waiting-shell")
+	shellDeadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(shellDeadline) {
+		if s.detector.Detect(sess.Name) == detect.StatusNormal {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if s.detector.Detect(sess.Name) != detect.StatusNormal {
+		broadcast("failed:shell did not recover")
+		return
+	}
+
+	// Step 4: Launch interactive CC with --resume
+	broadcast("launching-cc")
+	resumeCmd := fmt.Sprintf("claude --resume %s", sessionID)
+	if err := s.tmux.SendKeys(sess.Name, resumeCmd); err != nil {
+		broadcast("failed:send-keys error: " + err.Error())
+		return
+	}
+
+	// Step 5: Verify CC started
+	ccDeadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(ccDeadline) {
+		st := s.detector.Detect(sess.Name)
+		if st == detect.StatusCCIdle || st == detect.StatusCCRunning || st == detect.StatusCCWaiting {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	finalSt := s.detector.Detect(sess.Name)
+	if finalSt != detect.StatusCCIdle && finalSt != detect.StatusCCRunning && finalSt != detect.StatusCCWaiting {
+		broadcast("failed:CC did not start")
+		return
+	}
+
+	// Step 6: Update DB (mode=term, clear cc_session_id)
+	termMode := "term"
+	emptyID := ""
+	if err := s.store.UpdateSession(sess.ID, store.SessionUpdate{
+		Mode:        &termMode,
+		CCSessionID: &emptyID,
+	}); err != nil {
 		broadcast("failed:db update error: " + err.Error())
 		return
 	}
 	broadcast("connected")
+}
+
+// revertModeOnRelayDisconnect reverts the session mode to "term" when a relay
+// disconnects. This prevents sessions from being stuck in stream mode after
+// a failed or interrupted handoff.
+func (s *Server) revertModeOnRelayDisconnect(sessionName string) {
+	sessions, err := s.store.ListSessions()
+	if err != nil {
+		return
+	}
+	for _, sess := range sessions {
+		if sess.Name == sessionName && sess.Mode != "term" {
+			termMode := "term"
+			s.store.UpdateSession(sess.ID, store.SessionUpdate{Mode: &termMode})
+			s.events.Broadcast(sessionName, "handoff", "failed:relay disconnected")
+			return
+		}
+	}
 }
 
 func generateHandoffID() string {

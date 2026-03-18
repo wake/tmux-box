@@ -6,17 +6,12 @@ import TopBar from './TopBar'
 const defaultProps = {
   sessionName: 'test',
   mode: 'term',
-  streamPresets: [{ name: 'cc', command: 'claude -p --input-format stream-json --output-format stream-json' }],
   onModeChange: vi.fn(),
-  onHandoff: vi.fn(),
-  onInterrupt: vi.fn(),
 }
 
 beforeEach(() => {
   cleanup()
   defaultProps.onModeChange = vi.fn()
-  defaultProps.onHandoff = vi.fn()
-  defaultProps.onInterrupt = vi.fn()
 })
 
 describe('TopBar', () => {
@@ -43,61 +38,10 @@ describe('TopBar', () => {
     expect(defaultProps.onModeChange).toHaveBeenCalledWith('term')
   })
 
-  it('calls onHandoff directly with single preset', () => {
+  it('calls onModeChange when clicking stream', () => {
     render(<TopBar {...defaultProps} />)
     fireEvent.click(screen.getByTestId('mode-btn-stream'))
-    expect(defaultProps.onHandoff).toHaveBeenCalledWith('stream', 'cc')
-  })
-
-  it('opens dropdown with multiple presets', () => {
-    const multiPresets = [
-      { name: 'cc', command: 'claude' },
-      { name: 'gemini', command: 'gemini-cli' },
-    ]
-    render(<TopBar {...defaultProps} streamPresets={multiPresets} />)
-    fireEvent.click(screen.getByTestId('mode-btn-stream'))
-    expect(screen.getByTestId('dropdown-stream')).toBeInTheDocument()
-    expect(screen.getByText('cc')).toBeInTheDocument()
-    expect(screen.getByText('gemini')).toBeInTheDocument()
-  })
-
-  it('calls onHandoff when selecting from dropdown', () => {
-    const multiPresets = [
-      { name: 'cc', command: 'claude' },
-      { name: 'gemini', command: 'gemini-cli' },
-    ]
-    render(<TopBar {...defaultProps} streamPresets={multiPresets} />)
-    fireEvent.click(screen.getByTestId('mode-btn-stream'))
-    fireEvent.click(screen.getByText('gemini'))
-    expect(defaultProps.onHandoff).toHaveBeenCalledWith('stream', 'gemini')
-  })
-
-  it('closes dropdown on second click', () => {
-    const multiPresets = [
-      { name: 'cc', command: 'claude' },
-      { name: 'gemini', command: 'gemini-cli' },
-    ]
-    render(<TopBar {...defaultProps} streamPresets={multiPresets} />)
-    fireEvent.click(screen.getByTestId('mode-btn-stream'))
-    expect(screen.getByTestId('dropdown-stream')).toBeInTheDocument()
-    fireEvent.click(screen.getByTestId('mode-btn-stream'))
-    expect(screen.queryByTestId('dropdown-stream')).toBeNull()
-  })
-
-  it('shows dropdown caret only with multiple presets', () => {
-    render(<TopBar {...defaultProps} streamPresets={[{ name: 'cc', command: 'claude' }]} />)
-    const btn = screen.getByTestId('mode-btn-stream')
-    expect(btn.textContent).not.toContain('▾')
-  })
-
-  it('shows dropdown caret with multiple presets', () => {
-    const multiPresets = [
-      { name: 'cc', command: 'claude' },
-      { name: 'gemini', command: 'gemini-cli' },
-    ]
-    render(<TopBar {...defaultProps} streamPresets={multiPresets} />)
-    const btn = screen.getByTestId('mode-btn-stream')
-    expect(btn.textContent).toContain('▾')
+    expect(defaultProps.onModeChange).toHaveBeenCalledWith('stream')
   })
 
   it('renders buttons in order: term → stream', () => {
@@ -106,41 +50,5 @@ describe('TopBar', () => {
     const buttons = modeSwitch.querySelectorAll('button')
     expect(buttons[0].textContent).toContain('term')
     expect(buttons[1].textContent).toContain('stream')
-  })
-
-  it('closes dropdown on Escape key', () => {
-    const multiPresets = [
-      { name: 'cc', command: 'claude' },
-      { name: 'gemini', command: 'gemini-cli' },
-    ]
-    render(<TopBar {...defaultProps} streamPresets={multiPresets} />)
-    fireEvent.click(screen.getByTestId('mode-btn-stream'))
-    expect(screen.getByTestId('dropdown-stream')).toBeInTheDocument()
-    fireEvent.keyDown(document, { key: 'Escape' })
-    expect(screen.queryByTestId('dropdown-stream')).toBeNull()
-  })
-
-  it('closes dropdown on click outside', () => {
-    const multiPresets = [
-      { name: 'cc', command: 'claude' },
-      { name: 'gemini', command: 'gemini-cli' },
-    ]
-    render(<TopBar {...defaultProps} streamPresets={multiPresets} />)
-    fireEvent.click(screen.getByTestId('mode-btn-stream'))
-    expect(screen.getByTestId('dropdown-stream')).toBeInTheDocument()
-    fireEvent.mouseDown(document.body)
-    expect(screen.queryByTestId('dropdown-stream')).toBeNull()
-  })
-
-  it('highlights active preset in dropdown', () => {
-    const multiPresets = [
-      { name: 'cc', command: 'claude' },
-      { name: 'gemini', command: 'gemini-cli' },
-    ]
-    render(<TopBar {...defaultProps} streamPresets={multiPresets} activePreset="cc" />)
-    fireEvent.click(screen.getByTestId('mode-btn-stream'))
-    const ccButton = screen.getByText('cc')
-    expect(ccButton.className).toContain('bg-[#404040]')
-    expect(ccButton.className).toContain('text-white')
   })
 })

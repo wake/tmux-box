@@ -22,7 +22,10 @@ type Executor interface {
 	KillSession(name string) error
 	HasSession(name string) bool
 	SendKeys(target, keys string) error
+	SendKeysRaw(target string, keys ...string) error
 	PaneCurrentCommand(target string) (string, error)
+	PanePID(target string) (string, error)
+	PaneChildCommands(target string) ([]string, error)
 	CapturePaneContent(target string, lastN int) (string, error)
 }
 
@@ -83,6 +86,12 @@ func (r *RealExecutor) SendKeys(target, keys string) error {
 	return exec.Command("tmux", "send-keys", "-t", target, keys, "Enter").Run()
 }
 
+func (r *RealExecutor) SendKeysRaw(target string, keys ...string) error {
+	args := []string{"send-keys", "-t", target}
+	args = append(args, keys...)
+	return exec.Command("tmux", args...).Run()
+}
+
 func (r *RealExecutor) PaneCurrentCommand(target string) (string, error) {
 	out, err := exec.Command("tmux", "list-panes", "-t", target, "-F", "#{pane_current_command}").Output()
 	if err != nil {
@@ -91,6 +100,35 @@ func (r *RealExecutor) PaneCurrentCommand(target string) (string, error) {
 	// Return the first line (active pane's command).
 	line := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]
 	return strings.TrimSpace(line), nil
+}
+
+func (r *RealExecutor) PanePID(target string) (string, error) {
+	out, err := exec.Command("tmux", "list-panes", "-t", target, "-F", "#{pane_pid}").Output()
+	if err != nil {
+		return "", fmt.Errorf("tmux list-panes pid: %w", err)
+	}
+	line := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]
+	return strings.TrimSpace(line), nil
+}
+
+func (r *RealExecutor) PaneChildCommands(target string) ([]string, error) {
+	panePID, err := r.PanePID(target)
+	if err != nil {
+		return nil, err
+	}
+	// ps -ax -o pid,ppid,comm → find children of the pane's shell PID
+	out, err := exec.Command("ps", "-ax", "-o", "pid,ppid,comm").Output()
+	if err != nil {
+		return nil, fmt.Errorf("ps: %w", err)
+	}
+	var cmds []string
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[1] == panePID {
+			cmds = append(cmds, fields[2])
+		}
+	}
+	return cmds, nil
 }
 
 func (r *RealExecutor) CapturePaneContent(target string, lastN int) (string, error) {
@@ -104,10 +142,17 @@ func (r *RealExecutor) CapturePaneContent(target string, lastN int) (string, err
 
 // --- Fake Executor ---
 
+type RawKeysCall struct {
+	Target string
+	Keys   []string
+}
+
 type FakeExecutor struct {
-	sessions     map[string]TmuxSession
-	paneCommands map[string]string // target → command name
-	paneContents map[string]string // target → captured text
+	sessions      map[string]TmuxSession
+	paneCommands  map[string]string   // target → command name
+	paneContents  map[string]string   // target → captured text
+	paneChildren  map[string][]string // target → child command names
+	rawKeysCalls  []RawKeysCall
 }
 
 func NewFakeExecutor() *FakeExecutor {
@@ -115,6 +160,7 @@ func NewFakeExecutor() *FakeExecutor {
 		sessions:     make(map[string]TmuxSession),
 		paneCommands: make(map[string]string),
 		paneContents: make(map[string]string),
+		paneChildren: make(map[string][]string),
 	}
 }
 
@@ -150,12 +196,37 @@ func (f *FakeExecutor) HasSession(name string) bool {
 
 func (f *FakeExecutor) SendKeys(_, _ string) error { return nil }
 
+func (f *FakeExecutor) SendKeysRaw(target string, keys ...string) error {
+	f.rawKeysCalls = append(f.rawKeysCalls, RawKeysCall{Target: target, Keys: keys})
+	return nil
+}
+
+func (f *FakeExecutor) RawKeysSent() []RawKeysCall {
+	return f.rawKeysCalls
+}
+
 func (f *FakeExecutor) SetPaneCommand(target, cmd string) {
 	f.paneCommands[target] = cmd
 }
 
 func (f *FakeExecutor) SetPaneContent(target, content string) {
 	f.paneContents[target] = content
+}
+
+func (f *FakeExecutor) SetPaneChildren(target string, cmds []string) {
+	f.paneChildren[target] = cmds
+}
+
+func (f *FakeExecutor) PanePID(target string) (string, error) {
+	return "fake-pid", nil
+}
+
+func (f *FakeExecutor) PaneChildCommands(target string) ([]string, error) {
+	cmds, ok := f.paneChildren[target]
+	if !ok {
+		return nil, nil // no children
+	}
+	return cmds, nil
 }
 
 func (f *FakeExecutor) PaneCurrentCommand(target string) (string, error) {

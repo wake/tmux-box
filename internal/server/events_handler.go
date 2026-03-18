@@ -117,10 +117,38 @@ func (s *Server) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 	sub := s.events.Add(conn)
 	defer s.events.Remove(sub)
 
+	// Send current status snapshot so new subscribers don't start with stale state.
+	s.sendStatusSnapshot(sub)
+
 	// Keep connection alive — read (and discard) messages to detect disconnect.
 	for {
 		if _, _, err := conn.ReadMessage(); err != nil {
 			return
+		}
+	}
+}
+
+// sendStatusSnapshot detects the current status of all sessions and pushes
+// them to a single subscriber. Called on new WS connections so the frontend
+// doesn't need to wait for the next poller tick.
+func (s *Server) sendStatusSnapshot(sub *eventSubscriber) {
+	sessions, err := s.store.ListSessions()
+	if err != nil {
+		return
+	}
+	for _, sess := range sessions {
+		status := s.detector.Detect(sess.Name)
+		msg, err := json.Marshal(sessionEvent{
+			Type:    "status",
+			Session: sess.Name,
+			Value:   string(status),
+		})
+		if err != nil {
+			continue
+		}
+		select {
+		case sub.send <- msg:
+		default:
 		}
 	}
 }

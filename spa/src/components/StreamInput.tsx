@@ -1,15 +1,16 @@
 // spa/src/components/StreamInput.tsx
 import { useState, useRef, useCallback } from 'react'
-import { Plus } from '@phosphor-icons/react'
+import { Plus, Terminal } from '@phosphor-icons/react'
 
 interface Props {
   onSend: (text: string) => void
   onAttach?: () => void
+  onHandoffToTerm?: () => void
   disabled?: boolean
   placeholder?: string
 }
 
-export default function StreamInput({ onSend, onAttach, disabled = false, placeholder = 'Reply...' }: Props) {
+export default function StreamInput({ onSend, onAttach, onHandoffToTerm, disabled = false, placeholder = 'Reply...' }: Props) {
   const [value, setValue] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
@@ -62,6 +63,19 @@ export default function StreamInput({ onSend, onAttach, disabled = false, placeh
         >
           <Plus size={16} />
         </button>
+        <div className="flex-1" />
+        {onHandoffToTerm && (
+          <button
+            type="button"
+            onClick={onHandoffToTerm}
+            disabled={disabled}
+            title="Handoff to Term"
+            className="flex items-center gap-1 px-2 py-1 rounded text-xs text-[#888] hover:text-[#ddd] hover:bg-[#333] transition-colors disabled:opacity-40"
+          >
+            <Terminal size={14} />
+            <span>Handoff to Term</span>
+          </button>
+        )}
       </div>
     </div>
   )

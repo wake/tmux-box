@@ -47,7 +47,7 @@ func defaults() Config {
 		Stream: StreamConfig{
 			Presets: []Preset{{
 				Name:    "cc",
-				Command: "claude -p --input-format stream-json --output-format stream-json",
+				Command: "claude -p --verbose --input-format stream-json --output-format stream-json",
 			}},
 		},
 		Detect: DetectConfig{

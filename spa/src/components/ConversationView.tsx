@@ -18,17 +18,20 @@ import ThinkingIndicator from './ThinkingIndicator'
 import FileAttachment, { type AttachedFile } from './FileAttachment'
 import HandoffButton from './HandoffButton'
 
+import type { SessionStatus } from './SessionStatusBadge'
+
 interface Props {
   wsUrl: string
-  sessionName: string
-  presetName: string
+  sessionStatus?: SessionStatus
   onHandoff?: () => void
+  onHandoffToTerm?: () => void
 }
 
-export default function ConversationView({ wsUrl, presetName, onHandoff }: Props) {
+export default function ConversationView({ wsUrl, sessionStatus, onHandoff, onHandoffToTerm }: Props) {
   const connRef = useRef<ReturnType<typeof connectStream> | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const prevWsUrlRef = useRef<string>('')
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([])
   const [isDragging, setIsDragging] = useState(false)
   const dragCounter = useRef(0)
@@ -54,7 +57,11 @@ export default function ConversationView({ wsUrl, presetName, onHandoff }: Props
   const showThinking = isStreaming && !hasAssistantMessage
 
   useEffect(() => {
-    clear()
+    // Only clear when switching to a different session, not on re-mount
+    if (prevWsUrlRef.current && prevWsUrlRef.current !== wsUrl) {
+      clear()
+    }
+    prevWsUrlRef.current = wsUrl
 
     const conn = connectStream(
       wsUrl,
@@ -230,9 +237,9 @@ export default function ConversationView({ wsUrl, presetName, onHandoff }: Props
     return (
       <div className="flex flex-col h-full">
         <HandoffButton
-          presetName={presetName || 'session'}
           state={handoffState}
           progress={handoffProgress}
+          sessionStatus={sessionStatus}
           onHandoff={handleHandoff}
         />
       </div>
@@ -345,7 +352,7 @@ export default function ConversationView({ wsUrl, presetName, onHandoff }: Props
       <FileAttachment files={attachedFiles} onRemove={handleRemoveFile} />
 
       {/* Input area */}
-      <StreamInput onSend={handleSend} onAttach={handleAttach} disabled={isStreaming} />
+      <StreamInput onSend={handleSend} onAttach={handleAttach} onHandoffToTerm={onHandoffToTerm} disabled={isStreaming} />
     </div>
   )
 }

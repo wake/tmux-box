@@ -51,4 +51,26 @@ describe('StreamInput', () => {
     fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' })
     expect(onSend).not.toHaveBeenCalled()
   })
+
+  it('renders Handoff to Term button when onHandoffToTerm is provided', () => {
+    render(<StreamInput onSend={vi.fn()} onHandoffToTerm={vi.fn()} />)
+    expect(screen.getByTitle('Handoff to Term')).toBeInTheDocument()
+  })
+
+  it('does not render Handoff to Term button when onHandoffToTerm is not provided', () => {
+    render(<StreamInput onSend={vi.fn()} />)
+    expect(screen.queryByTitle('Handoff to Term')).not.toBeInTheDocument()
+  })
+
+  it('calls onHandoffToTerm when button is clicked', () => {
+    const onHandoffToTerm = vi.fn()
+    render(<StreamInput onSend={vi.fn()} onHandoffToTerm={onHandoffToTerm} />)
+    fireEvent.click(screen.getByTitle('Handoff to Term'))
+    expect(onHandoffToTerm).toHaveBeenCalledOnce()
+  })
+
+  it('disables Handoff to Term button when disabled prop is true', () => {
+    render(<StreamInput onSend={vi.fn()} onHandoffToTerm={vi.fn()} disabled />)
+    expect(screen.getByTitle('Handoff to Term')).toBeDisabled()
+  })
 })

@@ -57,6 +57,14 @@ func (d *Detector) UpdateCommands(cmds []string) {
 }
 
 // Detect returns the current Status for the given tmux session/target.
+//
+// Detection strategy (hybrid):
+//  1. pane_current_command is a shell → StatusNormal (fast path)
+//  2. pane_current_command matches ccCommands → inspect pane content for sub-state
+//  3. Otherwise, check child processes of pane for CC commands (handles symlink/version issues)
+//  4. If child matches → inspect pane content for sub-state
+//  5. If no child matches → check pane content for CC UI signatures as fallback
+//  6. Nothing matches → StatusNotInCC
 func (d *Detector) Detect(session string) Status {
 	cmd, err := d.tmux.PaneCurrentCommand(session)
 	if err != nil {
@@ -64,19 +72,52 @@ func (d *Detector) Detect(session string) Status {
 	}
 	cmd = strings.TrimSpace(cmd)
 
+	// Fast path: shell → normal
+	if defaultShells[cmd] {
+		return StatusNormal
+	}
+
 	d.mu.RLock()
 	isCC := d.ccCommands[cmd]
 	d.mu.RUnlock()
 
-	// Check if it's a known CC command.
-	if !isCC {
-		if defaultShells[cmd] {
-			return StatusNormal
-		}
-		return StatusNotInCC
+	// Fast path: known CC command
+	if isCC {
+		return d.detectCCSubState(session)
 	}
 
-	// It's a CC command — inspect pane content for sub-state.
+	// Strategy A: check child processes of pane shell for CC binary names
+	children, err := d.tmux.PaneChildCommands(session)
+	if err == nil {
+		for _, child := range children {
+			// Match basename (e.g. "/Users/wake/.local/bin/claude" → "claude")
+			base := child
+			if idx := strings.LastIndex(child, "/"); idx >= 0 {
+				base = child[idx+1:]
+			}
+			d.mu.RLock()
+			childIsCC := d.ccCommands[base]
+			d.mu.RUnlock()
+			if childIsCC {
+				return d.detectCCSubState(session)
+			}
+		}
+	}
+
+	// Strategy B fallback: check pane content for CC UI signatures
+	content, err := d.tmux.CapturePaneContent(session, 5)
+	if err != nil {
+		return StatusNotInCC
+	}
+	if looksLikeCC(content) {
+		return d.detectCCSubState(session)
+	}
+
+	return StatusNotInCC
+}
+
+// detectCCSubState inspects pane content to distinguish idle/running/waiting.
+func (d *Detector) detectCCSubState(session string) Status {
 	content, err := d.tmux.CapturePaneContent(session, 5)
 	if err != nil {
 		return StatusCCRunning // can't read pane, assume running
@@ -87,14 +128,40 @@ func (d *Detector) Detect(session string) Status {
 		return StatusCCWaiting
 	}
 
-	// Check for idle prompt (❯).
+	// Check for idle prompt (❯) in the last 5 lines — CC renders a status bar
+	// below the prompt, so ❯ is not necessarily the last line.
 	lines := strings.Split(strings.TrimSpace(content), "\n")
-	if len(lines) > 0 {
-		lastLine := strings.TrimSpace(lines[len(lines)-1])
-		if strings.HasPrefix(lastLine, "❯") {
+	start := len(lines) - 5
+	if start < 0 {
+		start = 0
+	}
+	for _, line := range lines[start:] {
+		if strings.HasPrefix(strings.TrimSpace(line), "❯") {
 			return StatusCCIdle
 		}
 	}
 
 	return StatusCCRunning
+}
+
+// looksLikeCC checks pane content for CC UI signatures when process detection fails.
+// Looks for CC-specific UI elements: the ❯ prompt, status bar with model info, etc.
+func looksLikeCC(content string) bool {
+	lines := strings.Split(content, "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// CC idle prompt
+		if strings.HasPrefix(trimmed, "❯") {
+			return true
+		}
+		// CC status bar contains model identifiers
+		if strings.Contains(trimmed, "Opus") || strings.Contains(trimmed, "Sonnet") || strings.Contains(trimmed, "Haiku") {
+			return true
+		}
+		// CC permission prompt
+		if strings.Contains(trimmed, "Allow") && strings.Contains(trimmed, "Deny") {
+			return true
+		}
+	}
+	return false
 }

@@ -8,6 +8,7 @@ export interface Session {
   mode: string
   group_id: number
   sort_order: number
+  cc_session_id: string
 }
 
 export async function listSessions(base: string): Promise<Session[]> {
@@ -49,14 +50,19 @@ export async function handoff(
   base: string,
   id: number,
   mode: string,
-  preset: string,
+  preset?: string,
 ): Promise<{ handoff_id: string }> {
+  const body: Record<string, string> = { mode }
+  if (preset) body.preset = preset
   const res = await fetch(`${base}/api/sessions/${id}/handoff`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode, preset }),
+    body: JSON.stringify(body),
   })
-  if (!res.ok) throw new Error(`handoff failed: ${res.status}`)
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`handoff failed: ${res.status} ${text}`.trim())
+  }
   return res.json()
 }
 

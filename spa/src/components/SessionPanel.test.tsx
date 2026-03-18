@@ -22,8 +22,8 @@ describe('SessionPanel', () => {
   it('renders session list', () => {
     useSessionStore.setState({
       sessions: [
-        { id: 1, uid: 'test0001', name: 'dev', tmux_target: 'dev:0', cwd: '/tmp', mode: 'term', group_id: 0, sort_order: 0 },
-        { id: 2, uid: 'test0002', name: 'prod', tmux_target: 'prod:0', cwd: '/tmp', mode: 'stream', group_id: 0, sort_order: 0 },
+        { id: 1, uid: 'test0001', name: 'dev', tmux_target: 'dev:0', cwd: '/tmp', mode: 'term', group_id: 0, sort_order: 0, cc_session_id: '' },
+        { id: 2, uid: 'test0002', name: 'prod', tmux_target: 'prod:0', cwd: '/tmp', mode: 'stream', group_id: 0, sort_order: 0, cc_session_id: '' },
       ],
       activeId: null,
     })
@@ -35,7 +35,7 @@ describe('SessionPanel', () => {
   it('highlights active session', () => {
     useSessionStore.setState({
       sessions: [
-        { id: 1, uid: 'test0001', name: 'dev', tmux_target: 'dev:0', cwd: '/tmp', mode: 'term', group_id: 0, sort_order: 0 },
+        { id: 1, uid: 'test0001', name: 'dev', tmux_target: 'dev:0', cwd: '/tmp', mode: 'term', group_id: 0, sort_order: 0, cc_session_id: '' },
       ],
       activeId: 1,
     })
@@ -48,7 +48,7 @@ describe('SessionPanel', () => {
     const setActive = vi.fn()
     useSessionStore.setState({
       sessions: [
-        { id: 1, uid: 'test0001', name: 'dev', tmux_target: 'dev:0', cwd: '/tmp', mode: 'term', group_id: 0, sort_order: 0 },
+        { id: 1, uid: 'test0001', name: 'dev', tmux_target: 'dev:0', cwd: '/tmp', mode: 'term', group_id: 0, sort_order: 0, cc_session_id: '' },
       ],
       activeId: null,
       setActive,
@@ -61,7 +61,7 @@ describe('SessionPanel', () => {
   it('shows terminal icon for term mode', () => {
     useSessionStore.setState({
       sessions: [
-        { id: 1, uid: 'test0001', name: 'dev', tmux_target: 'dev:0', cwd: '/tmp', mode: 'term', group_id: 0, sort_order: 0 },
+        { id: 1, uid: 'test0001', name: 'dev', tmux_target: 'dev:0', cwd: '/tmp', mode: 'term', group_id: 0, sort_order: 0, cc_session_id: '' },
       ],
       activeId: null,
     })

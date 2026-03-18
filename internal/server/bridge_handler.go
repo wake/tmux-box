@@ -37,7 +37,12 @@ func (s *Server) handleCliBridge(w http.ResponseWriter, r *http.Request) {
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, err.Error()))
 		return
 	}
-	defer s.bridge.UnregisterRelay(sessionName)
+	defer func() {
+		s.bridge.UnregisterRelay(sessionName)
+		// When relay disconnects, revert session mode to "term" if it was in stream/jsonl.
+		// This prevents the session from being stuck in stream mode after a failed handoff.
+		s.revertModeOnRelayDisconnect(sessionName)
+	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
