@@ -39,6 +39,7 @@ func generateUID() string {
 type SessionUpdate struct {
 	Name        *string `json:"name,omitempty"`
 	Mode        *string `json:"mode,omitempty"`
+	Cwd         *string `json:"cwd,omitempty"`
 	GroupID     *int64  `json:"group_id,omitempty"`
 	CCSessionID *string `json:"cc_session_id,omitempty"`
 	CCModel     *string `json:"cc_model,omitempty"`
@@ -217,6 +218,16 @@ func (s *Store) UpdateSession(id int64, u SessionUpdate) error {
 	}
 	if u.Mode != nil {
 		res, err := s.db.Exec("UPDATE sessions SET mode = ? WHERE id = ?", *u.Mode, id)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n > 0 {
+			updated = true
+		}
+	}
+	if u.Cwd != nil {
+		res, err := s.db.Exec("UPDATE sessions SET cwd = ? WHERE id = ?", *u.Cwd, id)
 		if err != nil {
 			return err
 		}
