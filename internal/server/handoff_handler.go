@@ -235,14 +235,24 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 	}
 
 	// Step 4: Extract session ID + cwd via /status
-	// Send /status then rapidly capture full pane content. The /status dialog
-	// may auto-dismiss quickly, so retry capture several times.
+	// Send "/status" in literal mode (-l) first, then Enter separately after
+	// a short delay. CC needs time to recognize the slash command before Enter
+	// is pressed — sending text+Enter in one call can cause the AI to treat
+	// it as a skill invocation instead of a built-in command.
 	broadcast("extracting-id")
-	if err := s.tmux.SendKeys(target, "/status"); err != nil {
+	if err := s.tmux.SendKeysRaw(target, "-l", "/status"); err != nil {
 		if didManualResize {
 			s.tmux.ResizeWindowAuto(target)
 		}
 		broadcast("failed:send /status: " + err.Error())
+		return
+	}
+	time.Sleep(300 * time.Millisecond)
+	if err := s.tmux.SendKeysRaw(target, "Enter"); err != nil {
+		if didManualResize {
+			s.tmux.ResizeWindowAuto(target)
+		}
+		broadcast("failed:send Enter: " + err.Error())
 		return
 	}
 	var statusInfo detect.StatusInfo
