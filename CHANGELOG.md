@@ -1,5 +1,60 @@
 # Changelog
 
+## [0.4.0] - 2026-03-18
+
+Phase 2.5b: Stream WS Lifecycle Redesign — 修復 stream 訊息不通的根因
+
+### 新增
+
+- **Per-session store** — `useStreamStore` 從全域單例改為 `Record<string, PerSessionState>`，切換 session 不再丟失對話
+- **useRelayWsManager hook** — relay 事件驅動 WS 生命週期（relay:connected → 建立 WS，relay:disconnected → 關閉 WS）
+- **Relay 事件廣播** — session-events WS 新增 `relay` 事件類型 + snapshot，冷啟動單一資料源
+- **Init metadata 攔截** — bridge handler 捕獲 CC init message 的 model 資訊存 DB
+- **JSONL history API** — `GET /api/sessions/{id}/history` 讀取 CC 的 JSONL 檔案，resume 時顯示之前的對話
+- **SessionResponse DTO** — session list API 回傳 `has_relay` + `cc_model`
+- **`cc_model` DB 欄位** — sessions 表新增 cc_model 欄位 + migration
+- **`GetSessionByName`** — store 新增 O(1) name 查詢方法
+- **`RelaySessionNames`** — bridge 新增列舉所有有 relay 的 session 方法
+- **`fetchHistory`** — SPA API client 新增歷史訊息查詢函式
+
+### 修復
+
+- **幽靈連線根因修復** — ConversationView 不再管理 WS 連線，改為純 UI 元件從 per-session store 讀取狀態
+- **WS 生命週期脫鉤** — WS 建立/銷毀完全由 relay 事件驅動，不再依賴 component mount 時機
+- **set() 內 side effect** — clearSession 的 conn.close() 移到 set() 外避免 re-entrant mutation
+- **selector 穩定性** — 使用 stable 空陣列常數避免 Zustand `?? []` 造成的無限 render loop
+- **subscribeWithSelector** — store 加入 Zustand middleware 支援 relay status 訂閱
+
+### 改善
+
+- ConversationView props 簡化為 `sessionName`（移除 `wsUrl`、`sessionStatus`）
+- session-events type 擴充為 `'status' | 'handoff' | 'relay'`
+- bridge 測試恢復 4 個被刪除的單元測試
+
+## [0.3.0] - 2026-03-18
+
+Phase 2.5a: Stream Handoff — 雙向切換
+
+### 新增
+
+- **Stream Handoff** — term（互動式 CC）與 stream（`-p` 串流模式）之間的雙向 handoff
+- **SendKeysRaw** — tmux 控制鍵注入（C-u, C-c, Escape 不帶 Enter）
+- **ExtractSessionID** — 解析 CC `/status` 輸出的 Session ID（UUID regex）
+- **cc_session_id** — sessions 表新欄位 + migration + CRUD
+- **Handoff 8 步流程** — CC 偵測 → 中斷 → `/status` 取 ID → `/exit` 退出 → relay `--resume`
+- **Handoff to Term** — 6 步反向 handoff（shutdown relay → shell → `claude --resume`）
+- **HandoffButton** — CC 狀態感知、進度標籤、disabled 狀態
+- **StreamInput "Handoff to Term"** — 底部操作按鈕
+- **E2E pipeline 測試** — SPA→bridge→relay→subprocess→bridge→SPA 完整往返驗證
+- **Relay 斷線自動 revert** — session mode 自動回 term
+- **session-events snapshot** — 新 subscriber 收到初始狀態快照
+
+### 修復
+
+- 混合式 CC 偵測（子程序樹 + pane content fallback）
+- relay command 使用 config bind address
+- `--verbose` 加入 stream-json preset（CC 2.1.77+ 要求）
+
 ## [0.2.0] - 2026-03-17
 
 Phase 2: Stream 模式 — Claude Code 結構化互動
