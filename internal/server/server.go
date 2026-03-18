@@ -90,7 +90,12 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 		relay.OnStart = func() {
 			// Clear any manual window size (e.g. set by handoff or user) so
 			// tmux auto-resizes to match the browser viewport.
-			s.tmux.ResizeWindowAuto(name)
+			// Delay to let: (1) tmux register the client, (2) WS I/O start,
+			// (3) browser send its viewport resize — so -A sees the real size.
+			go func() {
+				time.Sleep(1200 * time.Millisecond)
+				s.tmux.ResizeWindowAuto(name)
+			}()
 		}
 	}
 	relay.HandleWebSocket(w, r)
