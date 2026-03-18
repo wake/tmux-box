@@ -86,6 +86,13 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 	// cwd doesn't matter for tmux attach-session; tmux manages its own working directory.
 	relay := terminal.NewRelay("tmux", []string{"attach-session", "-t", name}, "/")
+	if s.cfg.Terminal.IsAutoResize() {
+		relay.OnStart = func() {
+			// Clear any manual window size (e.g. set by handoff or user) so
+			// tmux auto-resizes to match the browser viewport.
+			s.tmux.ResizeWindowAuto(name)
+		}
+	}
 	relay.HandleWebSocket(w, r)
 }
 

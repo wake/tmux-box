@@ -438,6 +438,15 @@ func TestHandoffResizesPaneTooSmall(t *testing.T) {
 	if sz[0] < 80 || sz[1] < 24 {
 		t.Errorf("pane should have been resized to at least 80x24, got %dx%d", sz[0], sz[1])
 	}
+
+	// Verify that ResizeWindowAuto was called to restore auto-sizing
+	autoCalls := fakeTmux.AutoResizeCalls()
+	if len(autoCalls) == 0 {
+		t.Fatal("ResizeWindowAuto should have been called to restore auto-sizing after /status extraction")
+	}
+	if autoCalls[0] != "small-session:0" {
+		t.Errorf("ResizeWindowAuto target: want small-session:0, got %s", autoCalls[0])
+	}
 }
 
 func TestHandoffSendsEscapeAndCuBeforeDetect(t *testing.T) {
