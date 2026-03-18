@@ -174,18 +174,16 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 		}
 	}
 
-	// Prepare pane — exit tmux copy-mode (if active) and clear any partial
-	// input. "send-keys -X cancel" exits copy-mode without sending keys to
-	// the underlying application (safe no-op if not in copy-mode).
-	// Escape closes CC dialogs and may interrupt a running tool (Step 3
-	// handles the idle check regardless). C-u clears the input line.
-	s.tmux.SendKeysRaw(target, "-X", "cancel") // exit copy-mode; ignore error if not in a mode
-	if err := s.tmux.SendKeysRaw(target, "Escape"); err != nil {
-		broadcast("failed:send Escape: " + err.Error())
-		return
-	}
-	s.tmux.SendKeysRaw(target, "C-u") // best-effort; Escape success means target exists
-	time.Sleep(200 * time.Millisecond)
+	// Prepare pane:
+	// 1. Exit tmux copy-mode (safe no-op if not in copy-mode)
+	// 2. Escape — close CC dialogs / cancel current operation
+	// 3. C-c — clear CC input box (C-u is undo in CC and exits on empty prompt)
+	s.tmux.SendKeysRaw(target, "-X", "cancel")
+	time.Sleep(500 * time.Millisecond)
+	s.tmux.SendKeysRaw(target, "Escape")
+	time.Sleep(500 * time.Millisecond)
+	s.tmux.SendKeysRaw(target, "C-c")
+	time.Sleep(500 * time.Millisecond)
 
 	// Step 2: Prerequisite — CC must be running
 	broadcast("detecting")
@@ -235,14 +233,32 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 	}
 
 	// Step 4: Extract session ID + cwd via /status
-	// Send /status then rapidly capture full pane content. The /status dialog
-	// may auto-dismiss quickly, so retry capture several times.
+	// Staged send: "/" first to trigger CC's slash-command menu, wait for
+	// the TUI to switch mode, then "status" + delay + Enter. This mirrors
+	// ccbot's approach for mode-switching commands and prevents CC's AI
+	// from intercepting "/status" as a skill invocation.
 	broadcast("extracting-id")
-	if err := s.tmux.SendKeys(target, "/status"); err != nil {
+	if err := s.tmux.SendKeysRaw(target, "-l", "/"); err != nil {
 		if didManualResize {
 			s.tmux.ResizeWindowAuto(target)
 		}
-		broadcast("failed:send /status: " + err.Error())
+		broadcast("failed:send /: " + err.Error())
+		return
+	}
+	time.Sleep(1 * time.Second)
+	if err := s.tmux.SendKeysRaw(target, "-l", "status"); err != nil {
+		if didManualResize {
+			s.tmux.ResizeWindowAuto(target)
+		}
+		broadcast("failed:send status: " + err.Error())
+		return
+	}
+	time.Sleep(500 * time.Millisecond)
+	if err := s.tmux.SendKeysRaw(target, "Enter"); err != nil {
+		if didManualResize {
+			s.tmux.ResizeWindowAuto(target)
+		}
+		broadcast("failed:send Enter: " + err.Error())
 		return
 	}
 	var statusInfo detect.StatusInfo
