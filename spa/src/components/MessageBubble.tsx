@@ -9,24 +9,25 @@ interface Props {
 }
 
 export default function MessageBubble({ role, content }: Props) {
-  const isUser = role === 'user'
+  if (role === 'user') {
+    return (
+      <div className="flex justify-end">
+        <div
+          data-testid="user-bubble"
+          className="max-w-[75%] bg-[#334a5e] text-[#dde8f5] text-sm rounded-[12px_12px_4px_12px] px-3 py-1.5 pl-2.5"
+        >
+          <p className="whitespace-pre-wrap break-words">{content}</p>
+        </div>
+      </div>
+    )
+  }
 
   return (
-    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
-      <div className={`max-w-[80%] rounded-xl px-3 py-2 text-sm ${
-        isUser
-          ? 'bg-blue-700 text-white'
-          : 'bg-[#2a2f38] text-[#f5f5f5]'
-      }`}>
-        {isUser ? (
-          <p className="whitespace-pre-wrap break-words">{content}</p>
-        ) : (
-          <div className="prose prose-invert prose-sm max-w-none">
-            <ReactMarkdown rehypePlugins={[rehypeHighlight]}>
-              {content}
-            </ReactMarkdown>
-          </div>
-        )}
+    <div data-testid="assistant-text" className="max-w-[90%] text-sm leading-[1.7] text-[#e0e0e0]">
+      <div className="prose prose-invert prose-sm max-w-none">
+        <ReactMarkdown rehypePlugins={[rehypeHighlight]}>
+          {content}
+        </ReactMarkdown>
       </div>
     </div>
   )

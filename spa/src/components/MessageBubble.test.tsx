@@ -3,17 +3,40 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { render, screen, cleanup } from '@testing-library/react'
 import MessageBubble from './MessageBubble'
 
-beforeEach(() => {
-  cleanup()
-})
+beforeEach(() => { cleanup() })
 
 describe('MessageBubble', () => {
-  it('renders user message as plain text', () => {
+  it('renders user message in a bubble', () => {
+    const { container } = render(<MessageBubble role="user" content="hello" />)
+    const bubble = container.querySelector('[data-testid="user-bubble"]')
+    expect(bubble).toBeInTheDocument()
+    expect(bubble).toHaveTextContent('hello')
+  })
+
+  it('renders assistant message without bubble wrapper', () => {
+    const { container } = render(<MessageBubble role="assistant" content="hi there" />)
+    expect(container.querySelector('[data-testid="user-bubble"]')).toBeNull()
+    const text = container.querySelector('[data-testid="assistant-text"]')
+    expect(text).toBeInTheDocument()
+  })
+
+  it('renders assistant markdown with code blocks', () => {
+    render(<MessageBubble role="assistant" content="use `npm install`" />)
+    expect(screen.getByText('npm install')).toBeInTheDocument()
+  })
+
+  it('applies correct user bubble classes', () => {
+    const { container } = render(<MessageBubble role="user" content="test" />)
+    const bubble = container.querySelector('[data-testid="user-bubble"]')
+    expect(bubble?.className).toContain('bg-[#334a5e]')
+  })
+
+  it('renders user message as plain text (not markdown)', () => {
     render(<MessageBubble role="user" content="Hello, world!" />)
     expect(screen.getByText('Hello, world!')).toBeInTheDocument()
   })
 
-  it('renders assistant markdown content', () => {
+  it('renders assistant markdown bold content', () => {
     render(<MessageBubble role="assistant" content="**bold text**" />)
     const bold = document.querySelector('strong')
     expect(bold).toBeInTheDocument()
@@ -25,12 +48,6 @@ describe('MessageBubble', () => {
     render(<MessageBubble role="assistant" content={code} />)
     const codeEl = document.querySelector('code')
     expect(codeEl).toBeInTheDocument()
-  })
-
-  it('user message container has justify-end (right-aligned)', () => {
-    const { container } = render(<MessageBubble role="user" content="test" />)
-    const outerDiv = container.firstElementChild as HTMLElement
-    expect(outerDiv.className).toContain('justify-end')
   })
 
   it('does not render any avatar elements', () => {
