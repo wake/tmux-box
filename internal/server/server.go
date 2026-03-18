@@ -43,7 +43,23 @@ func New(cfg config.Config, st *store.Store, tx tmux.Executor, cfgPath string) *
 		mux:          http.NewServeMux(),
 	}
 	s.routes()
+	s.resetStaleModes()
 	return s
+}
+
+// resetStaleModes resets any sessions stuck in stream/jsonl mode back to term.
+// On daemon startup no relays can be connected, so non-term modes are stale.
+func (s *Server) resetStaleModes() {
+	sessions, err := s.store.ListSessions()
+	if err != nil {
+		return
+	}
+	termMode := "term"
+	for _, sess := range sessions {
+		if sess.Mode != "term" {
+			s.store.UpdateSession(sess.ID, store.SessionUpdate{Mode: &termMode})
+		}
+	}
 }
 
 func (s *Server) routes() {
