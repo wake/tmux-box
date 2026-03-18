@@ -59,6 +59,17 @@ func (b *Bridge) UnregisterRelay(name string) {
 	}
 }
 
+// RelaySessionNames returns the names of all sessions with active relays.
+func (b *Bridge) RelaySessionNames() []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	names := make([]string, 0, len(b.sessions))
+	for name := range b.sessions {
+		names = append(names, name)
+	}
+	return names
+}
+
 // HasRelay returns true if a relay is registered for the named session.
 func (b *Bridge) HasRelay(name string) bool {
 	b.mu.RLock()
