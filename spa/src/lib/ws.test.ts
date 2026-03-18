@@ -133,13 +133,15 @@ describe('connectTerminal auto-reconnect', () => {
     expect(onOpen).toHaveBeenCalledTimes(2)
   })
 
-  it('stops reconnecting after manual close()', () => {
-    const conn = connectTerminal('ws://test', vi.fn(), vi.fn())
+  it('stops reconnecting and does not call onClose after manual close()', () => {
+    const onClose = vi.fn()
+    const conn = connectTerminal('ws://test', vi.fn(), onClose)
     wsInstances[0].simulateOpen()
     conn.close() // manual close
 
     vi.advanceTimersByTime(5000)
     expect(wsInstances).toHaveLength(1) // no reconnect attempt
+    expect(onClose).not.toHaveBeenCalled() // onClose not called on manual close
   })
 
   it('does not reconnect if WS never opened (initial connect failure)', () => {

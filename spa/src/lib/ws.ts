@@ -27,6 +27,7 @@ export function connectTerminal(
     }
     ws.onerror = () => {}
     ws.onclose = () => {
+      if (closed) return // manual close — don't notify or reconnect
       onClose()
       if (!closed) {
         setTimeout(() => {
