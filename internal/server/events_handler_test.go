@@ -213,6 +213,96 @@ func TestSessionEventsEndpoint(t *testing.T) {
 	}
 }
 
+func TestRelayEventsSnapshot(t *testing.T) {
+	srv := setupServer(t)
+
+	// Connect a relay first (creates relay state)
+	relay := dial(t, wsURL(srv, "/ws/cli-bridge/snap-test"))
+	defer relay.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	// Connect session-events subscriber — should receive snapshot with relay status
+	sub := dial(t, wsURL(srv, "/ws/session-events"))
+	defer sub.Close()
+
+	// Read messages until we find relay event or timeout
+	var relayEvent map[string]string
+	sub.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for {
+		_, msg, err := sub.ReadMessage()
+		if err != nil {
+			break
+		}
+		var ev map[string]string
+		json.Unmarshal(msg, &ev)
+		if ev["type"] == "relay" && ev["session"] == "snap-test" {
+			relayEvent = ev
+			break
+		}
+	}
+
+	if relayEvent == nil {
+		t.Fatal("expected relay snapshot event for snap-test")
+	}
+	if relayEvent["value"] != "connected" {
+		t.Fatalf("want connected, got %q", relayEvent["value"])
+	}
+}
+
+func TestRelayEventsLive(t *testing.T) {
+	srv := setupServer(t)
+
+	// Connect session-events subscriber
+	sub := dial(t, wsURL(srv, "/ws/session-events"))
+	defer sub.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	// Connect relay — triggers relay:connected broadcast
+	relay := dial(t, wsURL(srv, "/ws/cli-bridge/live-test"))
+	time.Sleep(100 * time.Millisecond)
+
+	// Read messages, skip non-relay events (status snapshots etc), find relay:connected
+	var foundConnected bool
+	sub.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for {
+		_, msg, err := sub.ReadMessage()
+		if err != nil {
+			break
+		}
+		var ev map[string]string
+		json.Unmarshal(msg, &ev)
+		if ev["type"] == "relay" && ev["session"] == "live-test" && ev["value"] == "connected" {
+			foundConnected = true
+			break
+		}
+	}
+	if !foundConnected {
+		t.Fatal("expected relay:connected event for live-test")
+	}
+
+	// Disconnect relay — triggers relay:disconnected broadcast
+	relay.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	sub.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var foundDisconnected bool
+	for {
+		_, msg, err := sub.ReadMessage()
+		if err != nil {
+			break
+		}
+		var ev map[string]string
+		json.Unmarshal(msg, &ev)
+		if ev["type"] == "relay" && ev["session"] == "live-test" && ev["value"] == "disconnected" {
+			foundDisconnected = true
+			break
+		}
+	}
+	if !foundDisconnected {
+		t.Fatal("expected relay:disconnected event for live-test")
+	}
+}
+
 func TestSessionEventsDisconnectedSubscriber(t *testing.T) {
 	eb := server.NewEventsBroadcaster()
 

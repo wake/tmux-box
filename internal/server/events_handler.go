@@ -117,8 +117,9 @@ func (s *Server) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 	sub := s.events.Add(conn)
 	defer s.events.Remove(sub)
 
-	// Send current status snapshot so new subscribers don't start with stale state.
+	// Send snapshots so new subscribers don't start with stale state.
 	s.sendStatusSnapshot(sub)
+	s.sendRelaySnapshot(sub)
 
 	// Keep connection alive — read (and discard) messages to detect disconnect.
 	for {
@@ -143,6 +144,20 @@ func (s *Server) sendStatusSnapshot(sub *eventSubscriber) {
 			Session: sess.Name,
 			Value:   string(status),
 		})
+		if err != nil {
+			continue
+		}
+		select {
+		case sub.send <- msg:
+		default:
+		}
+	}
+}
+
+// sendRelaySnapshot pushes relay connected status for all active relays to a single subscriber.
+func (s *Server) sendRelaySnapshot(sub *eventSubscriber) {
+	for _, name := range s.bridge.RelaySessionNames() {
+		msg, err := json.Marshal(sessionEvent{Type: "relay", Session: name, Value: "connected"})
 		if err != nil {
 			continue
 		}

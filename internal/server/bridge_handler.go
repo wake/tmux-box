@@ -41,7 +41,9 @@ func (s *Server) handleCliBridge(w http.ResponseWriter, r *http.Request) {
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, err.Error()))
 		return
 	}
+	s.events.Broadcast(sessionName, "relay", "connected")
 	defer func() {
+		s.events.Broadcast(sessionName, "relay", "disconnected")
 		s.bridge.UnregisterRelay(sessionName)
 		// When relay disconnects, revert session mode to "term" if it was in stream/jsonl.
 		// This prevents the session from being stuck in stream mode after a failed handoff.
