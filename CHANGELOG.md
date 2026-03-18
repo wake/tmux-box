@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.2] - 2026-03-18
+
+Bugfix: 從 CC `/status` 取得 cwd，修復空 cwd session 的歷史載入
+
+### 新增
+
+- **`detect.ExtractStatusInfo`** — 從 CC `/status` 同時解析 Session ID 和 cwd
+- **`store.SessionUpdate.Cwd`** — 支援更新 session 的 cwd 欄位
+
+### 修復
+
+- **空 cwd 導致歷史載入失敗** — auto-scan 使用 `#{session_path}` 取得 cwd，但部分 tmux session 該值為空，導致 history handler 無法定位 JSONL 檔案。改為在 handoff 時從 CC `/status` 輸出取得 cwd 並寫入 DB
+- **cwdRegex 空白行誤匹配** — `cwd:` 行僅含空白時不再匹配為有效路徑
+
 ## [0.4.1] - 2026-03-18
 
 Bugfix: Handoff 狀態管理修正
