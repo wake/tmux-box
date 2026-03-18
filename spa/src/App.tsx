@@ -89,17 +89,16 @@ export default function App() {
                 // Stream/JSONL handoff — mark connected and load conversation history
                 useStreamStore.getState().setHandoffState(event.session, 'connected')
                 fetchHistory(daemonBase, sess.id).then((msgs) => {
-                  if (msgs.length > 0) {
-                    useStreamStore.getState().loadHistory(event.session, msgs)
-                  }
+                  useStreamStore.getState().loadHistory(event.session, msgs)
                 }).catch(() => { /* history fetch failed — non-critical */ })
               } else {
-                // Term handoff — reset to idle so stream page shows HandoffButton
+                // Term handoff — clear stale per-session state and reset to idle
+                useStreamStore.getState().clearSession(event.session)
                 useStreamStore.getState().setHandoffState(event.session, 'idle')
               }
             }).catch(() => {
-              // fetchSessions failed — fall back to connected
-              useStreamStore.getState().setHandoffState(event.session, 'connected')
+              // fetchSessions failed — fall back to idle (safe default)
+              useStreamStore.getState().setHandoffState(event.session, 'idle')
             })
           } else if (event.value.startsWith('failed')) {
             store.setHandoffState(event.session, 'disconnected')

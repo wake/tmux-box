@@ -314,16 +314,21 @@ func (s *Server) runHandoffToTerm(sess store.Session, handoffID string) {
 	}
 	sessionID := current.CCSessionID
 
-	// Step 1.5: Pre-update mode to "term" before shutting down relay.
+	// Pre-update mode to "term" before shutting down relay.
 	// This prevents revertModeOnRelayDisconnect from firing a spurious
 	// "failed:relay disconnected" event during an intentional handoff.
+	// If later steps fail, the deferred rollback restores the original mode.
+	origMode := current.Mode
 	termMode := "term"
 	if err := s.store.UpdateSession(sess.ID, store.SessionUpdate{Mode: &termMode}); err != nil {
 		broadcast("failed:db pre-update error: " + err.Error())
 		return
 	}
+	rollbackMode := func() {
+		s.store.UpdateSession(sess.ID, store.SessionUpdate{Mode: &origMode})
+	}
 
-	// Step 2: Shut down relay
+	// Shut down relay
 	if s.bridge.HasRelay(sess.Name) {
 		broadcast("stopping-relay")
 		s.bridge.SubscriberToRelay(sess.Name, []byte(`{"type":"shutdown"}`))
@@ -335,12 +340,13 @@ func (s *Server) runHandoffToTerm(sess store.Session, handoffID string) {
 			time.Sleep(500 * time.Millisecond)
 		}
 		if s.bridge.HasRelay(sess.Name) {
+			rollbackMode()
 			broadcast("failed:relay did not disconnect")
 			return
 		}
 	}
 
-	// Step 3: Wait for shell
+	// Wait for shell
 	broadcast("waiting-shell")
 	shellDeadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(shellDeadline) {
@@ -350,19 +356,21 @@ func (s *Server) runHandoffToTerm(sess store.Session, handoffID string) {
 		time.Sleep(500 * time.Millisecond)
 	}
 	if s.detector.Detect(sess.Name) != detect.StatusNormal {
+		rollbackMode()
 		broadcast("failed:shell did not recover")
 		return
 	}
 
-	// Step 4: Launch interactive CC with --resume
+	// Launch interactive CC with --resume
 	broadcast("launching-cc")
 	resumeCmd := fmt.Sprintf("claude --resume %s", sessionID)
 	if err := s.tmux.SendKeys(sess.Name, resumeCmd); err != nil {
+		rollbackMode()
 		broadcast("failed:send-keys error: " + err.Error())
 		return
 	}
 
-	// Step 5: Verify CC started
+	// Verify CC started
 	ccDeadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(ccDeadline) {
 		st := s.detector.Detect(sess.Name)
@@ -373,11 +381,12 @@ func (s *Server) runHandoffToTerm(sess store.Session, handoffID string) {
 	}
 	finalSt := s.detector.Detect(sess.Name)
 	if finalSt != detect.StatusCCIdle && finalSt != detect.StatusCCRunning && finalSt != detect.StatusCCWaiting {
+		rollbackMode()
 		broadcast("failed:CC did not start")
 		return
 	}
 
-	// Step 6: Update DB (clear cc_session_id; mode already set to "term" in step 1.5)
+	// Clear cc_session_id (mode already set to "term" above)
 	emptyID := ""
 	if err := s.store.UpdateSession(sess.ID, store.SessionUpdate{
 		CCSessionID: &emptyID,
