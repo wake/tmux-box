@@ -27,9 +27,10 @@ type ResizeMsg struct {
 }
 
 type Relay struct {
-	cmd  string
-	args []string
-	cwd  string
+	cmd     string
+	args    []string
+	cwd     string
+	OnStart func() // called after PTY starts, before I/O goroutines
 }
 
 func NewRelay(cmd string, args []string, cwd string) *Relay {
@@ -52,6 +53,9 @@ func (r *Relay) HandleWebSocket(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		log.Printf("pty start: %v", err)
 		return
+	}
+	if r.OnStart != nil {
+		r.OnStart()
 	}
 	defer func() {
 		ptmx.Close()

@@ -26,16 +26,25 @@ type DetectConfig struct {
 	PollInterval int      `toml:"poll_interval" json:"poll_interval"`
 }
 
+type TerminalConfig struct {
+	AutoResize *bool `toml:"auto_resize" json:"auto_resize"`
+}
+
+func (tc TerminalConfig) IsAutoResize() bool {
+	return tc.AutoResize == nil || *tc.AutoResize
+}
+
 type Config struct {
-	Bind         string       `toml:"bind"           json:"bind"`
-	Port         int          `toml:"port"           json:"port"`
-	Token        string       `toml:"token"          json:"token"`
-	Allow        []string     `toml:"allow"          json:"allow"`
-	DataDir      string       `toml:"data_dir"       json:"data_dir"`
-	AllowedPaths []string     `toml:"allowed_paths"  json:"allowed_paths"`
-	Stream       StreamConfig `toml:"stream"         json:"stream"`
-	JSONL        JSONLConfig  `toml:"jsonl"          json:"jsonl"`
-	Detect       DetectConfig `toml:"detect"         json:"detect"`
+	Bind         string         `toml:"bind"           json:"bind"`
+	Port         int            `toml:"port"           json:"port"`
+	Token        string         `toml:"token"          json:"token"`
+	Allow        []string       `toml:"allow"          json:"allow"`
+	DataDir      string         `toml:"data_dir"       json:"data_dir"`
+	AllowedPaths []string       `toml:"allowed_paths"  json:"allowed_paths"`
+	Terminal     TerminalConfig `toml:"terminal"       json:"terminal"`
+	Stream       StreamConfig   `toml:"stream"         json:"stream"`
+	JSONL        JSONLConfig    `toml:"jsonl"          json:"jsonl"`
+	Detect       DetectConfig   `toml:"detect"         json:"detect"`
 }
 
 func defaults() Config {

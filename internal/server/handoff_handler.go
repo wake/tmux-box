@@ -222,11 +222,13 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 	// When xterm.js container is display:none (user on stream page), the PTY
 	// client may have a tiny size (e.g. 10x5), causing /status to render garbled
 	// text that capture-pane cannot parse.
+	didManualResize := false
 	if cols, rows, err := s.tmux.PaneSize(target); err == nil && (cols < 80 || rows < 24) {
 		if err := s.tmux.ResizeWindow(target, 80, 24); err != nil {
 			broadcast("failed:resize pane: " + err.Error())
 			return
 		}
+		didManualResize = true
 		time.Sleep(200 * time.Millisecond)
 	}
 
@@ -235,6 +237,9 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 	// may auto-dismiss quickly, so retry capture several times.
 	broadcast("extracting-id")
 	if err := s.tmux.SendKeys(target, "/status"); err != nil {
+		if didManualResize {
+			s.tmux.ResizeWindowAuto(target)
+		}
 		broadcast("failed:send /status: " + err.Error())
 		return
 	}
@@ -250,6 +255,10 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 			statusInfo = info
 			break
 		}
+	}
+	// Step 3.5 cleanup: restore automatic window sizing now that /status is done.
+	if didManualResize {
+		s.tmux.ResizeWindowAuto(target)
 	}
 	if statusInfo.SessionID == "" {
 		broadcast("failed:could not extract session ID")

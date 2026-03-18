@@ -29,6 +29,7 @@ type Executor interface {
 	CapturePaneContent(target string, lastN int) (string, error)
 	PaneSize(target string) (cols, rows int, err error)
 	ResizeWindow(target string, cols, rows int) error
+	ResizeWindowAuto(target string) error
 }
 
 // --- Real Executor ---
@@ -158,6 +159,10 @@ func (r *RealExecutor) PaneSize(target string) (cols, rows int, err error) {
 func (r *RealExecutor) ResizeWindow(target string, cols, rows int) error {
 	return exec.Command("tmux", "resize-window", "-t", target,
 		"-x", fmt.Sprintf("%d", cols), "-y", fmt.Sprintf("%d", rows)).Run()
+}
+
+func (r *RealExecutor) ResizeWindowAuto(target string) error {
+	return exec.Command("tmux", "resize-window", "-A", "-t", target).Run()
 }
 
 // --- Fake Executor ---
@@ -299,5 +304,9 @@ func (f *FakeExecutor) PaneSize(target string) (int, int, error) {
 
 func (f *FakeExecutor) ResizeWindow(target string, cols, rows int) error {
 	f.paneSizes[target] = [2]int{cols, rows}
+	return nil
+}
+
+func (f *FakeExecutor) ResizeWindowAuto(target string) error {
 	return nil
 }
