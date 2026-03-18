@@ -390,7 +390,9 @@ func (s *Server) runHandoffToTerm(sess store.Session, handoffID string) {
 		return
 	}
 
-	// Clear cc_session_id (mode already set to "term" above)
+	// Clear cc_session_id (mode already set to "term" above).
+	// Cwd is intentionally kept — it still represents the CC project directory
+	// and is needed by the history handler if the user later handoffs back to stream.
 	emptyID := ""
 	if err := s.store.UpdateSession(sess.ID, store.SessionUpdate{
 		CCSessionID: &emptyID,

@@ -41,6 +41,18 @@ func TestExtractStatusInfo(t *testing.T) {
 			wantID:  "43480073-4ab3-431d-bb07-d7e23f9b8929",
 			wantCwd: "/private/tmp",
 		},
+		{
+			name: "bare cwd line with only whitespace yields empty",
+			content: "  Session ID: deadbeef-1234-5678-9abc-def012345678\n  cwd:   \n",
+			wantID:  "deadbeef-1234-5678-9abc-def012345678",
+			wantCwd: "",
+		},
+		{
+			name: "cwd with spaces in path",
+			content: "  Session ID: deadbeef-1234-5678-9abc-def012345678\n  cwd: /Users/wake/My Projects/app\n",
+			wantID:  "deadbeef-1234-5678-9abc-def012345678",
+			wantCwd: "/Users/wake/My Projects/app",
+		},
 	}
 
 	for _, tt := range tests {

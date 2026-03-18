@@ -13,7 +13,8 @@ var sessionIDRegex = regexp.MustCompile(
 )
 
 // cwdRegex matches "cwd: <path>" in CC /status output.
-var cwdRegex = regexp.MustCompile(`(?m)^\s*cwd:\s*(.+?)\s*$`)
+// \S.+? requires at least one non-whitespace char to avoid matching bare "cwd: " lines.
+var cwdRegex = regexp.MustCompile(`(?m)^\s*cwd:\s*(\S.+?)\s*$`)
 
 // StatusInfo holds fields extracted from CC /status output.
 type StatusInfo struct {
