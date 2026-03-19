@@ -70,9 +70,6 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		if req.Terminal.AutoResize != nil {
 			s.cfg.Terminal.AutoResize = req.Terminal.AutoResize
 		}
-		if req.Terminal.SessionGroup != nil {
-			s.cfg.Terminal.SessionGroup = req.Terminal.SessionGroup
-		}
 		if req.Terminal.IgnoreSize != nil {
 			s.cfg.Terminal.IgnoreSize = req.Terminal.IgnoreSize
 		}

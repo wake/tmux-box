@@ -81,7 +81,7 @@ export async function fetchHistory(base: string, sessionId: number): Promise<imp
 export interface ConfigData {
   bind: string
   port: number
-  terminal?: { auto_resize: boolean | null; session_group: boolean | null; ignore_size: boolean | null }
+  terminal?: { auto_resize: boolean | null; ignore_size: boolean | null }
   stream: { presets: Array<{ name: string; command: string }> }
   jsonl: { presets: Array<{ name: string; command: string }> }
   detect: { cc_commands: string[]; poll_interval: number }

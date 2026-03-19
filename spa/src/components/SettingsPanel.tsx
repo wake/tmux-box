@@ -17,7 +17,6 @@ export default function SettingsPanel({ daemonBase, onClose }: Props) {
   const { config, fetch: fetchConfig, update } = useConfigStore()
 
   const [autoResize, setAutoResize] = useState(true)
-  const [sessionGroup, setSessionGroup] = useState(false)
   const [ignoreSize, setIgnoreSize] = useState(false)
   const [streamPresets, setStreamPresets] = useState<PresetRow[]>([])
   const [jsonlPresets, setJsonlPresets] = useState<PresetRow[]>([])
@@ -30,7 +29,6 @@ export default function SettingsPanel({ daemonBase, onClose }: Props) {
   useEffect(() => {
     if (config) {
       setAutoResize(config.terminal?.auto_resize !== false)
-      setSessionGroup(config.terminal?.session_group === true)
       setIgnoreSize(config.terminal?.ignore_size === true)
       setStreamPresets(config.stream?.presets?.map(p => ({ ...p })) || [])
       setJsonlPresets(config.jsonl?.presets?.map(p => ({ ...p })) || [])
@@ -87,7 +85,6 @@ export default function SettingsPanel({ daemonBase, onClose }: Props) {
       await update(daemonBase, {
         terminal: {
           auto_resize: autoResize,
-          session_group: sessionGroup,
           ignore_size: ignoreSize,
         },
         stream: { presets: streamPresets.filter(p => p.name.trim()) },
@@ -136,19 +133,6 @@ export default function SettingsPanel({ daemonBase, onClose }: Props) {
                   type="checkbox"
                   checked={autoResize}
                   onChange={e => setAutoResize(e.target.checked)}
-                  className="w-4 h-4 accent-blue-500 cursor-pointer"
-                />
-              </label>
-              <label className="flex items-center justify-between cursor-pointer">
-                <div>
-                  <span className="text-xs text-[#ddd]">Session Group</span>
-                  <span className="block text-[11px] text-[#777]">每個連線建立獨立 grouped session</span>
-                </div>
-                <input
-                  data-testid="terminal-session-group"
-                  type="checkbox"
-                  checked={sessionGroup}
-                  onChange={e => setSessionGroup(e.target.checked)}
                   className="w-4 h-4 accent-blue-500 cursor-pointer"
                 />
               </label>
