@@ -39,7 +39,9 @@ export interface WorkspaceSidebarState {
 const WORKSPACE_COLORS = ['#7a6aaa', '#6aaa7a', '#aa6a7a', '#6a8aaa', '#aa8a6a', '#8a6aaa']
 
 function generateId(): string {
-  return crypto.randomUUID()
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID()
+  // Fallback for insecure contexts (HTTP non-localhost)
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 }
 
 function iconForType(type: Tab['type']): string {
