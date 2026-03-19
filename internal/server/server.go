@@ -19,6 +19,8 @@ import (
 	"github.com/wake/tmux-box/internal/tmux"
 )
 
+var relaySessionPattern = regexp.MustCompile(`^.+-tbox-[0-9a-f]{8}$`)
+
 type Server struct {
 	cfg          config.Config
 	cfgMu        sync.RWMutex
@@ -55,12 +57,14 @@ func New(cfg config.Config, st *store.Store, tx tmux.Executor, cfgPath string) *
 func (s *Server) CleanupStaleRelays() {
 	names, err := s.tmux.ListSessionNames()
 	if err != nil {
+		log.Printf("CleanupStaleRelays: failed to list sessions: %v", err)
 		return
 	}
-	re := regexp.MustCompile(`^.+-tbox-[0-9a-f]{8}$`)
 	for _, name := range names {
-		if re.MatchString(name) {
-			s.tmux.KillSession(name)
+		if relaySessionPattern.MatchString(name) {
+			if err := s.tmux.KillSession(name); err != nil {
+				log.Printf("CleanupStaleRelays: failed to kill %q: %v", name, err)
+			}
 		}
 	}
 }
@@ -99,8 +103,12 @@ func (s *Server) routes() {
 // RestoreWindowSizing clears manual window-size set by resize-window
 // and restores automatic sizing based on the latest client.
 func (s *Server) RestoreWindowSizing(target string) {
-	s.tmux.ResizeWindowAuto(target)
-	s.tmux.SetWindowOption(target, "window-size", "latest")
+	if err := s.tmux.ResizeWindowAuto(target); err != nil {
+		log.Printf("RestoreWindowSizing: ResizeWindowAuto(%s): %v", target, err)
+	}
+	if err := s.tmux.SetWindowOption(target, "window-size", "latest"); err != nil {
+		log.Printf("RestoreWindowSizing: SetWindowOption(%s): %v", target, err)
+	}
 }
 
 // BuildTerminalRelay returns the command, args, and cleanup function for a terminal relay.
@@ -123,7 +131,9 @@ func (s *Server) BuildTerminalRelay(name string) (cmd string, args []string, cle
 			break
 		}
 		b = make([]byte, 4)
-		rand.Read(b)
+		if _, randErr := rand.Read(b); randErr != nil {
+			return "", nil, nil, fmt.Errorf("generate relay ID on retry: %w", randErr)
+		}
 		relaySession = fmt.Sprintf("%s-tbox-%x", name, b)
 	}
 	if err != nil {
@@ -131,7 +141,9 @@ func (s *Server) BuildTerminalRelay(name string) (cmd string, args []string, cle
 	}
 
 	cleanup = func() {
-		s.tmux.KillSession(relaySession)
+		if err := s.tmux.KillSession(relaySession); err != nil {
+			log.Printf("BuildTerminalRelay cleanup: failed to kill relay session %q: %v", relaySession, err)
+		}
 	}
 
 	return "tmux", []string{"attach-session", "-t", relaySession}, cleanup, nil

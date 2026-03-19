@@ -97,8 +97,6 @@ func TestBuildTerminalRelayWithoutSessionGroup(t *testing.T) {
 func TestCleanupStaleRelays(t *testing.T) {
 	fakeTmux := tmux.NewFakeExecutor()
 	fakeTmux.AddSession("myapp", "/tmp")
-	fakeTmux.AddSession("myapp-tbox-1a2b3c4d", "/tmp")  // stale relay
-	fakeTmux.AddSession("myapp-tbox-deadbeef", "/tmp")   // stale relay
 	fakeTmux.AddSession("work", "/tmp")                   // normal session
 	fakeTmux.AddSession("my-tbox-project", "/tmp")        // NOT a relay (no hex suffix)
 
@@ -106,6 +104,11 @@ func TestCleanupStaleRelays(t *testing.T) {
 	defer db.Close()
 
 	srv := server.New(config.Config{}, db, fakeTmux, "")
+
+	// Add stale relay sessions AFTER New() so they aren't cleaned during construction
+	fakeTmux.AddSession("myapp-tbox-1a2b3c4d", "/tmp")  // stale relay
+	fakeTmux.AddSession("myapp-tbox-deadbeef", "/tmp")   // stale relay
+
 	srv.CleanupStaleRelays()
 
 	if fakeTmux.HasSession("myapp-tbox-1a2b3c4d") {
