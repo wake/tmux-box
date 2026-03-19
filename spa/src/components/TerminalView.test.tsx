@@ -2,13 +2,14 @@ import { describe, it, expect, vi } from 'vitest'
 import { render, act } from '@testing-library/react'
 import TerminalView from './TerminalView'
 
-const { mockClose, TerminalSpy, capturedCallbacks } = vi.hoisted(() => {
+const { mockClose, TerminalSpy, capturedCallbacks, capturedWheelHandler } = vi.hoisted(() => {
   const mockClose = vi.fn()
   const capturedCallbacks: {
     onData?: (data: ArrayBuffer) => void
     onClose?: () => void
     onOpen?: () => void
   } = {}
+  const capturedWheelHandler: { fn?: (ev: WheelEvent) => boolean } = {}
   const TerminalSpy = vi.fn(function (opts: Record<string, unknown>) {
     ;(this as unknown as Record<string, unknown>)._opts = opts
     return {
@@ -19,12 +20,15 @@ const { mockClose, TerminalSpy, capturedCallbacks } = vi.hoisted(() => {
       onResize: vi.fn(),
       dispose: vi.fn(),
       focus: vi.fn(),
+      attachCustomWheelEventHandler: vi.fn((fn: (ev: WheelEvent) => boolean) => {
+        capturedWheelHandler.fn = fn
+      }),
       cols: 80,
       rows: 24,
       _opts: opts,
     }
   })
-  return { mockClose, TerminalSpy, capturedCallbacks }
+  return { mockClose, TerminalSpy, capturedCallbacks, capturedWheelHandler }
 })
 
 // xterm.js requires DOM APIs not available in jsdom, so we test mounting only
@@ -119,6 +123,30 @@ describe('TerminalView', () => {
     // 50% transparent background, not fully opaque
     expect(overlay?.getAttribute('style')).toContain('0.5')
     expect(overlay?.textContent).toContain('reconnecting...')
+  })
+
+  it('registers custom wheel handler that filters horizontal-dominant events', () => {
+    capturedWheelHandler.fn = undefined
+    TerminalSpy.mockClear()
+    render(<TerminalView wsUrl="ws://localhost:7860/ws/terminal/test" />)
+    expect(capturedWheelHandler.fn).toBeDefined()
+
+    const handler = capturedWheelHandler.fn!
+
+    // Vertical-dominant: should be processed (return true)
+    expect(handler({ deltaX: 1, deltaY: 10 } as WheelEvent)).toBe(true)
+
+    // Horizontal-dominant: should be ignored (return false)
+    expect(handler({ deltaX: 10, deltaY: 1 } as WheelEvent)).toBe(false)
+
+    // Equal: vertical wins (return true)
+    expect(handler({ deltaX: 5, deltaY: 5 } as WheelEvent)).toBe(true)
+
+    // Pure vertical: processed
+    expect(handler({ deltaX: 0, deltaY: 20 } as WheelEvent)).toBe(true)
+
+    // Pure horizontal: ignored
+    expect(handler({ deltaX: 20, deltaY: 0 } as WheelEvent)).toBe(false)
   })
 
   it('hides reconnecting overlay on reconnect', async () => {

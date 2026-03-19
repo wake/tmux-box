@@ -42,6 +42,13 @@ export default function TerminalView({ wsUrl, visible = true }: Props) {
 
     try { term.loadAddon(new WebglAddon()) } catch { /* fallback to canvas */ }
 
+    // Filter out horizontal-dominant wheel events. macOS trackpad often produces
+    // an initial event with |deltaX| > |deltaY| when the finger lands slightly
+    // off-axis, causing the first scroll to be swallowed or misinterpreted.
+    term.attachCustomWheelEventHandler((ev: WheelEvent) => {
+      return Math.abs(ev.deltaY) >= Math.abs(ev.deltaX)
+    })
+
     requestAnimationFrame(() => fitAddon.fit())
 
     let revealed = false
