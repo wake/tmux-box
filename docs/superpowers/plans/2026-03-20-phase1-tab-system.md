@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 將 tmux-box SPA 從「單 session 檢視」升級為「多分頁 + Activity Bar」架構，保持所有現有功能正常運作。
+**Goal:** 將 tmux-box SPA 從「單 session 檢視」升級為「多分頁 + Activity Bar」架構。
 
-**Architecture:** 在現有 SessionPanel + TopBar + Content 佈局之上，加入 Tab 層——每個「session + mode」成為一個 Tab。Activity Bar 垂直排列在最左側作為工作區切換器（Phase 1 只有一個預設工作區）。TabBar 水平顯示分頁。現有的 TerminalView/ConversationView 由 TabContent 根據 tab type 動態渲染。Hash routing 從 `#/{uid}/{mode}` 升級為 `#/tab/{tabId}`。
+**Architecture:** 在 `v1` branch 上破壞式重構。加入 Tab 層——每個「session + mode」成為一個 Tab。Activity Bar 垂直排列在最左側。TabBar 水平顯示分頁。TabContent 以 keep-alive 策略同時掛載所有 tab（CSS 控制可見性）。最小版 HostStore 取代 hardcoded `daemonBase`。簡易 Session Picker 讓使用者可選擇/建立分頁。新 session 自動建立 tab。Hash routing 改為 `#/tab/{tabId}`（不需向後相容舊格式）。
 
 **Tech Stack:** React 19, Zustand 5, TypeScript 5.9, Tailwind 4, Vitest, Phosphor Icons
 
@@ -18,39 +18,39 @@
 
 | File | Responsibility |
 |------|---------------|
-| `spa/src/types/tab.ts` | Tab, Workspace, SidebarZone 型別定義 |
+| `spa/src/types/tab.ts` | Tab, Workspace, Host, SidebarZone 型別定義 |
 | `spa/src/stores/useTabStore.ts` | Tab CRUD、排序、活躍分頁切換、持久化 |
 | `spa/src/stores/useWorkspaceStore.ts` | Workspace 定義、tabs 歸屬、Activity Bar 排序 |
+| `spa/src/stores/useHostStore.ts` | 最小版 Host 管理（單一預設 host，取代 hardcoded daemonBase） |
 | `spa/src/components/ActivityBar.tsx` | 垂直圖示列：工作區切換 + 獨立分頁 |
 | `spa/src/components/TabBar.tsx` | 水平分頁列：分頁切換 + 關閉 + 新增 |
-| `spa/src/components/TabContent.tsx` | 根據 tab type 動態渲染 Terminal/Stream/Editor |
+| `spa/src/components/TabContent.tsx` | keep-alive 渲染：所有 tab 同時掛載，CSS 控制可見性 |
 | `spa/src/components/StatusBar.tsx` | 底部狀態列 |
+| `spa/src/components/SessionPicker.tsx` | Session 選擇 popover（+ 按鈕觸發） |
 | `spa/src/hooks/useIsMobile.ts` | 響應式 breakpoint 偵測 |
 
 ### Modified Files
 
 | File | Changes |
 |------|---------|
-| `spa/src/App.tsx` | 重構佈局：ActivityBar + TabBar + TabContent + StatusBar |
-| `spa/src/components/TerminalView.tsx` | 無改動，TabContent 直接傳入相同 props |
-| `spa/src/components/ConversationView.tsx` | 無改動，TabContent 直接傳入相同 props |
-| `spa/src/components/SessionPanel.tsx` | Phase 1 從佈局移除（Phase 3 重新引入為側欄面板） |
-| `spa/src/components/TopBar.tsx` | Phase 1 移除，功能被 TabBar 取代 |
-| `spa/src/index.css` | 新增 Activity Bar 相關基礎樣式 |
+| `spa/src/App.tsx` | 全面重構：ActivityBar + TabBar + TabContent + StatusBar + SessionPicker |
+| `spa/src/components/TerminalView.tsx` | 確認 default export |
+| `spa/src/components/ConversationView.tsx` | 確認 default export |
 
 ### Test Files
 
 | File | Tests |
 |------|-------|
 | `spa/src/types/tab.test.ts` | 型別 helper functions |
-| `spa/src/stores/useTabStore.test.ts` | Tab CRUD、切換、持久化 |
-| `spa/src/stores/useWorkspaceStore.test.ts` | Workspace 管理、tab 歸屬 |
+| `spa/src/stores/useTabStore.test.ts` | Tab CRUD、切換、持久化、edge cases |
+| `spa/src/stores/useWorkspaceStore.test.ts` | Workspace 管理、tab 歸屬、去重 |
+| `spa/src/stores/useHostStore.test.ts` | Host 管理、連線資訊推導 |
 | `spa/src/components/ActivityBar.test.tsx` | 渲染、點擊切換 |
 | `spa/src/components/TabBar.test.tsx` | 渲染、切換、關閉、新增 |
-| `spa/src/components/TabContent.test.tsx` | 根據 type 渲染正確元件 |
+| `spa/src/components/TabContent.test.tsx` | keep-alive 渲染、可見性控制 |
 | `spa/src/components/StatusBar.test.tsx` | 顯示連線資訊 |
+| `spa/src/components/SessionPicker.test.tsx` | Session 列表、搜尋、選擇建立 tab |
 | `spa/src/hooks/useIsMobile.test.ts` | breakpoint 判斷 |
-| `spa/src/lib/parseHash.test.ts` | hash routing 解析（新格式 + legacy） |
 
 ---
 
@@ -457,7 +457,143 @@ git commit -m "feat: add useTabStore for multi-tab state management"
 
 ---
 
-## Task 3: useWorkspaceStore
+## Task 3: useHostStore（最小版）
+
+**Files:**
+- Create: `spa/src/stores/useHostStore.ts`
+- Test: `spa/src/stores/useHostStore.test.ts`
+
+- [ ] **Step 1: Write failing tests**
+
+```typescript
+// spa/src/stores/useHostStore.test.ts
+import { describe, it, expect, beforeEach } from 'vitest'
+import { useHostStore } from './useHostStore'
+
+describe('useHostStore', () => {
+  beforeEach(() => {
+    useHostStore.getState().reset()
+  })
+
+  it('has a default host', () => {
+    const { defaultHost } = useHostStore.getState()
+    expect(defaultHost.id).toBe('local')
+    expect(defaultHost.name).toBeTruthy()
+    expect(defaultHost.address).toBeTruthy()
+  })
+
+  it('returns daemon base URL', () => {
+    const base = useHostStore.getState().getDaemonBase('local')
+    expect(base).toMatch(/^https?:\/\//)
+  })
+
+  it('returns ws base URL', () => {
+    const wsBase = useHostStore.getState().getWsBase('local')
+    expect(wsBase).toMatch(/^wss?:\/\//)
+  })
+
+  it('can update default host address', () => {
+    useHostStore.getState().updateHost('local', { address: '192.168.1.1', port: 8080 })
+    const base = useHostStore.getState().getDaemonBase('local')
+    expect(base).toContain('192.168.1.1')
+    expect(base).toContain('8080')
+  })
+})
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd spa && npx vitest run src/stores/useHostStore.test.ts`
+Expected: FAIL — module not found
+
+- [ ] **Step 3: Implement useHostStore**
+
+```typescript
+// spa/src/stores/useHostStore.ts
+import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
+
+export interface Host {
+  id: string
+  name: string
+  address: string
+  port: number
+  status: 'connected' | 'disconnected' | 'connecting'
+}
+
+interface HostState {
+  hosts: Record<string, Host>
+  defaultHost: Host
+
+  getDaemonBase: (hostId: string) => string
+  getWsBase: (hostId: string) => string
+  updateHost: (hostId: string, updates: Partial<Pick<Host, 'address' | 'port' | 'name'>>) => void
+  reset: () => void
+}
+
+const DEFAULT_HOST: Host = {
+  id: 'local',
+  name: 'mlab',
+  address: '100.64.0.2',
+  port: 7860,
+  status: 'connected',
+}
+
+function createDefaultState() {
+  return { hosts: { [DEFAULT_HOST.id]: DEFAULT_HOST }, defaultHost: DEFAULT_HOST }
+}
+
+export const useHostStore = create<HostState>()(
+  persist(
+    (set, get) => ({
+      ...createDefaultState(),
+
+      getDaemonBase: (hostId) => {
+        const host = get().hosts[hostId] ?? get().defaultHost
+        return `http://${host.address}:${host.port}`
+      },
+
+      getWsBase: (hostId) => {
+        const host = get().hosts[hostId] ?? get().defaultHost
+        return `ws://${host.address}:${host.port}`
+      },
+
+      updateHost: (hostId, updates) =>
+        set((state) => {
+          const host = state.hosts[hostId]
+          if (!host) return state
+          const updated = { ...host, ...updates }
+          return {
+            hosts: { ...state.hosts, [hostId]: updated },
+            defaultHost: hostId === state.defaultHost.id ? updated : state.defaultHost,
+          }
+        }),
+
+      reset: () => set(createDefaultState()),
+    }),
+    {
+      name: 'tbox-hosts',
+      partialize: (state) => ({ hosts: state.hosts }),
+    },
+  ),
+)
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd spa && npx vitest run src/stores/useHostStore.test.ts`
+Expected: PASS (4 tests)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add spa/src/stores/useHostStore.ts spa/src/stores/useHostStore.test.ts
+git commit -m "feat: add minimal useHostStore to replace hardcoded daemonBase"
+```
+
+---
+
+## Task 4: useWorkspaceStore
 
 **Files:**
 - Create: `spa/src/stores/useWorkspaceStore.ts`
@@ -669,7 +805,7 @@ git commit -m "feat: add useWorkspaceStore for workspace + tab grouping"
 
 ---
 
-## Task 4: useIsMobile hook
+## Task 5: useIsMobile hook
 
 **Files:**
 - Create: `spa/src/hooks/useIsMobile.ts`
@@ -758,7 +894,7 @@ git commit -m "feat: add useIsMobile hook for responsive breakpoints"
 
 ---
 
-## Task 5: ActivityBar component
+## Task 6: ActivityBar component
 
 **Files:**
 - Create: `spa/src/components/ActivityBar.tsx`
@@ -961,7 +1097,7 @@ git commit -m "feat: add ActivityBar component for workspace switching"
 
 ---
 
-## Task 6: TabBar component
+## Task 7: TabBar component
 
 **Files:**
 - Create: `spa/src/components/TabBar.tsx`
@@ -1116,7 +1252,7 @@ git commit -m "feat: add TabBar component for horizontal tab switching"
 
 ---
 
-## Task 7: TabContent component
+## Task 8: TabContent component
 
 **Files:**
 - Create: `spa/src/components/TabContent.tsx`
@@ -1275,7 +1411,7 @@ git commit -m "feat: add TabContent component for dynamic tab rendering"
 
 ---
 
-## Task 8: StatusBar component
+## Task 9: StatusBar component
 
 **Files:**
 - Create: `spa/src/components/StatusBar.tsx`
@@ -1357,7 +1493,175 @@ git commit -m "feat: add StatusBar component for connection info display"
 
 ---
 
-## Task 9: App.tsx 重構
+## Task 10: SessionPicker component
+
+**Files:**
+- Create: `spa/src/components/SessionPicker.tsx`
+- Test: `spa/src/components/SessionPicker.test.tsx`
+
+- [ ] **Step 1: Write failing tests**
+
+```typescript
+// spa/src/components/SessionPicker.test.tsx
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { SessionPicker } from './SessionPicker'
+
+const mockSessions = [
+  { id: 1, uid: 'abc', name: 'dev-server', mode: 'term', cwd: '/home', tmux_target: '', group_id: 0, sort_order: 0, cc_session_id: '', cc_model: '', has_relay: false },
+  { id: 2, uid: 'def', name: 'claude-code', mode: 'stream', cwd: '/home', tmux_target: '', group_id: 0, sort_order: 0, cc_session_id: '', cc_model: '', has_relay: true },
+]
+
+beforeEach(() => cleanup())
+
+describe('SessionPicker', () => {
+  it('renders session list', () => {
+    render(
+      <SessionPicker
+        sessions={mockSessions as any}
+        existingTabSessionNames={[]}
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+    expect(screen.getByText('dev-server')).toBeTruthy()
+    expect(screen.getByText('claude-code')).toBeTruthy()
+  })
+
+  it('marks sessions that already have tabs', () => {
+    render(
+      <SessionPicker
+        sessions={mockSessions as any}
+        existingTabSessionNames={['dev-server']}
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+    const devItem = screen.getByText('dev-server').closest('button')!
+    expect(devItem.textContent).toContain('已開啟')
+  })
+
+  it('calls onSelect with session info', () => {
+    const onSelect = vi.fn()
+    render(
+      <SessionPicker
+        sessions={mockSessions as any}
+        existingTabSessionNames={[]}
+        onSelect={onSelect}
+        onClose={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByText('dev-server'))
+    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ name: 'dev-server', mode: 'term' }))
+  })
+
+  it('filters sessions by search text', () => {
+    render(
+      <SessionPicker
+        sessions={mockSessions as any}
+        existingTabSessionNames={[]}
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+    const input = screen.getByPlaceholderText('搜尋 session...')
+    fireEvent.change(input, { target: { value: 'claude' } })
+    expect(screen.queryByText('dev-server')).toBeNull()
+    expect(screen.getByText('claude-code')).toBeTruthy()
+  })
+})
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd spa && npx vitest run src/components/SessionPicker.test.tsx`
+Expected: FAIL — module not found
+
+- [ ] **Step 3: Implement SessionPicker**
+
+```typescript
+// spa/src/components/SessionPicker.tsx
+import { useState, useRef, useEffect } from 'react'
+import { X, Terminal, Lightning } from '@phosphor-icons/react'
+import type { Session } from '../stores/useSessionStore'
+
+interface Props {
+  sessions: Session[]
+  existingTabSessionNames: string[]
+  onSelect: (session: Session) => void
+  onClose: () => void
+}
+
+export function SessionPicker({ sessions, existingTabSessionNames, onSelect, onClose }: Props) {
+  const [search, setSearch] = useState('')
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    inputRef.current?.focus()
+  }, [])
+
+  const filtered = sessions.filter((s) =>
+    s.name.toLowerCase().includes(search.toLowerCase()),
+  )
+
+  const hasTab = (name: string) => existingTabSessionNames.includes(name)
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh]" onClick={onClose}>
+      <div
+        className="bg-[#1e1e3e] border border-gray-700 rounded-xl shadow-2xl w-[380px] max-h-[60vh] flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Search */}
+        <div className="p-3 border-b border-gray-700">
+          <input
+            ref={inputRef}
+            type="text"
+            placeholder="搜尋 session..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-full bg-[#0a0a1a] border border-gray-600 rounded-md px-3 py-2 text-sm text-white placeholder-gray-500 outline-none focus:border-purple-400"
+          />
+        </div>
+        {/* List */}
+        <div className="flex-1 overflow-y-auto">
+          {filtered.map((s) => (
+            <button
+              key={s.id}
+              onClick={() => onSelect(s)}
+              className="w-full px-4 py-2.5 flex items-center gap-2 text-sm text-left hover:bg-[#2a2a5a] cursor-pointer transition-colors"
+            >
+              {s.mode === 'stream' ? <Lightning size={16} className="text-blue-400 flex-shrink-0" /> : <Terminal size={16} className="text-gray-400 flex-shrink-0" />}
+              <span className="flex-1 text-gray-200">{s.name}</span>
+              <span className="text-xs text-gray-600">{s.mode}</span>
+              {hasTab(s.name) && <span className="text-xs text-purple-400">已開啟</span>}
+            </button>
+          ))}
+          {filtered.length === 0 && (
+            <div className="px-4 py-6 text-center text-gray-600 text-sm">無符合的 session</div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd spa && npx vitest run src/components/SessionPicker.test.tsx`
+Expected: PASS (4 tests)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add spa/src/components/SessionPicker.tsx spa/src/components/SessionPicker.test.tsx
+git commit -m "feat: add SessionPicker component for session selection popover"
+```
+
+---
+
+## Task 11: App.tsx 重構
 
 這是最關鍵的 task——重構 App.tsx 以整合所有新元件。
 
@@ -1390,11 +1694,13 @@ import { TabBar } from './components/TabBar'
 import { TabContent } from './components/TabContent'
 import { StatusBar } from './components/StatusBar'
 import SettingsPanel from './components/SettingsPanel'  // default import
+import { SessionPicker } from './components/SessionPicker'
 import { useSessionStore } from './stores/useSessionStore'
 import { useStreamStore } from './stores/useStreamStore'
 import { useConfigStore } from './stores/useConfigStore'
 import { useTabStore } from './stores/useTabStore'
 import { useWorkspaceStore } from './stores/useWorkspaceStore'
+import { useHostStore } from './stores/useHostStore'
 import { useRelayWsManager } from './hooks/useRelayWsManager'
 import { useIsMobile } from './hooks/useIsMobile'
 import { connectSessionEvents } from './lib/session-events'
@@ -1402,19 +1708,12 @@ import { handoff, fetchHistory } from './lib/api'
 import { createTab, isStandaloneTab } from './types/tab'
 import type { Tab } from './types/tab'
 
-const daemonBase = 'http://100.64.0.2:7860'  // TODO: from config/localStorage
-const wsBase = daemonBase.replace(/^http/, 'ws')
-
 // --- Hash routing helpers (export for testing) ---
-export function parseHash(): { tabId: string | null; legacyUid?: string; legacyMode?: string } {
+export function parseHash(): { tabId: string | null } {
   const hash = window.location.hash.replace(/^#\/?/, '')
   if (!hash) return { tabId: null }
   const parts = hash.split('/')
   if (parts[0] === 'tab' && parts[1]) return { tabId: parts[1] }
-  // Legacy format: #/{uid}/{mode}
-  if (parts[0] && parts[0] !== 'tab') {
-    return { tabId: null, legacyUid: parts[0], legacyMode: parts[1] || 'term' }
-  }
   return { tabId: null }
 }
 
@@ -1425,6 +1724,7 @@ function setHash(tabId: string) {
 export default function App() {
   const isMobile = useIsMobile()
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [sessionPickerOpen, setSessionPickerOpen] = useState(false)
 
   // --- Terminal reconnect state (搬自原 App.tsx) ---
   const [terminalKey, setTerminalKey] = useState(0)
@@ -1432,6 +1732,11 @@ export default function App() {
 
   // --- Handoff state (搬自原 App.tsx) ---
   const [activePreset, setActivePreset] = useState('')
+
+  // Host store (取代 hardcoded daemonBase)
+  const { getDaemonBase, getWsBase } = useHostStore()
+  const daemonBase = getDaemonBase('local')
+  const wsBase = getWsBase('local')
 
   // Existing stores
   const { sessions, fetch: fetchSessions } = useSessionStore()
@@ -1509,42 +1814,31 @@ export default function App() {
     return () => conn.close()
   }, [setRelayStatus, setSessionStatus, setHandoffProgress, fetchSessions, sessions, loadHistory])
 
-  // --- Migration: sessions → tabs (首次載入) ---
-  const migrated = useRef(false)
+  // --- Auto tab creation: sessions 變化時自動建立/同步 tab ---
   useEffect(() => {
-    if (migrated.current || sessions.length === 0 || tabOrder.length > 0) return
-    migrated.current = true
-
-    const defaultWsId = workspaces[0]?.id
     sessions.forEach((s) => {
-      const tab = createTab({
-        type: s.mode === 'stream' ? 'stream' : 'terminal',
-        label: s.name,
-        hostId: 'local',
-        sessionName: s.name,
-      })
-      addTab(tab)
-      if (defaultWsId) addTabToWorkspace(defaultWsId, tab.id)
+      const existingTab = Object.values(tabs).find((t) => t.sessionName === s.name)
+      if (!existingTab) {
+        const tab = createTab({
+          type: s.mode === 'stream' ? 'stream' : 'terminal',
+          label: s.name,
+          hostId: 'local',
+          sessionName: s.name,
+        })
+        addTab(tab)
+        const defaultWsId = workspaces[0]?.id
+        if (defaultWsId) addTabToWorkspace(defaultWsId, tab.id)
+      }
     })
-  }, [sessions, tabOrder.length, workspaces, addTab, addTabToWorkspace])
+  }, [sessions]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // --- Hash routing ---
+  // --- Hash routing (v1: 只支援新格式 #/tab/{id}) ---
   useEffect(() => {
-    const { tabId, legacyUid } = parseHash()
+    const { tabId } = parseHash()
     if (tabId && tabs[tabId]) {
       setActiveTab(tabId)
-    } else if (legacyUid) {
-      // Legacy format redirect
-      const session = sessions.find((s) => s.uid === legacyUid)
-      if (session) {
-        const tab = Object.values(tabs).find((t) => t.sessionName === session.name)
-        if (tab) {
-          setActiveTab(tab.id)
-          setHash(tab.id)
-        }
-      }
     }
-  }, [sessions]) // Re-run when sessions load (for legacy redirect)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (activeTabId) setHash(activeTabId)
@@ -1618,8 +1912,29 @@ export default function App() {
   }, [findWorkspaceByTab, removeTabFromWorkspace, removeTab])
 
   const handleAddTab = useCallback(() => {
-    setSettingsOpen(true) // Phase 7: replace with Quick Switcher
+    setSessionPickerOpen(true)
   }, [])
+
+  const handleSessionSelect = useCallback((session: typeof sessions[0]) => {
+    setSessionPickerOpen(false)
+    // 如果已有同名 tab，切換過去
+    const existing = Object.values(tabs).find((t) => t.sessionName === session.name)
+    if (existing) {
+      setActiveTab(existing.id)
+      return
+    }
+    // 建立新 tab
+    const tab = createTab({
+      type: session.mode === 'stream' ? 'stream' : 'terminal',
+      label: session.name,
+      hostId: 'local',
+      sessionName: session.name,
+    })
+    addTab(tab)
+    setActiveTab(tab.id)
+    const wsId = activeWorkspaceId
+    if (wsId) addTabToWorkspace(wsId, tab.id)
+  }, [tabs, setActiveTab, addTab, activeWorkspaceId, addTabToWorkspace])
 
   const handleAddWorkspace = useCallback(() => {
     // Phase 1: disabled — Phase 2 開放
@@ -1709,6 +2024,16 @@ export default function App() {
           onTerminalReconnect={handleTerminalReconnect}
         />
       )}
+
+      {/* Session Picker (+ 按鈕觸發) */}
+      {sessionPickerOpen && (
+        <SessionPicker
+          sessions={sessions}
+          existingTabSessionNames={Object.values(tabs).map((t) => t.sessionName).filter(Boolean) as string[]}
+          onSelect={handleSessionSelect}
+          onClose={() => setSessionPickerOpen(false)}
+        />
+      )}
     </div>
   )
 }
@@ -1749,7 +2074,7 @@ git commit -m "feat: restructure App layout with ActivityBar + TabBar + TabConte
 
 ---
 
-## Task 10: parseHash 單元測試
+## Task 12: parseHash 單元測試
 
 `parseHash` 是從 App.tsx export 的純函式，應有獨立測試。
 
@@ -1781,18 +2106,9 @@ describe('parseHash', () => {
     expect(parseHash().tabId).toBeNull()
   })
 
-  it('parses legacy format #/{uid}/{mode}', () => {
-    window.location.hash = '#/abc123/stream'
-    const result = parseHash()
-    expect(result.tabId).toBeNull()
-    expect(result.legacyUid).toBe('abc123')
-    expect(result.legacyMode).toBe('stream')
-  })
-
-  it('defaults legacy mode to term', () => {
-    window.location.hash = '#/abc123'
-    const result = parseHash()
-    expect(result.legacyMode).toBe('term')
+  it('returns null for unknown format', () => {
+    window.location.hash = '#/something/else'
+    expect(parseHash().tabId).toBeNull()
   })
 })
 ```
@@ -1811,7 +2127,7 @@ git commit -m "test: add parseHash unit tests for hash routing"
 
 ---
 
-## Task 11: 移除舊的 TopBar，清理引用
+## Task 13: 移除舊的 TopBar，清理引用
 
 **Files:**
 - Modify: `spa/src/components/TopBar.tsx` — 保留檔案但標記 deprecated（Phase 完成確認後可刪除）
@@ -1844,9 +2160,9 @@ git commit -m "chore: mark TopBar as deprecated, replaced by TabBar"
 
 ---
 
-## Task 12: 整合測試 + 最終驗證
+## Task 14: 整合測試 + 最終驗證
 
-Legacy hash routing 已在 Task 9 的 App.tsx 中完整實作（parseHash 支援 legacyUid + redirect），無需獨立 task。
+v1 branch 不需向後相容舊 hash 格式。
 
 - [ ] **Step 1: Run full test suite**
 
@@ -1874,8 +2190,9 @@ Expected: Build succeeds
 - [ ] 關閉分頁後自動切換到相鄰分頁
 - [ ] 關閉所有分頁顯示空狀態
 - [ ] Hash URL 正確更新為 `#/tab/{id}` 格式
-- [ ] 舊的 `#/{uid}/{mode}` URL 正確 redirect
 - [ ] 重新整理頁面後分頁狀態保留（localStorage）
+- [ ] + 按鈕開啟 Session Picker，選擇 session 建立新分頁
+- [ ] 新 session（daemon 端建立）自動出現為新分頁
 - [ ] StatusBar 顯示當前 host、session、狀態
 - [ ] Settings 面板仍可開啟和操作
 - [ ] Session-events WS 正常運作（狀態即時更新）
