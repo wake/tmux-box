@@ -93,3 +93,34 @@ func TestBuildTerminalRelayWithoutSessionGroup(t *testing.T) {
 		t.Errorf("expected attach-session -t myapp, got %s %v", cmd, args)
 	}
 }
+
+func TestCleanupStaleRelays(t *testing.T) {
+	fakeTmux := tmux.NewFakeExecutor()
+	fakeTmux.AddSession("myapp", "/tmp")
+	fakeTmux.AddSession("myapp-tbox-1a2b3c4d", "/tmp")  // stale relay
+	fakeTmux.AddSession("myapp-tbox-deadbeef", "/tmp")   // stale relay
+	fakeTmux.AddSession("work", "/tmp")                   // normal session
+	fakeTmux.AddSession("my-tbox-project", "/tmp")        // NOT a relay (no hex suffix)
+
+	db, _ := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	defer db.Close()
+
+	srv := server.New(config.Config{}, db, fakeTmux, "")
+	srv.CleanupStaleRelays()
+
+	if fakeTmux.HasSession("myapp-tbox-1a2b3c4d") {
+		t.Error("expected stale relay myapp-tbox-1a2b3c4d to be cleaned up")
+	}
+	if fakeTmux.HasSession("myapp-tbox-deadbeef") {
+		t.Error("expected stale relay myapp-tbox-deadbeef to be cleaned up")
+	}
+	if !fakeTmux.HasSession("myapp") {
+		t.Error("expected normal session myapp to survive cleanup")
+	}
+	if !fakeTmux.HasSession("work") {
+		t.Error("expected normal session work to survive cleanup")
+	}
+	if !fakeTmux.HasSession("my-tbox-project") {
+		t.Error("expected non-relay session my-tbox-project to survive cleanup")
+	}
+}

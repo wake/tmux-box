@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"sync"
 	"time"
 
@@ -45,7 +46,23 @@ func New(cfg config.Config, st *store.Store, tx tmux.Executor, cfgPath string) *
 	}
 	s.routes()
 	s.resetStaleModes()
+	s.CleanupStaleRelays()
 	return s
+}
+
+// CleanupStaleRelays removes tmux sessions created by session group mode
+// that were not cleaned up (e.g., daemon crashed). Matches pattern: {name}-tbox-{8 hex chars}.
+func (s *Server) CleanupStaleRelays() {
+	names, err := s.tmux.ListSessionNames()
+	if err != nil {
+		return
+	}
+	re := regexp.MustCompile(`^.+-tbox-[0-9a-f]{8}$`)
+	for _, name := range names {
+		if re.MatchString(name) {
+			s.tmux.KillSession(name)
+		}
+	}
 }
 
 // resetStaleModes resets any sessions stuck in stream/jsonl mode back to term.
