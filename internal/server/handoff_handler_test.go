@@ -447,6 +447,19 @@ func TestHandoffResizesPaneTooSmall(t *testing.T) {
 	if autoCalls[0] != "small-session:0" {
 		t.Errorf("ResizeWindowAuto target: want small-session:0, got %s", autoCalls[0])
 	}
+
+	// Verify SetWindowOption was called to restore window-size to latest
+	swoCalls := fakeTmux.SetWindowOptionCalls()
+	swoFound := false
+	for _, c := range swoCalls {
+		if c.Target == "small-session:0" && c.Option == "window-size" && c.Value == "latest" {
+			swoFound = true
+			break
+		}
+	}
+	if !swoFound {
+		t.Error("expected SetWindowOption(small-session:0, window-size, latest) after handoff cleanup")
+	}
 }
 
 func TestHandoffSendsEscapeAndCuBeforeDetect(t *testing.T) {

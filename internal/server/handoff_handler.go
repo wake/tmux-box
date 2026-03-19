@@ -240,7 +240,7 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 	broadcast("extracting-id")
 	if err := s.tmux.SendKeysRaw(target, "-l", "/"); err != nil {
 		if didManualResize {
-			s.tmux.ResizeWindowAuto(target)
+			s.RestoreWindowSizing(target)
 		}
 		broadcast("failed:send /: " + err.Error())
 		return
@@ -248,7 +248,7 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 	time.Sleep(1 * time.Second)
 	if err := s.tmux.SendKeysRaw(target, "-l", "status"); err != nil {
 		if didManualResize {
-			s.tmux.ResizeWindowAuto(target)
+			s.RestoreWindowSizing(target)
 		}
 		broadcast("failed:send status: " + err.Error())
 		return
@@ -256,7 +256,7 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 	time.Sleep(500 * time.Millisecond)
 	if err := s.tmux.SendKeysRaw(target, "Enter"); err != nil {
 		if didManualResize {
-			s.tmux.ResizeWindowAuto(target)
+			s.RestoreWindowSizing(target)
 		}
 		broadcast("failed:send Enter: " + err.Error())
 		return
@@ -276,7 +276,7 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 	}
 	// Step 3.5 cleanup: restore automatic window sizing now that /status is done.
 	if didManualResize {
-		s.tmux.ResizeWindowAuto(target)
+		s.RestoreWindowSizing(target)
 	}
 	if statusInfo.SessionID == "" {
 		broadcast("failed:could not extract session ID")
