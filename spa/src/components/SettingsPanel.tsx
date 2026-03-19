@@ -100,8 +100,9 @@ export default function SettingsPanel({ daemonBase, onClose, onTerminalReconnect
           poll_interval: pollInterval,
         },
       })
-      onTerminalReconnect?.()
+      const prevSizingMode = config?.terminal?.sizing_mode || 'auto'
       onClose()
+      if (sizingMode !== prevSizingMode) onTerminalReconnect?.()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Save failed')
     } finally {

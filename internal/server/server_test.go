@@ -66,6 +66,47 @@ func TestBuildTerminalRelayTerminalFirst(t *testing.T) {
 	}
 }
 
+func TestBuildTerminalRelayMinimalFirst(t *testing.T) {
+	fakeTmux := tmux.NewFakeExecutor()
+	fakeTmux.AddSession("myapp", "/tmp")
+
+	db, _ := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	defer db.Close()
+
+	cfg := config.Config{
+		Terminal: config.TerminalConfig{SizingMode: "minimal-first"},
+	}
+	srv := server.New(cfg, db, fakeTmux, "")
+
+	_, args, cleanup, err := srv.BuildTerminalRelay("myapp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	// minimal-first should NOT have -f ignore-size
+	for _, a := range args {
+		if a == "ignore-size" {
+			t.Error("minimal-first mode should not have ignore-size flag")
+		}
+	}
+}
+
+func TestRestoreWindowSizingWithSmallest(t *testing.T) {
+	fakeTmux := tmux.NewFakeExecutor()
+
+	db, _ := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	defer db.Close()
+
+	srv := server.New(config.Config{}, db, fakeTmux, "")
+	srv.RestoreWindowSizing("test:0", "smallest")
+
+	calls := fakeTmux.SetWindowOptionCalls()
+	if len(calls) != 1 || calls[0].Value != "smallest" {
+		t.Errorf("expected SetWindowOption value=smallest, got %v", calls)
+	}
+}
+
 func TestRestoreWindowSizingCallsBothMethods(t *testing.T) {
 	fakeTmux := tmux.NewFakeExecutor()
 

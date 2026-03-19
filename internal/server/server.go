@@ -114,15 +114,24 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 
 	sizingMode := s.cfg.Terminal.GetSizingMode()
 	relay := terminal.NewRelay(cmd, args, "/")
-	if sizingMode != "terminal-first" {
-		windowSizeValue := "latest"
-		if sizingMode == "minimal-first" {
-			windowSizeValue = "smallest"
+	switch sizingMode {
+	case "terminal-first":
+		// no OnStart — relay uses -f ignore-size, sizing handled by terminal
+	case "minimal-first":
+		relay.OnStart = func() {
+			go func() {
+				time.Sleep(1200 * time.Millisecond)
+				s.RestoreWindowSizing(name, "smallest")
+			}()
+		}
+	default:
+		if sizingMode != "auto" && sizingMode != "" {
+			log.Printf("handleTerminal: unknown sizing_mode %q, falling back to auto", sizingMode)
 		}
 		relay.OnStart = func() {
 			go func() {
 				time.Sleep(1200 * time.Millisecond)
-				s.RestoreWindowSizing(name, windowSizeValue)
+				s.RestoreWindowSizing(name, "latest")
 			}()
 		}
 	}

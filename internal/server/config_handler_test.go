@@ -298,6 +298,23 @@ func TestPutConfigPartialTerminal(t *testing.T) {
 	}
 }
 
+func TestPutConfigRejectsInvalidSizingMode(t *testing.T) {
+	srv, _ := newConfigTestServer(t)
+
+	update := map[string]any{
+		"terminal": map[string]any{
+			"sizing_mode": "banana",
+		},
+	}
+	body, _ := json.Marshal(update)
+	resp := authPut(t, srv.URL+"/api/config", body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("want 400 for invalid sizing_mode, got %d", resp.StatusCode)
+	}
+}
+
 func TestPutConfigInvalidJSON(t *testing.T) {
 	srv, _ := newConfigTestServer(t)
 

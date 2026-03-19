@@ -69,7 +69,13 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 
 	if req.Terminal != nil {
 		if req.Terminal.SizingMode != "" {
-			s.cfg.Terminal.SizingMode = req.Terminal.SizingMode
+			switch req.Terminal.SizingMode {
+			case "auto", "terminal-first", "minimal-first":
+				s.cfg.Terminal.SizingMode = req.Terminal.SizingMode
+			default:
+				http.Error(w, "invalid sizing_mode: must be auto, terminal-first, or minimal-first", http.StatusBadRequest)
+				return
+			}
 		}
 	}
 
