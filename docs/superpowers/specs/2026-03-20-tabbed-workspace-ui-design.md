@@ -137,7 +137,8 @@ interface PinnedItem {
 - **跨主機**: 一個工作區可以混合不同 host 的 sessions、目錄
 - **目錄監看**: 釘選的目錄/檔案即時顯示變動（新增、修改、刪除標記）
 - **上下文切換**: 切換工作區時，側欄目錄/Git/資訊面板跟著切換
-- **啟動 Session**: 從工作區直接建立新的 tmux session
+- **啟動 Session**: 從工作區直接建立新的 tmux session（指定 host 和 cwd，建立後自動加入該工作區為新分頁）
+- **預設目錄**: 建立工作區時，預設使用當前活躍 session 的 cwd 作為初始目錄，自動加入 `directories` 釘選列表。使用者可事後在工作區設定中修改
 - **側欄記憶**: 每個工作區記住自己的側欄面板選擇和寬度
 
 ### 4.3 獨立分頁
@@ -534,12 +535,18 @@ interface Host {
 
 ## 15. 實作分期建議
 
-### Phase 1：分頁系統 + Activity Bar 基礎
+> **開發策略**：在 `v1` branch 上進行破壞式開發，使用 worktree 隔離各 Phase。不需向下相容，但每個 Phase 完成後應維持可使用者測試的狀態。
+
+### Phase 1：分頁系統 + Activity Bar + Host 抽象
 - TabStore + Tab 元件
+- HostStore 最小版（單一預設 host，取代 hardcoded `daemonBase`）
 - Activity Bar（工作區切換，暫時只有預設工作區 + 獨立分頁）
 - 分頁列渲染（無群組）
-- 多分頁切換 + 內容區域動態渲染
+- 多分頁切換 + 內容區域動態渲染（keep-alive：所有 tab 同時掛載）
+- 簡易 Session Picker（+ 按鈕觸發，讓使用者可選擇/建立分頁）
+- 新 session 自動建立 tab（session-events 監聽）
 - 重構現有 App.tsx 佈局（Activity Bar + tab bar + content + status bar，側欄 4 區域留空殼）
+- `useIsMobile()` hook
 
 ### Phase 2：工作區
 - WorkspaceStore + 工作區群組 UI
@@ -547,35 +554,46 @@ interface Host {
 - 橫列式展開/收合（子母層）
 - 工作區色標 + 圖示自訂
 - 分頁拖曳（群組內外）
+- 從工作區直接啟動新 session
+- 工作區預設目錄（建立時預設為當前 session 的 cwd）
 
 ### Phase 3：側欄面板系統
 - SidebarStore + 4 區域面板框架
 - 固定/預設/縮減三模式 + 智慧切換
 - 縮減模式的 auto-hide 浮動展開
-- Sessions 面板（重構現有 SessionPanel）
-- 面板拖曳配置（後期優化）
+- Sessions 面板（從 Phase 1 的精簡版升級為完整側欄面板）
 
-### Phase 4：工作區面板
-- 目錄面板 + 檔案變動監看（後端 FS watch API）
-- Git 面板（後端 Git API）
+### Phase 4：後端 FS/Git API + 目錄面板 + Editor 分頁
+- 後端 FS 全套 API（read/write/list/stat/watch）— 統一的 `internal/fs/` package
+- 後端 Git API（log/status/branches）
+- 目錄面板 + 檔案變動監看
+- Editor 分頁元件 + Markdown 預覽
+
+### Phase 5：其餘側欄面板
+- Git 面板前端（後端 API 在 Phase 4 已完成）
 - 工作區資訊面板
 - AI 對話歷史面板
-
-### Phase 5：檔案編輯器
-- 後端 FS 讀寫 API
-- Editor 分頁元件
-- Markdown 預覽
-
-### Phase 6：多主機
-- HostStore + Host 管理 UI
-- 多 daemon 連線架構
-- Session 清單按 host 分組
-
-### Phase 7：進階功能
-- Quick Switcher
 - 提示詞注入面板
-- 側欄面板拖曳配置介面
-- 手機版響應式
+
+### Phase 6：多主機管理
+- HostStore 擴充為多主機 UI + Host 管理介面
+- 多 daemon 連線架構（擴充 Phase 1 的連線抽象）
+- Sessions 面板按 host 分組
+
+### Phase 7a：Quick Switcher
+- ⌘K session 快速選單（可在 Phase 2 後任意時間插入）
+- 取代 Phase 1 的簡易 Session Picker
+
+### Phase 7b：手機版響應式
+- Drawer 元件（側欄全螢幕抽屜）
+- TabBar mobile 變體
+- 觸控手勢
+- Termius 風格快速操作鍵盤
+- 放在最後，所有桌面版功能穩定後再做
+
+### Phase 7c：側欄面板拖曳配置（可選）
+- 面板拖曳到不同區域的配置介面
+- 低優先級，Phase 3 的預設配置已夠用
 
 ---
 
