@@ -27,11 +27,16 @@ type DetectConfig struct {
 }
 
 type TerminalConfig struct {
-	AutoResize *bool `toml:"auto_resize" json:"auto_resize"`
+	AutoResize   *bool `toml:"auto_resize"  json:"auto_resize"`
+	SessionGroup *bool `toml:"session_group" json:"session_group"`
 }
 
 func (tc TerminalConfig) IsAutoResize() bool {
 	return tc.AutoResize == nil || *tc.AutoResize
+}
+
+func (tc TerminalConfig) IsSessionGroup() bool {
+	return tc.SessionGroup != nil && *tc.SessionGroup
 }
 
 type Config struct {
