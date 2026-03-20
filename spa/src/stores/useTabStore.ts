@@ -19,6 +19,10 @@ interface TabState {
   updateTab: (tabId: string, updates: Partial<Tab>) => void
   setViewMode: (tabId: string, viewMode: string) => void
   getActiveTab: () => Tab | null
+  pinTab: (tabId: string) => void
+  unpinTab: (tabId: string) => void
+  lockTab: (tabId: string) => void
+  unlockTab: (tabId: string) => void
 }
 
 export const useTabStore = create<TabState>()(
@@ -39,6 +43,7 @@ export const useTabStore = create<TabState>()(
       removeTab: (tabId) =>
         set((state) => {
           if (!state.tabs[tabId]) return state
+          if (state.tabs[tabId].locked) return state
           // eslint-disable-next-line @typescript-eslint/no-unused-vars
           const { [tabId]: _removed, ...remainingTabs } = state.tabs
           const newOrder = state.tabOrder.filter((id) => id !== tabId)
@@ -54,6 +59,7 @@ export const useTabStore = create<TabState>()(
         set((state) => {
           const tab = state.tabs[tabId]
           if (!tab) return state
+          if (tab.locked) return state
           // eslint-disable-next-line @typescript-eslint/no-unused-vars
           const { [tabId]: _removed, ...remainingTabs } = state.tabs
           const newOrder = state.tabOrder.filter((id) => id !== tabId)
@@ -103,6 +109,43 @@ export const useTabStore = create<TabState>()(
         const { tabs, activeTabId } = get()
         return activeTabId ? tabs[activeTabId] ?? null : null
       },
+
+      pinTab: (tabId) =>
+        set((state) => {
+          const tab = state.tabs[tabId]
+          if (!tab) return state
+          const updated = { ...tab, pinned: true, locked: true }
+          const newOrder = state.tabOrder.filter((id) => id !== tabId)
+          const firstNormalIdx = newOrder.findIndex((id) => !state.tabs[id]?.pinned)
+          const insertIdx = firstNormalIdx === -1 ? newOrder.length : firstNormalIdx
+          newOrder.splice(insertIdx, 0, tabId)
+          return { tabs: { ...state.tabs, [tabId]: updated }, tabOrder: newOrder }
+        }),
+
+      unpinTab: (tabId) =>
+        set((state) => {
+          const tab = state.tabs[tabId]
+          if (!tab || !tab.pinned) return state
+          const updated = { ...tab, pinned: false }
+          const newOrder = state.tabOrder.filter((id) => id !== tabId)
+          const firstNormalIdx = newOrder.findIndex((id) => !state.tabs[id]?.pinned)
+          const insertIdx = firstNormalIdx === -1 ? newOrder.length : firstNormalIdx
+          newOrder.splice(insertIdx, 0, tabId)
+          return { tabs: { ...state.tabs, [tabId]: updated }, tabOrder: newOrder }
+        }),
+
+      lockTab: (tabId) =>
+        set((state) => {
+          if (!state.tabs[tabId]) return state
+          return { tabs: { ...state.tabs, [tabId]: { ...state.tabs[tabId], locked: true } } }
+        }),
+
+      unlockTab: (tabId) =>
+        set((state) => {
+          const tab = state.tabs[tabId]
+          if (!tab || tab.pinned) return state
+          return { tabs: { ...state.tabs, [tabId]: { ...tab, locked: false } } }
+        }),
     }),
     {
       name: 'tbox-tabs',
