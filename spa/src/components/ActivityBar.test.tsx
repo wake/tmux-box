@@ -1,10 +1,11 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { ActivityBar } from './ActivityBar'
+import type { Workspace } from '../types/tab'
 
-const mockWorkspaces = [
-  { id: 'ws-1', name: 'Project A', color: '#7a6aaa', icon: '🔧', tabs: ['t1', 't2'], activeTabId: 't1', directories: [], sidebarState: {} },
-  { id: 'ws-2', name: 'Server', color: '#6aaa7a', icon: '🖥', tabs: ['t3'], activeTabId: 't3', directories: [], sidebarState: {} },
+const mockWorkspaces: Workspace[] = [
+  { id: 'ws-1', name: 'Project A', color: '#7a6aaa', icon: '🔧', tabs: ['t1', 't2'], activeTabId: 't1', directories: [], sidebarState: { zones: { 'left-outer': { width: 200, mode: 'default' }, 'left-inner': { width: 200, mode: 'default' }, 'right-inner': { width: 200, mode: 'default' }, 'right-outer': { width: 200, mode: 'default' } } } },
+  { id: 'ws-2', name: 'Server', color: '#6aaa7a', icon: '🖥', tabs: ['t3'], activeTabId: 't3', directories: [], sidebarState: { zones: { 'left-outer': { width: 200, mode: 'default' }, 'left-inner': { width: 200, mode: 'default' }, 'right-inner': { width: 200, mode: 'default' }, 'right-outer': { width: 200, mode: 'default' } } } },
 ]
 
 const mockStandaloneTabs = [
@@ -16,7 +17,7 @@ describe('ActivityBar', () => {
     cleanup()
     render(
       <ActivityBar
-        workspaces={mockWorkspaces as any}
+        workspaces={mockWorkspaces}
         standaloneTabs={mockStandaloneTabs}
         activeWorkspaceId="ws-1"
         activeStandaloneTabId={null}
@@ -34,7 +35,7 @@ describe('ActivityBar', () => {
     cleanup()
     render(
       <ActivityBar
-        workspaces={mockWorkspaces as any}
+        workspaces={mockWorkspaces}
         standaloneTabs={mockStandaloneTabs}
         activeWorkspaceId="ws-1"
         activeStandaloneTabId={null}
@@ -53,7 +54,7 @@ describe('ActivityBar', () => {
     const onSelect = vi.fn()
     render(
       <ActivityBar
-        workspaces={mockWorkspaces as any}
+        workspaces={mockWorkspaces}
         standaloneTabs={mockStandaloneTabs}
         activeWorkspaceId="ws-1"
         activeStandaloneTabId={null}
@@ -71,7 +72,7 @@ describe('ActivityBar', () => {
     cleanup()
     render(
       <ActivityBar
-        workspaces={mockWorkspaces as any}
+        workspaces={mockWorkspaces}
         standaloneTabs={mockStandaloneTabs}
         activeWorkspaceId="ws-1"
         activeStandaloneTabId={null}

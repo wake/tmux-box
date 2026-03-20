@@ -1,7 +1,7 @@
 // spa/src/stores/useStreamStore.test.ts
 import { beforeEach, describe, expect, it } from 'vitest'
 import { useStreamStore } from './useStreamStore'
-import type { StreamMessage, ControlRequest } from '../lib/stream-ws'
+import type { StreamMessage, ControlRequest, StreamConnection } from '../lib/stream-ws'
 
 const emptyState = {
   sessions: {},
@@ -39,7 +39,7 @@ describe('useStreamStore (per-session)', () => {
 
   it('setConn stores per session', () => {
     const { setConn } = useStreamStore.getState()
-    const mockConn = { send: () => {}, close: () => {} } as any
+    const mockConn = { send: () => {}, close: () => {} } as unknown as StreamConnection
     setConn('sess-a', mockConn)
     expect(useStreamStore.getState().sessions['sess-a'].conn).toBe(mockConn)
     expect(useStreamStore.getState().sessions['sess-b']?.conn).toBeUndefined()
@@ -70,7 +70,7 @@ describe('useStreamStore (per-session)', () => {
   it('clearSession closes conn and removes state', () => {
     const { setConn, addMessage, clearSession } = useStreamStore.getState()
     let closed = false
-    const mockConn = { send: () => {}, close: () => { closed = true } } as any
+    const mockConn = { send: () => {}, close: () => { closed = true } } as unknown as StreamConnection
     setConn('sess-a', mockConn)
     addMessage('sess-a', { type: 'user' } as StreamMessage)
     clearSession('sess-a')

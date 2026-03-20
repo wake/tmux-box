@@ -9,8 +9,8 @@ const { mockClose, TerminalSpy, capturedCallbacks } = vi.hoisted(() => {
     onClose?: () => void
     onOpen?: () => void
   } = {}
-  const TerminalSpy = vi.fn(function (opts: Record<string, unknown>) {
-    ;(this as unknown as Record<string, unknown>)._opts = opts
+  const TerminalSpy = vi.fn(function (this: Record<string, unknown>, opts: Record<string, unknown>) {
+    this._opts = opts
     return {
       loadAddon: vi.fn(),
       open: vi.fn(),

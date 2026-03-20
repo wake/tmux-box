@@ -1,6 +1,7 @@
 // spa/src/hooks/useRelayWsManager.test.ts
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { useStreamStore } from '../stores/useStreamStore'
+import type { StreamConnection } from '../lib/stream-ws'
 
 const emptyState = {
   sessions: {},
@@ -20,13 +21,13 @@ describe('useRelayWsManager store integration', () => {
   })
 
   it('setConn stores connection for session', () => {
-    const mockConn = { send: vi.fn(), close: vi.fn() } as any
+    const mockConn = { send: vi.fn(), close: vi.fn() } as unknown as StreamConnection
     useStreamStore.getState().setConn('test', mockConn)
     expect(useStreamStore.getState().sessions['test'].conn).toBe(mockConn)
   })
 
   it('clearing relay status and conn works together', () => {
-    const mockConn = { send: vi.fn(), close: vi.fn() } as any
+    const mockConn = { send: vi.fn(), close: vi.fn() } as unknown as StreamConnection
     useStreamStore.getState().setConn('test', mockConn)
     useStreamStore.getState().setRelayStatus('test', true)
 

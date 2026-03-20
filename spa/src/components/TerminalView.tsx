@@ -24,7 +24,7 @@ export default function TerminalView({ wsUrl, visible = true, connectingMessage 
 
   // Initial setup — create terminal + WS connection
   useEffect(() => {
-    setReady(false)
+    setReady(false) // eslint-disable-line react-hooks/set-state-in-effect
     setDisconnected(false)
     if (!containerRef.current) return
 
@@ -150,7 +150,7 @@ export default function TerminalView({ wsUrl, visible = true, connectingMessage 
   useEffect(() => {
     if (visible && !prevVisible.current) {
       // Becoming visible — show overlay, refit, then fade out
-      setReady(false)
+      setReady(false) // eslint-disable-line react-hooks/set-state-in-effect
       requestAnimationFrame(() => {
         fitAddonRef.current?.fit()
         // Explicitly send resize even if fit() didn't change dimensions,

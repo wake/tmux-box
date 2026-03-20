@@ -2,8 +2,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { SessionPicker } from './SessionPicker'
+import type { Session } from '../lib/api'
 
-const mockSessions = [
+const mockSessions: Session[] = [
   { id: 1, uid: 'abc', name: 'dev-server', mode: 'term', cwd: '/home', tmux_target: '', group_id: 0, sort_order: 0, cc_session_id: '', cc_model: '', has_relay: false },
   { id: 2, uid: 'def', name: 'claude-code', mode: 'stream', cwd: '/home', tmux_target: '', group_id: 0, sort_order: 0, cc_session_id: '', cc_model: '', has_relay: true },
 ]
@@ -14,7 +15,7 @@ describe('SessionPicker', () => {
   it('renders session list', () => {
     render(
       <SessionPicker
-        sessions={mockSessions as any}
+        sessions={mockSessions}
         existingTabSessionNames={[]}
         onSelect={vi.fn()}
         onClose={vi.fn()}
@@ -27,7 +28,7 @@ describe('SessionPicker', () => {
   it('marks sessions that already have tabs', () => {
     render(
       <SessionPicker
-        sessions={mockSessions as any}
+        sessions={mockSessions}
         existingTabSessionNames={['dev-server']}
         onSelect={vi.fn()}
         onClose={vi.fn()}
@@ -41,7 +42,7 @@ describe('SessionPicker', () => {
     const onSelect = vi.fn()
     render(
       <SessionPicker
-        sessions={mockSessions as any}
+        sessions={mockSessions}
         existingTabSessionNames={[]}
         onSelect={onSelect}
         onClose={vi.fn()}
@@ -54,7 +55,7 @@ describe('SessionPicker', () => {
   it('filters sessions by search text', () => {
     render(
       <SessionPicker
-        sessions={mockSessions as any}
+        sessions={mockSessions}
         existingTabSessionNames={[]}
         onSelect={vi.fn()}
         onClose={vi.fn()}
