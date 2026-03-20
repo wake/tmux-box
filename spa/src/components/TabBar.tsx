@@ -1,15 +1,9 @@
-import { X, Plus, Terminal, ChatCircleDots, File as FileIcon } from '@phosphor-icons/react'
+import { DndContext, closestCenter, type DragEndEvent } from '@dnd-kit/core'
+import { SortableContext, horizontalListSortingStrategy } from '@dnd-kit/sortable'
+import { Plus, CaretLeft, CaretRight, Terminal, ChatCircleDots, File as FileIcon } from '@phosphor-icons/react'
+import { SortableTab } from './SortableTab'
+import { useScrollOverflow } from '../hooks/useScrollOverflow'
 import type { Tab } from '../types/tab'
-import { getTabIcon } from '../lib/tab-registry'
-import { isDirty } from '../lib/tab-helpers'
-
-interface Props {
-  tabs: Tab[]
-  activeTabId: string | null
-  onSelectTab: (tabId: string) => void
-  onCloseTab: (tabId: string) => void
-  onAddTab: () => void
-}
 
 const ICON_MAP: Record<string, React.ComponentType<{ size: number; className?: string }>> = {
   Terminal,
@@ -17,41 +11,113 @@ const ICON_MAP: Record<string, React.ComponentType<{ size: number; className?: s
   File: FileIcon,
 }
 
-function TabIcon({ tab, size = 14 }: { tab: Tab; size?: number }) {
-  const iconName = getTabIcon(tab)
-  const Component = ICON_MAP[iconName]
-  if (!Component) return null
-  return <Component size={size} className="flex-shrink-0" />
+interface Props {
+  tabs: Tab[]
+  activeTabId: string | null
+  onSelectTab: (tabId: string) => void
+  onCloseTab: (tabId: string) => void
+  onAddTab: () => void
+  onReorderTabs: (newOrder: string[]) => void
+  onMiddleClick: (tabId: string) => void
+  onContextMenu: (e: React.MouseEvent, tabId: string) => void
 }
 
-export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onAddTab }: Props) {
+export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onAddTab, onReorderTabs, onMiddleClick, onContextMenu }: Props) {
+  const pinnedTabs = tabs.filter((t) => t.pinned)
+  const normalTabs = tabs.filter((t) => !t.pinned)
+  const pinnedIds = pinnedTabs.map((t) => t.id)
+  const normalIds = normalTabs.map((t) => t.id)
+  const { containerRef: normalZoneRef, canScrollLeft, canScrollRight, scrollLeft, scrollRight } = useScrollOverflow()
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event
+    if (!over || active.id === over.id) return
+
+    const activeId = String(active.id)
+    const overId = String(over.id)
+
+    const inPinned = pinnedIds.includes(activeId)
+    const overInPinned = pinnedIds.includes(overId)
+
+    // Only allow same-zone reorder
+    if (inPinned !== overInPinned) return
+
+    const zone = inPinned ? [...pinnedIds] : [...normalIds]
+    const oldIdx = zone.indexOf(activeId)
+    const newIdx = zone.indexOf(overId)
+    zone.splice(oldIdx, 1)
+    zone.splice(newIdx, 0, activeId)
+
+    const newOrder = inPinned ? [...zone, ...normalIds] : [...pinnedIds, ...zone]
+    onReorderTabs(newOrder)
+  }
+
   return (
-    <div className="flex bg-[#12122a] border-b border-gray-800 h-9 items-center px-1 gap-0.5 overflow-x-auto flex-shrink-0">
-      {tabs.map((tab) => {
-        const isActive = tab.id === activeTabId
-        return (
-          <button
-            key={tab.id}
-            onClick={() => onSelectTab(tab.id)}
-            className={`group flex items-center gap-1.5 px-3 h-full text-xs whitespace-nowrap cursor-pointer transition-colors ${
-              isActive
-                ? 'text-white border-b-2 border-purple-400'
-                : 'text-gray-500 hover:text-gray-300'
-            }`}
-          >
-            <TabIcon tab={tab} />
-            <span>{tab.label}</span>
-            {isDirty(tab) && <span className="text-amber-400 text-[10px]">●</span>}
-            <span
-              title="關閉分頁"
-              onClick={(e) => { e.stopPropagation(); onCloseTab(tab.id) }}
-              className="ml-1 opacity-0 group-hover:opacity-100 hover:text-red-400 transition-opacity"
+    <div className="flex bg-[#12122a] border-b border-gray-800 h-9 items-center px-1 flex-shrink-0">
+      <DndContext collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+        {/* Pinned zone */}
+        {pinnedTabs.length > 0 && (
+          <>
+            <SortableContext items={pinnedIds} strategy={horizontalListSortingStrategy}>
+              <div className="flex gap-0.5 items-center h-full">
+                {pinnedTabs.map((tab) => (
+                  <SortableTab
+                    key={tab.id}
+                    tab={tab}
+                    isActive={tab.id === activeTabId}
+                    pinned
+                    onSelect={onSelectTab}
+                    onClose={onCloseTab}
+                    onMiddleClick={onMiddleClick}
+                    onContextMenu={onContextMenu}
+                    iconMap={ICON_MAP}
+                  />
+                ))}
+              </div>
+            </SortableContext>
+            <div className="w-px h-4 bg-gray-700 mx-1 flex-shrink-0" />
+          </>
+        )}
+
+        {/* Normal zone with overflow arrows */}
+        <div className="relative flex-1 min-w-0 h-full">
+          {canScrollLeft && (
+            <button
+              onClick={scrollLeft}
+              className="absolute left-0 top-0 bottom-0 z-10 w-8 flex items-center justify-center bg-gradient-to-r from-[#12122a] to-transparent cursor-pointer"
+              aria-label="向左捲動"
             >
-              <X size={12} />
-            </span>
-          </button>
-        )
-      })}
+              <CaretLeft size={14} className="text-gray-400" />
+            </button>
+          )}
+          <div ref={normalZoneRef} className="flex gap-0.5 items-center h-full overflow-x-auto scrollbar-hide">
+            <SortableContext items={normalIds} strategy={horizontalListSortingStrategy}>
+              {normalTabs.map((tab) => (
+                <SortableTab
+                  key={tab.id}
+                  tab={tab}
+                  isActive={tab.id === activeTabId}
+                  onSelect={onSelectTab}
+                  onClose={onCloseTab}
+                  onMiddleClick={onMiddleClick}
+                  onContextMenu={onContextMenu}
+                  iconMap={ICON_MAP}
+                />
+              ))}
+            </SortableContext>
+          </div>
+          {canScrollRight && (
+            <button
+              onClick={scrollRight}
+              className="absolute right-0 top-0 bottom-0 z-10 w-8 flex items-center justify-center bg-gradient-to-l from-[#12122a] to-transparent cursor-pointer"
+              aria-label="向右捲動"
+            >
+              <CaretRight size={14} className="text-gray-400" />
+            </button>
+          )}
+        </div>
+      </DndContext>
+
       <button
         onClick={onAddTab}
         className="flex items-center justify-center w-7 h-7 text-gray-600 hover:text-gray-400 cursor-pointer flex-shrink-0"
