@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useTabStore } from '../stores/useTabStore'
 import { useWorkspaceStore } from '../stores/useWorkspaceStore'
 import { createSessionTab } from '../types/tab'
@@ -6,7 +6,20 @@ import { getSessionName } from '../lib/tab-helpers'
 import type { Session } from '../lib/api'
 
 export function useSessionTabSync(sessions: Session[]) {
+  // Wait for Zustand persist hydration before syncing tabs
+  const [hydrated, setHydrated] = useState(() => useTabStore.persist.hasHydrated())
+
   useEffect(() => {
+    if (hydrated) return
+    const unsub = useTabStore.persist.onFinishHydration(() => {
+      setHydrated(true)
+    })
+    return unsub
+  }, [hydrated])
+
+  useEffect(() => {
+    if (!hydrated) return
+
     const sessionNames = new Set(sessions.map((s) => s.name))
 
     // Add tabs for new sessions
@@ -38,5 +51,5 @@ export function useSessionTabSync(sessions: Session[]) {
         }
       })
     }
-  }, [sessions])
+  }, [sessions, hydrated])
 }
