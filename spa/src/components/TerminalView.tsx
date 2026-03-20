@@ -53,10 +53,11 @@ export default function TerminalView({ wsUrl, visible = true, connectingMessage 
       try { term.loadAddon(new WebglAddon()) } catch { /* fallback to DOM */ }
     }
     // DOM renderer is the default — no addon needed
-    const unicode11 = new Unicode11Addon()
-    term.loadAddon(unicode11)
-    term.unicode.activeVersion = '11'
-    term.loadAddon(new WebLinksAddon())
+    try {
+      term.loadAddon(new Unicode11Addon())
+      term.unicode.activeVersion = '11'
+    } catch { /* fallback to unicode 6 */ }
+    try { term.loadAddon(new WebLinksAddon()) } catch { /* non-critical */ }
 
     requestAnimationFrame(() => fitAddon.fit())
 
