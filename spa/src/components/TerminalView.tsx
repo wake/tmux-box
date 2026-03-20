@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { connectTerminal } from '../lib/ws'
+import { useUISettingsStore } from '../stores/useUISettingsStore'
 import '@xterm/xterm/css/xterm.css'
 
 interface Props {
@@ -19,6 +20,7 @@ export default function TerminalView({ wsUrl, visible = true, connectingMessage 
   const [ready, setReady] = useState(false)
   const [disconnected, setDisconnected] = useState(false)
   const prevVisible = useRef(visible)
+  const revealDelay = useUISettingsStore((s) => s.terminalRevealDelay)
 
   // Initial setup — create terminal + WS connection
   useEffect(() => {
@@ -53,22 +55,18 @@ export default function TerminalView({ wsUrl, visible = true, connectingMessage 
       term.focus()
     }
 
-    // Fallback: reveal after 1.5s even if no data received
-    const fallbackTimer = setTimeout(reveal, 1500)
+    // Fallback: reveal after 5× revealDelay even if no data received
+    const fallbackTimer = setTimeout(reveal, revealDelay * 5)
 
     const conn = connectTerminal(
       wsUrl,
       (data) => {
         term.write(new Uint8Array(data))
-        // Reveal shortly after first data — give tmux time to finish rendering
-        if (!revealed) setTimeout(reveal, 300)
+        if (!revealed) setTimeout(reveal, revealDelay)
       },
       () => setDisconnected(true),
       () => {
         setDisconnected(false)
-        // On reconnect, show terminal immediately (buffer already has content).
-        // On initial connect, let reveal() handle it after first data + 300ms.
-        if (revealed) setReady(true)
         fitAddon.fit()
         conn.resize(term.cols, term.rows)
       },
@@ -146,7 +144,7 @@ export default function TerminalView({ wsUrl, visible = true, connectingMessage 
       connRef.current = null
       termRef.current = null
     }
-  }, [wsUrl])
+  }, [wsUrl, revealDelay])
 
   // Re-show overlay + refit when becoming visible after being hidden
   useEffect(() => {
