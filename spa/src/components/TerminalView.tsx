@@ -21,7 +21,9 @@ export default function TerminalView({ wsUrl, visible = true, connectingMessage 
   const [disconnected, setDisconnected] = useState(false)
   const prevVisible = useRef(visible)
   const revealDelayRef = useRef(useUISettingsStore.getState().terminalRevealDelay)
-  useUISettingsStore.subscribe((s) => { revealDelayRef.current = s.terminalRevealDelay })
+  useEffect(() => {
+    return useUISettingsStore.subscribe((s) => { revealDelayRef.current = s.terminalRevealDelay })
+  }, [])
 
   // Initial setup — create terminal + WS connection
   useEffect(() => {

@@ -26,13 +26,16 @@ export function useSessionTabSync(sessions: Session[]) {
     })
 
     // Remove tabs for sessions that no longer exist
-    const currentTabs = useTabStore.getState().tabs
-    Object.values(currentTabs).forEach((tab) => {
-      if (tab.sessionName && !sessionNames.has(tab.sessionName)) {
-        const ws = useWorkspaceStore.getState().findWorkspaceByTab(tab.id)
-        if (ws) useWorkspaceStore.getState().removeTabFromWorkspace(ws.id, tab.id)
-        useTabStore.getState().removeTab(tab.id)
-      }
-    })
+    // Skip cleanup when sessions is empty (initial render before fetch resolves)
+    if (sessions.length > 0) {
+      const currentTabs = useTabStore.getState().tabs
+      Object.values(currentTabs).forEach((tab) => {
+        if (tab.sessionName && !sessionNames.has(tab.sessionName)) {
+          const ws = useWorkspaceStore.getState().findWorkspaceByTab(tab.id)
+          if (ws) useWorkspaceStore.getState().removeTabFromWorkspace(ws.id, tab.id)
+          useTabStore.getState().removeTab(tab.id)
+        }
+      })
+    }
   }, [sessions])
 }
