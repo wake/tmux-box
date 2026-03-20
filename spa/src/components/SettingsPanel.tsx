@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react'
 import { X, Plus, Trash, Question } from '@phosphor-icons/react'
 import { useFloating, useHover, useInteractions, offset, flip, shift, FloatingPortal } from '@floating-ui/react'
 import { useConfigStore } from '../stores/useConfigStore'
+import { useUISettingsStore, type TerminalRenderer } from '../stores/useUISettingsStore'
 
 interface Props {
   daemonBase: string
@@ -23,6 +24,7 @@ export default function SettingsPanel({ daemonBase, onClose, onTerminalReconnect
   const [ccCommands, setCcCommands] = useState<string[]>([])
   const [pollInterval, setPollInterval] = useState(5)
   const [sizingMode, setSizingMode] = useState('auto')
+  const [termRenderer, setTermRenderer] = useState<TerminalRenderer>(useUISettingsStore.getState().terminalRenderer)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [tooltipOpen, setTooltipOpen] = useState(false)
@@ -101,8 +103,10 @@ export default function SettingsPanel({ daemonBase, onClose, onTerminalReconnect
         },
       })
       const prevSizingMode = config?.terminal?.sizing_mode || 'auto'
+      const prevRenderer = useUISettingsStore.getState().terminalRenderer
+      useUISettingsStore.getState().setTerminalRenderer(termRenderer)
       onClose()
-      if (sizingMode !== prevSizingMode) onTerminalReconnect?.()
+      if (sizingMode !== prevSizingMode || termRenderer !== prevRenderer) onTerminalReconnect?.()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Save failed')
     } finally {
@@ -165,6 +169,18 @@ export default function SettingsPanel({ daemonBase, onClose, onTerminalReconnect
                 <option value="auto">Auto Resize</option>
                 <option value="terminal-first">Terminal First</option>
                 <option value="minimal-first">Minimal First</option>
+              </select>
+            </div>
+            <div className="mt-3">
+              <span className="text-xs text-[#999] block mb-1">渲染器</span>
+              <select
+                data-testid="terminal-renderer"
+                value={termRenderer}
+                onChange={e => setTermRenderer(e.target.value as TerminalRenderer)}
+                className="w-full bg-[#2a2a2a] border border-[#404040] rounded px-2 py-1.5 text-xs text-[#ddd] cursor-pointer"
+              >
+                <option value="webgl">WebGL（效能最佳）</option>
+                <option value="dom">DOM（相容性最佳）</option>
               </select>
             </div>
           </section>

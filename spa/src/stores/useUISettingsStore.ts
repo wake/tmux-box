@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
+export type TerminalRenderer = 'webgl' | 'dom'
+
 interface UISettings {
   /**
    * 收到第一筆 terminal data 後，延遲多久才移除 overlay 顯示畫面（ms）。
@@ -15,6 +17,18 @@ interface UISettings {
    */
   terminalRevealDelay: number
   setTerminalRevealDelay: (ms: number) => void
+
+  /**
+   * Terminal 渲染器類型。
+   *
+   * - webgl：效能最佳，適合 Claude Code 大量高速輸出，但每個實例佔一個 WebGL context
+   *   （瀏覽器限制通常 8-16 個）
+   * - dom：DOM 渲染，效能較低但相容性最好，無 WebGL context 限制，適合 Electron 或低負載場景
+   *
+   * 變更後需重啟 terminal 連線（SettingsPanel 的「套用」會自動處理）。
+   */
+  terminalRenderer: TerminalRenderer
+  setTerminalRenderer: (renderer: TerminalRenderer) => void
 }
 
 export const useUISettingsStore = create<UISettings>()(
@@ -22,6 +36,8 @@ export const useUISettingsStore = create<UISettings>()(
     (set) => ({
       terminalRevealDelay: 300,
       setTerminalRevealDelay: (ms) => set({ terminalRevealDelay: ms }),
+      terminalRenderer: 'webgl' as TerminalRenderer,
+      setTerminalRenderer: (renderer) => set({ terminalRenderer: renderer }),
     }),
     { name: 'tbox-ui-settings' },
   ),

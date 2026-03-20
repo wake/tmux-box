@@ -19,6 +19,7 @@ const { mockClose, TerminalSpy, capturedCallbacks } = vi.hoisted(() => {
       onResize: vi.fn(),
       dispose: vi.fn(),
       focus: vi.fn(),
+      unicode: { activeVersion: '6' },
       cols: 80,
       rows: 24,
       _opts: opts,
@@ -43,9 +44,19 @@ vi.mock('@xterm/addon-fit', () => ({
 
 vi.mock('@xterm/addon-webgl', () => ({
   WebglAddon: vi.fn(function () {
-    return {
-      dispose: vi.fn(),
-    }
+    return { dispose: vi.fn() }
+  }),
+}))
+
+vi.mock('@xterm/addon-unicode11', () => ({
+  Unicode11Addon: vi.fn(function () {
+    return { dispose: vi.fn() }
+  }),
+}))
+
+vi.mock('@xterm/addon-web-links', () => ({
+  WebLinksAddon: vi.fn(function () {
+    return { dispose: vi.fn() }
   }),
 }))
 

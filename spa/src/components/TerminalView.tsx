@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
+import { Unicode11Addon } from '@xterm/addon-unicode11'
+import { WebLinksAddon } from '@xterm/addon-web-links'
 import { connectTerminal } from '../lib/ws'
 import { useUISettingsStore } from '../stores/useUISettingsStore'
 import '@xterm/xterm/css/xterm.css'
@@ -46,7 +48,16 @@ export default function TerminalView({ wsUrl, visible = true, connectingMessage 
     fitAddonRef.current = fitAddon
     termRef.current = term
 
-    try { term.loadAddon(new WebglAddon()) } catch { /* fallback to canvas */ }
+    const renderer = useUISettingsStore.getState().terminalRenderer
+    if (renderer === 'webgl') {
+      try { term.loadAddon(new WebglAddon()) } catch { /* fallback to DOM */ }
+    }
+    // DOM renderer is the default — no addon needed
+    try {
+      term.loadAddon(new Unicode11Addon())
+      term.unicode.activeVersion = '11'
+    } catch { /* fallback to unicode 6 */ }
+    try { term.loadAddon(new WebLinksAddon()) } catch { /* non-critical */ }
 
     requestAnimationFrame(() => fitAddon.fit())
 
