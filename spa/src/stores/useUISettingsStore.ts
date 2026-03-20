@@ -29,6 +29,13 @@ interface UISettings {
    */
   terminalRenderer: TerminalRenderer
   setTerminalRenderer: (renderer: TerminalRenderer) => void
+
+  keepAliveCount: number
+  setKeepAliveCount: (n: number) => void
+  keepAlivePinned: boolean
+  setKeepAlivePinned: (v: boolean) => void
+  terminalSettingsVersion: number
+  bumpTerminalSettingsVersion: () => void
 }
 
 export const useUISettingsStore = create<UISettings>()(
@@ -38,6 +45,13 @@ export const useUISettingsStore = create<UISettings>()(
       setTerminalRevealDelay: (ms) => set({ terminalRevealDelay: ms }),
       terminalRenderer: 'webgl' as TerminalRenderer,
       setTerminalRenderer: (renderer) => set({ terminalRenderer: renderer }),
+
+      keepAliveCount: 0,
+      setKeepAliveCount: (n) => set({ keepAliveCount: n }),
+      keepAlivePinned: false,
+      setKeepAlivePinned: (v) => set({ keepAlivePinned: v }),
+      terminalSettingsVersion: 0,
+      bumpTerminalSettingsVersion: () => set((s) => ({ terminalSettingsVersion: s.terminalSettingsVersion + 1 })),
     }),
     { name: 'tbox-ui-settings' },
   ),
