@@ -9,5 +9,5 @@ export function getFilePath(tab: Tab): string | undefined {
 }
 
 export function isDirty(tab: Tab): boolean {
-  return (tab.data.isDirty as boolean) ?? false
+  return tab.data.isDirty === true
 }
