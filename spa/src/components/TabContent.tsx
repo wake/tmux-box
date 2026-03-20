@@ -5,8 +5,6 @@ interface Props {
   activeTab: Tab | null
   wsBase: string
   daemonBase: string
-  terminalKey?: number
-  connectingMessage?: string
 }
 
 export function TabContent({ activeTab, wsBase, daemonBase }: Props) {
