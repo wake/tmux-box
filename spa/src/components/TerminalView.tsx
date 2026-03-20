@@ -67,6 +67,9 @@ export default function TerminalView({ wsUrl, visible = true, connectingMessage 
       () => setDisconnected(true),
       () => {
         setDisconnected(false)
+        // On reconnect, show terminal immediately (buffer already has content).
+        // On initial connect, let reveal() handle it after first data + delay.
+        if (revealed) setReady(true)
         fitAddon.fit()
         conn.resize(term.cols, term.rows)
       },

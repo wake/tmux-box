@@ -116,10 +116,13 @@ export default function App() {
     return () => conn.close()
   }, [fetchSessions, daemonBase, wsBase])
 
-  // --- Auto tab creation: sync sessions → tabs ---
+  // --- Auto tab sync: sessions → tabs (add new, remove stale) ---
   useEffect(() => {
-    const currentTabs = useTabStore.getState().tabs
+    const sessionNames = new Set(sessions.map((s) => s.name))
+
+    // Add tabs for new sessions
     sessions.forEach((s) => {
+      const currentTabs = useTabStore.getState().tabs
       const existingTab = Object.values(currentTabs).find((t) => t.sessionName === s.name)
       if (!existingTab) {
         const tab = createTab({
@@ -131,6 +134,16 @@ export default function App() {
         useTabStore.getState().addTab(tab)
         const defaultWsId = useWorkspaceStore.getState().workspaces[0]?.id
         if (defaultWsId) useWorkspaceStore.getState().addTabToWorkspace(defaultWsId, tab.id)
+      }
+    })
+
+    // Remove tabs for sessions that no longer exist
+    const currentTabs = useTabStore.getState().tabs
+    Object.values(currentTabs).forEach((tab) => {
+      if (tab.sessionName && !sessionNames.has(tab.sessionName)) {
+        const ws = useWorkspaceStore.getState().findWorkspaceByTab(tab.id)
+        if (ws) useWorkspaceStore.getState().removeTabFromWorkspace(ws.id, tab.id)
+        useTabStore.getState().removeTab(tab.id)
       }
     })
   }, [sessions])
