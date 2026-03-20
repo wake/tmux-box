@@ -1,5 +1,43 @@
 # Changelog
 
+## [1.0.0-alpha.1] - 2026-03-20
+
+Phase 1: 分頁系統 + Activity Bar — SPA 架構從「單 session 檢視」升級為「多分頁 + 工作區」
+
+### 新增
+
+- **Tab 系統** — 每個 tmux session 自動對應一個 tab，支援 terminal / stream / editor 三種類型
+- **ActivityBar** — 左側垂直工作區切換列（Workspace icons + standalone tabs + 設定入口）
+- **TabBar** — 水平分頁列（切換 / 關閉 / 新增 / dirty indicator）
+- **TabContent** — 只掛載 activeTab，切換即銷毀重建（keep-alive 因 tmux resize corruption + WebGL 耗盡移除）
+- **StatusBar** — 底部狀態列（host / session / mode）
+- **SessionPicker** — Session 選擇 popover（搜尋 + 已開啟標記）
+- **useTabStore** — Tab CRUD + `dismissTab` 防止關閉的 tab 被 auto-sync 復活 + localStorage 持久化
+- **useWorkspaceStore** — Workspace 管理 + tab 歸屬 + per-workspace activeTab
+- **useHostStore** — 取代 hardcoded daemonBase（最小版，Phase 6 擴充為多主機）
+- **useUISettingsStore** — 前端 UI 設定（terminalRevealDelay 300ms + terminalRenderer webgl/dom）
+- **useIsMobile** — 響應式 breakpoint hook（768px）
+- **Hash routing** — `#/tab/{tabId}` 格式，支援 back/forward + 重整後保留
+- **App.tsx 重構** — 提取 `useSessionEventWs`、`useSessionTabSync`、`useHashRouting` 三個 custom hooks（345→247 行）
+- **xterm.js addons** — `@xterm/addon-unicode11`（CJK 字元寬度）+ `@xterm/addon-web-links`（可點擊 URL）
+- **Terminal 渲染器切換** — Settings 新增 WebGL / DOM 下拉選單，變更後自動重連
+
+### 修正
+
+- **crypto.randomUUID fallback** — 非 localhost HTTP context 無法使用，加了 Date.now + Math.random fallback
+- **Terminal reveal delay 設定化** — 從 hardcoded 300ms 改為 `useUISettingsStore` 可調整，用 ref + subscribe 避免設定變更觸發 terminal 重建
+- **Reconnect overlay 回歸修復** — 恢復 `if (revealed) setReady(true)` 讓 WS 重連後立即顯示 terminal
+- **Stale tab 清理** — sessions 消失時自動移除對應 tab（guard `sessions.length > 0` 防止初始渲染清空）
+- **Subscribe 洩漏修復** — TerminalView 的 Zustand subscribe 移入 useEffect + cleanup
+- **Lint + type errors 全面修正** — 移除 `as any`、修正 SessionStatus type、補 missing fields
+
+### 已知限制
+
+- keep-alive 已移除，每次切 tab 都重新建立 terminal WS 連線（TerminalView 的 `visible` 路徑保留供未來 LRU 快取）
+- StatusBar 狀態固定顯示 'connected'（未接 relayStatus/sessionStatus）
+- TopBar 標記 @deprecated 但未刪除
+- useIsMobile hook 已建立但未在任何元件中使用（Phase 7b）
+
 ## [0.5.4] - 2026-03-19
 
 修復 handoff 相關的 terminal resize 與 copy-mode 問題
