@@ -25,6 +25,7 @@ describe('TabContent', () => {
   it('renders TerminalView for terminal tab', () => {
     render(<TabContent activeTab={termTab} wsBase="ws://test" />)
     expect(screen.getByTestId('terminal-view')).toBeTruthy()
+    expect(screen.queryByTestId('conversation-view')).toBeNull()
   })
 
   it('renders ConversationView for stream tab', () => {
@@ -42,11 +43,10 @@ describe('TabContent', () => {
     expect(screen.getByText(/選擇或建立/)).toBeTruthy()
   })
 
-  it('only mounts active tab (no keep-alive)', () => {
+  it('only mounts active tab — no keep-alive', () => {
     const { rerender } = render(<TabContent activeTab={termTab} wsBase="ws://test" />)
     expect(screen.getByTestId('terminal-view')).toBeTruthy()
 
-    // Switch to stream tab — terminal should be gone
     rerender(<TabContent activeTab={streamTab} wsBase="ws://test" />)
     expect(screen.queryByTestId('terminal-view')).toBeNull()
     expect(screen.getByTestId('conversation-view')).toBeTruthy()
