@@ -6,6 +6,8 @@ export interface Tab {
   hostId: string
   viewMode?: string
   data: Record<string, unknown>
+  pinned: boolean
+  locked: boolean
 }
 
 export interface Workspace {
@@ -79,6 +81,8 @@ export function createSessionTab(opts: CreateSessionTabOpts): Tab {
     hostId: opts.hostId,
     viewMode: opts.viewMode ?? 'terminal',
     data: { sessionName: opts.sessionName },
+    pinned: false,
+    locked: false,
   }
 }
 
@@ -90,6 +94,8 @@ export function createEditorTab(opts: CreateEditorTabOpts): Tab {
     icon: opts.icon ?? 'File',
     hostId: opts.hostId,
     data: { filePath: opts.filePath, isDirty: opts.isDirty ?? false },
+    pinned: false,
+    locked: false,
   }
 }
 
@@ -102,6 +108,8 @@ export function createTab(opts: { type: string; label: string; hostId: string; i
     hostId: opts.hostId,
     viewMode: opts.viewMode,
     data: opts.data ?? {},
+    pinned: false,
+    locked: false,
   }
 }
 
