@@ -3,8 +3,7 @@ import ConversationView from './ConversationView'
 import type { Tab } from '../types/tab'
 
 interface Props {
-  allTabs: Tab[]
-  activeTabId: string | null
+  activeTab: Tab | null
   wsBase: string
   terminalKey?: number
   connectingMessage?: string
@@ -13,11 +12,11 @@ interface Props {
 }
 
 export function TabContent({
-  allTabs, activeTabId, wsBase,
+  activeTab, wsBase,
   terminalKey, connectingMessage,
   onHandoff, onHandoffToTerm,
 }: Props) {
-  if (allTabs.length === 0) {
+  if (!activeTab) {
     return (
       <div className="flex-1 flex items-center justify-center text-gray-600 text-sm">
         選擇或建立一個分頁開始使用
@@ -26,39 +25,27 @@ export function TabContent({
   }
 
   return (
-    <div className="flex-1 overflow-hidden relative">
-      {allTabs.map((tab) => {
-        const isActive = tab.id === activeTabId
-
-        return (
-          <div
-            key={tab.id}
-            className="absolute inset-0"
-            style={{ display: isActive ? 'flex' : 'none' }}
-          >
-            {tab.type === 'terminal' && tab.sessionName && (
-              <TerminalView
-                key={tab.type === 'terminal' && isActive ? terminalKey : undefined}
-                wsUrl={`${wsBase}/ws/terminal/${tab.sessionName}`}
-                visible={isActive}
-                connectingMessage={isActive ? connectingMessage : undefined}
-              />
-            )}
-            {tab.type === 'stream' && tab.sessionName && (
-              <ConversationView
-                sessionName={tab.sessionName}
-                onHandoff={isActive ? onHandoff : undefined}
-                onHandoffToTerm={isActive ? onHandoffToTerm : undefined}
-              />
-            )}
-            {tab.type === 'editor' && (
-              <div className="flex-1 flex items-center justify-center text-gray-500 text-sm">
-                Editor: {tab.filePath ?? tab.label}（Phase 5 實作）
-              </div>
-            )}
-          </div>
-        )
-      })}
+    <div className="flex-1 overflow-hidden relative flex">
+      {activeTab.type === 'terminal' && activeTab.sessionName && (
+        <TerminalView
+          key={`${activeTab.id}-${terminalKey}`}
+          wsUrl={`${wsBase}/ws/terminal/${activeTab.sessionName}`}
+          visible={true}
+          connectingMessage={connectingMessage}
+        />
+      )}
+      {activeTab.type === 'stream' && activeTab.sessionName && (
+        <ConversationView
+          sessionName={activeTab.sessionName}
+          onHandoff={onHandoff}
+          onHandoffToTerm={onHandoffToTerm}
+        />
+      )}
+      {activeTab.type === 'editor' && (
+        <div className="flex-1 flex items-center justify-center text-gray-500 text-sm">
+          Editor: {activeTab.filePath ?? activeTab.label}（Phase 5 實作）
+        </div>
+      )}
     </div>
   )
 }

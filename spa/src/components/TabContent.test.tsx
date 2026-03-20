@@ -5,8 +5,8 @@ import type { Tab } from '../types/tab'
 
 // Mock heavy components
 vi.mock('./TerminalView', () => ({
-  default: ({ wsUrl, visible }: { wsUrl: string; visible: boolean }) => (
-    <div data-testid="terminal-view" data-visible={visible}>Terminal: {wsUrl}</div>
+  default: ({ wsUrl }: { wsUrl: string }) => (
+    <div data-testid="terminal-view">Terminal: {wsUrl}</div>
   ),
 }))
 vi.mock('./ConversationView', () => ({
@@ -23,32 +23,32 @@ const editorTab: Tab = { id: 't3', type: 'editor', label: 'file.ts', icon: 'File
 
 describe('TabContent', () => {
   it('renders TerminalView for terminal tab', () => {
-    render(<TabContent allTabs={[termTab]} activeTabId="t1" wsBase="ws://test"  />)
+    render(<TabContent activeTab={termTab} wsBase="ws://test" />)
     expect(screen.getByTestId('terminal-view')).toBeTruthy()
   })
 
   it('renders ConversationView for stream tab', () => {
-    render(<TabContent allTabs={[streamTab]} activeTabId="t2" wsBase="ws://test"  />)
+    render(<TabContent activeTab={streamTab} wsBase="ws://test" />)
     expect(screen.getByTestId('conversation-view')).toBeTruthy()
   })
 
   it('renders placeholder for editor tab', () => {
-    render(<TabContent allTabs={[editorTab]} activeTabId="t3" wsBase="ws://test"  />)
+    render(<TabContent activeTab={editorTab} wsBase="ws://test" />)
     expect(screen.getByText(/file\.ts/)).toBeTruthy()
   })
 
-  it('renders empty state when no tabs', () => {
-    render(<TabContent allTabs={[]} activeTabId={null} wsBase="ws://test"  />)
+  it('renders empty state when no active tab', () => {
+    render(<TabContent activeTab={null} wsBase="ws://test" />)
     expect(screen.getByText(/選擇或建立/)).toBeTruthy()
   })
 
-  it('keeps all terminal tabs mounted but hides inactive ones', () => {
-    render(<TabContent allTabs={[termTab, streamTab]} activeTabId="t2" wsBase="ws://test"  />)
-    // Terminal is mounted but not visible
-    const termView = screen.getByTestId('terminal-view')
-    expect(termView).toBeTruthy()
-    expect(termView.dataset.visible).toBe('false')
-    // Stream is visible
+  it('only mounts active tab (no keep-alive)', () => {
+    const { rerender } = render(<TabContent activeTab={termTab} wsBase="ws://test" />)
+    expect(screen.getByTestId('terminal-view')).toBeTruthy()
+
+    // Switch to stream tab — terminal should be gone
+    rerender(<TabContent activeTab={streamTab} wsBase="ws://test" />)
+    expect(screen.queryByTestId('terminal-view')).toBeNull()
     expect(screen.getByTestId('conversation-view')).toBeTruthy()
   })
 })

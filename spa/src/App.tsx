@@ -267,8 +267,6 @@ export default function App() {
     ? [tabs[activeStandaloneTabId]].filter(Boolean)
     : visibleTabs
 
-  const allMountedTabs = [...visibleTabs, ...standaloneTabs]
-
   // StatusBar info
   const statusHost = activeTab?.hostId === 'local' ? 'mlab' : activeTab?.hostId ?? null
   const statusSession = activeTab?.sessionName ?? null
@@ -296,8 +294,7 @@ export default function App() {
         />
         <div className="flex-1 flex overflow-hidden">
           <TabContent
-            allTabs={allMountedTabs}
-            activeTabId={activeTabId}
+            activeTab={activeTab ?? null}
             wsBase={wsBase}
             terminalKey={terminalKey}
             connectingMessage={terminalConnectMsg}
