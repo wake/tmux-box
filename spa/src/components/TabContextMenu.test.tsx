@@ -79,8 +79,8 @@ describe('TabContextMenu', () => {
   // --- Close section ---
   it('"關閉分頁" is disabled when locked', () => {
     renderMenu({ tab: { locked: true } })
-    const closeItem = screen.getByText('關閉分頁')
-    expect(closeItem.closest('button')).toHaveClass('opacity-40')
+    const closeBtn = screen.getByText('關閉分頁').closest('button')!
+    expect(closeBtn).toBeDisabled()
   })
 
   it('"關閉分頁" is enabled when unlocked', () => {

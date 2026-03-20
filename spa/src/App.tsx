@@ -43,6 +43,7 @@ export default function App() {
   const activeTabId = useTabStore((s) => s.activeTabId)
   const addTab = useTabStore((s) => s.addTab)
   const dismissTab = useTabStore((s) => s.dismissTab)
+  const dismissedSessions = useTabStore((s) => s.dismissedSessions)
   const setActiveTab = useTabStore((s) => s.setActiveTab)
   const getActiveTab = useTabStore((s) => s.getActiveTab)
 
@@ -120,6 +121,23 @@ export default function App() {
     }
   }, [tabs, setActiveTab, addTab, activeWorkspaceId, addTabToWorkspace, setWorkspaceActiveTab])
 
+  // --- Derive visible tabs for display ---
+  const activeWs = workspaces.find((w) => w.id === activeWorkspaceId)
+  const visibleTabs: Tab[] = activeWs
+    ? activeWs.tabs.map((id) => tabs[id]).filter(Boolean)
+    : []
+
+  const standaloneTabs = tabOrder
+    .filter((id) => isStandaloneTab(id, workspaces))
+    .map((id) => tabs[id])
+    .filter(Boolean)
+
+  const activeStandaloneTabId = activeTabId && isStandaloneTab(activeTabId, workspaces) ? activeTabId : null
+
+  const displayTabs = activeStandaloneTabId
+    ? [tabs[activeStandaloneTabId]].filter(Boolean)
+    : visibleTabs
+
   const handleContextMenu = useCallback((e: React.MouseEvent, tabId: string) => {
     e.preventDefault()
     const tab = tabs[tabId]
@@ -144,13 +162,15 @@ export default function App() {
       case 'unpin': store.unpinTab(tab.id); break
       case 'close': handleCloseTab(tab.id); break
       case 'closeOthers': {
-        const toClose = tabOrder.filter((id) => id !== tab.id && !tabs[id]?.locked)
+        const displayIds = displayTabs.map((t) => t.id)
+        const toClose = displayIds.filter((id) => id !== tab.id && !tabs[id]?.locked)
         toClose.forEach((id) => handleCloseTab(id))
         break
       }
       case 'closeRight': {
-        const idx = tabOrder.indexOf(tab.id)
-        const toClose = tabOrder.slice(idx + 1).filter((id) => !tabs[id]?.locked)
+        const displayIds = displayTabs.map((t) => t.id)
+        const idx = displayIds.indexOf(tab.id)
+        const toClose = displayIds.slice(idx + 1).filter((id) => !tabs[id]?.locked)
         toClose.forEach((id) => handleCloseTab(id))
         break
       }
@@ -160,24 +180,7 @@ export default function App() {
         break
       }
     }
-  }, [contextMenu, tabs, tabOrder, handleCloseTab])
-
-  // --- Derive visible tabs for display ---
-  const activeWs = workspaces.find((w) => w.id === activeWorkspaceId)
-  const visibleTabs: Tab[] = activeWs
-    ? activeWs.tabs.map((id) => tabs[id]).filter(Boolean)
-    : []
-
-  const standaloneTabs = tabOrder
-    .filter((id) => isStandaloneTab(id, workspaces))
-    .map((id) => tabs[id])
-    .filter(Boolean)
-
-  const activeStandaloneTabId = activeTabId && isStandaloneTab(activeTabId, workspaces) ? activeTabId : null
-
-  const displayTabs = activeStandaloneTabId
-    ? [tabs[activeStandaloneTabId]].filter(Boolean)
-    : visibleTabs
+  }, [contextMenu, tabs, displayTabs, handleCloseTab])
 
   // StatusBar info
   const statusHost = activeTab?.hostId === 'local' ? 'mlab' : activeTab?.hostId ?? null
@@ -248,9 +251,13 @@ export default function App() {
           position={contextMenu.position}
           onClose={() => setContextMenu(null)}
           onAction={handleContextAction}
-          hasOtherUnlocked={tabOrder.some((id) => id !== contextMenu.tab.id && !tabs[id]?.locked)}
-          hasRightUnlocked={tabOrder.slice(tabOrder.indexOf(contextMenu.tab.id) + 1).some((id) => !tabs[id]?.locked)}
-          hasDismissedSessions={useTabStore.getState().dismissedSessions.length > 0}
+          hasOtherUnlocked={displayTabs.some((t) => t.id !== contextMenu.tab.id && !t.locked)}
+          hasRightUnlocked={(() => {
+            const ids = displayTabs.map((t) => t.id)
+            const idx = ids.indexOf(contextMenu.tab.id)
+            return ids.slice(idx + 1).some((id) => !tabs[id]?.locked)
+          })()}
+          hasDismissedSessions={dismissedSessions.length > 0}
         />
       )}
     </div>

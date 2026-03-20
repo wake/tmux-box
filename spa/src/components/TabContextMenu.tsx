@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef } from 'react'
 import type { Tab } from '../types/tab'
 
 export type ContextMenuAction =
@@ -26,6 +26,20 @@ interface MenuItem {
 
 export function TabContextMenu({ tab, position, onClose, onAction, hasOtherUnlocked, hasRightUnlocked, hasDismissedSessions }: Props) {
   const ref = useRef<HTMLDivElement>(null)
+
+  // Viewport boundary correction — imperatively adjust position before paint
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    let { x, y } = position
+    if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 4
+    if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 4
+    if (x < 0) x = 4
+    if (y < 0) y = 4
+    el.style.left = `${x}px`
+    el.style.top = `${y}px`
+  }, [position])
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -86,9 +100,10 @@ export function TabContextMenu({ tab, position, onClose, onAction, hasOtherUnloc
         return (
           <button
             key={item.action}
-            onClick={() => { if (!item.disabled) { onAction(item.action); onClose() } }}
-            className={`w-full text-left px-3 py-1.5 hover:bg-[#2a2a3e] transition-colors ${
-              item.disabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'
+            disabled={item.disabled}
+            onClick={() => { onAction(item.action); onClose() }}
+            className={`w-full text-left px-3 py-1.5 transition-colors ${
+              item.disabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer hover:bg-[#2a2a3e]'
             }`}
           >
             {item.label}

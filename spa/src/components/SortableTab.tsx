@@ -75,13 +75,14 @@ export function SortableTab({ tab, isActive, pinned, onSelect, onClose, onMiddle
       {isDirty(tab) && <span className="text-amber-400 text-[10px]">●</span>}
       {tab.locked && <Lock size={10} className="text-gray-600 ml-0.5" />}
       {!tab.locked && (
-        <span
+        <button
+          type="button"
           title="關閉分頁"
           onClick={(e) => { e.stopPropagation(); onClose(tab.id) }}
-          className="ml-1 opacity-0 group-hover:opacity-100 hover:text-red-400 transition-opacity"
+          className="ml-1 opacity-0 group-hover:opacity-100 hover:text-red-400 transition-opacity cursor-pointer"
         >
           <X size={12} />
-        </span>
+        </button>
       )}
     </button>
   )
