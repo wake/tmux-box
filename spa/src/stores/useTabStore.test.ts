@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { useTabStore } from './useTabStore'
+import { useTabStore, migrateTabStore } from './useTabStore'
 import { createSessionTab, createEditorTab } from '../types/tab'
 
 describe('useTabStore', () => {
@@ -247,5 +247,35 @@ describe('locked tab blocks close', () => {
     const a = addTab('a')
     useTabStore.getState().removeTab(a.id)
     expect(useTabStore.getState().tabs[a.id]).toBeUndefined()
+  })
+})
+
+describe('persist migration v1→v2', () => {
+  it('adds pinned=false, locked=false to old tabs', () => {
+    const old = {
+      tabs: {
+        t1: { id: 't1', type: 'session', label: 'x', icon: 'Terminal', hostId: 'local', data: {} },
+      },
+      tabOrder: ['t1'],
+      activeTabId: 't1',
+      dismissedSessions: [],
+    }
+    const result = migrateTabStore(old, 1) as any
+    expect(result.tabs.t1.pinned).toBe(false)
+    expect(result.tabs.t1.locked).toBe(false)
+  })
+
+  it('preserves existing pinned/locked values', () => {
+    const old = {
+      tabs: {
+        t1: { id: 't1', type: 'session', label: 'x', icon: 'Terminal', hostId: 'local', data: {}, pinned: true, locked: true },
+      },
+      tabOrder: ['t1'],
+      activeTabId: 't1',
+      dismissedSessions: [],
+    }
+    const result = migrateTabStore(old, 1) as any
+    expect(result.tabs.t1.pinned).toBe(true)
+    expect(result.tabs.t1.locked).toBe(true)
   })
 })

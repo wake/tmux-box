@@ -25,6 +25,45 @@ interface TabState {
   unlockTab: (tabId: string) => void
 }
 
+export function migrateTabStore(persisted: any, version: number) {
+  if (version < 1) {
+    // v0→v1: type union → open type + data bag
+    const tabs: Record<string, any> = persisted.tabs ?? {}
+    const migrated: Record<string, any> = {}
+    for (const [id, tab] of Object.entries(tabs) as [string, any][]) {
+      if (tab.type === 'terminal' || tab.type === 'stream') {
+        const { sessionName, ...rest } = tab
+        migrated[id] = {
+          ...rest,
+          type: 'session',
+          viewMode: tab.type === 'stream' ? 'stream' : 'terminal',
+          data: { sessionName },
+        }
+      } else if (tab.type === 'editor') {
+        const { filePath, isDirty, ...rest } = tab
+        migrated[id] = {
+          ...rest,
+          type: 'editor',
+          data: { filePath, isDirty: isDirty ?? false },
+        }
+      } else {
+        migrated[id] = { ...tab, data: tab.data ?? {} }
+      }
+    }
+    persisted = { ...persisted, tabs: migrated }
+  }
+  if (version < 2) {
+    // v1→v2: add pinned/locked defaults
+    const tabs: Record<string, any> = persisted.tabs ?? {}
+    const migrated: Record<string, any> = {}
+    for (const [id, tab] of Object.entries(tabs) as [string, any][]) {
+      migrated[id] = { ...tab, pinned: tab.pinned ?? false, locked: tab.locked ?? false }
+    }
+    persisted = { ...persisted, tabs: migrated }
+  }
+  return persisted
+}
+
 export const useTabStore = create<TabState>()(
   persist(
     (set, get) => ({
@@ -149,35 +188,8 @@ export const useTabStore = create<TabState>()(
     }),
     {
       name: 'tbox-tabs',
-      version: 1,
-      migrate: (persisted: any, version: number) => {
-        if (version < 1) {
-          const tabs: Record<string, any> = persisted.tabs ?? {}
-          const migrated: Record<string, any> = {}
-          for (const [id, tab] of Object.entries(tabs) as [string, any][]) {
-            if (tab.type === 'terminal' || tab.type === 'stream') {
-              const { sessionName, ...rest } = tab
-              migrated[id] = {
-                ...rest,
-                type: 'session',
-                viewMode: tab.type === 'stream' ? 'stream' : 'terminal',
-                data: { sessionName },
-              }
-            } else if (tab.type === 'editor') {
-              const { filePath, isDirty, ...rest } = tab
-              migrated[id] = {
-                ...rest,
-                type: 'editor',
-                data: { filePath, isDirty: isDirty ?? false },
-              }
-            } else {
-              migrated[id] = { ...tab, data: tab.data ?? {} }
-            }
-          }
-          return { ...persisted, tabs: migrated }
-        }
-        return persisted
-      },
+      version: 2,
+      migrate: migrateTabStore,
       partialize: (state) => ({
         tabs: state.tabs,
         tabOrder: state.tabOrder,
