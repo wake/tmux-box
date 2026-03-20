@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useTabStore } from '../stores/useTabStore'
 import { parseHash, setHash } from '../lib/hash-routing'
 
@@ -6,8 +6,17 @@ export function useHashRouting(activeTabId: string | null, setActiveTab: (id: st
   const activeTab = useTabStore((s) => activeTabId ? s.tabs[activeTabId] ?? null : null)
   const viewMode = activeTab?.viewMode
 
-  // Restore tab + viewMode from URL on mount
+  // Wait for persist hydration before restoring from URL
+  const [hydrated, setHydrated] = useState(() => useTabStore.persist.hasHydrated())
   useEffect(() => {
+    if (hydrated) return
+    const unsub = useTabStore.persist.onFinishHydration(() => setHydrated(true))
+    return unsub
+  }, [hydrated])
+
+  // Restore tab + viewMode from URL after hydration
+  useEffect(() => {
+    if (!hydrated) return
     const { tabId, viewMode: urlViewMode } = parseHash()
     if (tabId && useTabStore.getState().tabs[tabId]) {
       setActiveTab(tabId)
@@ -15,12 +24,13 @@ export function useHashRouting(activeTabId: string | null, setActiveTab: (id: st
         useTabStore.getState().setViewMode(tabId, urlViewMode)
       }
     }
-  }, [setActiveTab])
+  }, [hydrated, setActiveTab])
 
-  // Sync activeTabId + viewMode → URL
+  // Sync activeTabId + viewMode → URL (only after hydrated to avoid overwriting URL)
   useEffect(() => {
+    if (!hydrated) return
     if (activeTabId) setHash(activeTabId, viewMode ?? undefined)
-  }, [activeTabId, viewMode])
+  }, [activeTabId, viewMode, hydrated])
 
   // Listen for browser back/forward
   useEffect(() => {
