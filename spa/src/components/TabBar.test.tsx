@@ -5,9 +5,9 @@ import type { Tab } from '../types/tab'
 import { registerTabRenderer, clearRegistry } from '../lib/tab-registry'
 
 const mockTabs: Tab[] = [
-  { id: 't1', type: 'session', label: 'dev-server', icon: 'Terminal', hostId: 'mlab', viewMode: 'terminal', data: { sessionName: 'dev' } },
-  { id: 't2', type: 'session', label: 'claude', icon: 'ChatCircleDots', hostId: 'mlab', viewMode: 'stream', data: { sessionName: 'claude' } },
-  { id: 't3', type: 'editor', label: 'App.tsx', icon: 'File', hostId: 'mlab', data: { filePath: '/App.tsx', isDirty: true } },
+  { id: 't1', type: 'session', label: 'dev-server', icon: 'Terminal', hostId: 'mlab', viewMode: 'terminal', data: { sessionName: 'dev' }, pinned: false, locked: false },
+  { id: 't2', type: 'session', label: 'claude', icon: 'ChatCircleDots', hostId: 'mlab', viewMode: 'stream', data: { sessionName: 'claude' }, pinned: false, locked: false },
+  { id: 't3', type: 'editor', label: 'App.tsx', icon: 'File', hostId: 'mlab', data: { filePath: '/App.tsx', isDirty: true }, pinned: false, locked: false },
 ]
 
 describe('TabBar', () => {

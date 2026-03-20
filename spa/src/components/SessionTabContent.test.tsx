@@ -18,7 +18,7 @@ beforeEach(() => cleanup())
 
 const makeTab = (viewMode: string): Tab => ({
   id: 't1', type: 'session', label: 'dev', icon: 'Terminal', hostId: 'mlab',
-  viewMode, data: { sessionName: 'dev-server' },
+  pinned: false, locked: false, viewMode, data: { sessionName: 'dev-server' },
 })
 
 describe('SessionTabContent', () => {
@@ -35,7 +35,7 @@ describe('SessionTabContent', () => {
   })
 
   it('defaults to terminal when viewMode is undefined', () => {
-    const tab: Tab = { id: 't1', type: 'session', label: 'dev', icon: 'Terminal', hostId: 'mlab', data: { sessionName: 'dev-server' } }
+    const tab: Tab = { id: 't1', type: 'session', label: 'dev', icon: 'Terminal', hostId: 'mlab', pinned: false, locked: false, data: { sessionName: 'dev-server' } }
     render(<SessionTabContent tab={tab} isActive={true} wsBase="ws://test" daemonBase="http://test" />)
     expect(screen.getByTestId('terminal-view')).toBeTruthy()
   })

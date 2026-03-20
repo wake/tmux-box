@@ -8,7 +8,6 @@ import { useUISettingsStore, type TerminalRenderer } from '../stores/useUISettin
 interface Props {
   daemonBase: string
   onClose: () => void
-  onTerminalReconnect?: () => void
 }
 
 interface PresetRow {
@@ -16,7 +15,7 @@ interface PresetRow {
   command: string
 }
 
-export default function SettingsPanel({ daemonBase, onClose, onTerminalReconnect }: Props) {
+export default function SettingsPanel({ daemonBase, onClose }: Props) {
   const { config, fetch: fetchConfig, update } = useConfigStore()
 
   const [streamPresets, setStreamPresets] = useState<PresetRow[]>([])
@@ -106,7 +105,9 @@ export default function SettingsPanel({ daemonBase, onClose, onTerminalReconnect
       const prevRenderer = useUISettingsStore.getState().terminalRenderer
       useUISettingsStore.getState().setTerminalRenderer(termRenderer)
       onClose()
-      if (sizingMode !== prevSizingMode || termRenderer !== prevRenderer) onTerminalReconnect?.()
+      if (sizingMode !== prevSizingMode || termRenderer !== prevRenderer) {
+        useUISettingsStore.getState().bumpTerminalSettingsVersion()
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Save failed')
     } finally {

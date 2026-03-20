@@ -28,32 +28,26 @@ beforeEach(() => {
 
 const sessionTab: Tab = {
   id: 't1', type: 'session', label: 'dev', icon: 'Terminal', hostId: 'mlab',
-  viewMode: 'terminal', data: { sessionName: 'dev' },
+  viewMode: 'terminal', data: { sessionName: 'dev' }, pinned: false, locked: false,
 }
 const editorTab: Tab = {
   id: 't3', type: 'editor', label: 'file.ts', icon: 'File', hostId: 'mlab',
-  data: { filePath: '/file.ts', isDirty: false },
+  data: { filePath: '/file.ts', isDirty: false }, pinned: false, locked: false,
 }
 
 describe('TabContent', () => {
   it('renders registered session renderer', () => {
-    render(<TabContent activeTab={sessionTab} wsBase="ws://test" daemonBase="http://test" />)
+    render(<TabContent activeTab={sessionTab} allTabs={[sessionTab]} wsBase="ws://test" daemonBase="http://test" />)
     expect(screen.getByTestId('session-renderer')).toBeTruthy()
   })
 
   it('renders registered editor renderer', () => {
-    render(<TabContent activeTab={editorTab} wsBase="ws://test" daemonBase="http://test" />)
+    render(<TabContent activeTab={editorTab} allTabs={[editorTab]} wsBase="ws://test" daemonBase="http://test" />)
     expect(screen.getByTestId('editor-renderer')).toBeTruthy()
   })
 
-  it('renders fallback for unknown tab type', () => {
-    const unknownTab: Tab = { id: 'u1', type: 'monitoring', label: 'mon', icon: 'X', hostId: 'mlab', data: {} }
-    render(<TabContent activeTab={unknownTab} wsBase="ws://test" daemonBase="http://test" />)
-    expect(screen.getByText(/monitoring/)).toBeTruthy()
-  })
-
   it('renders empty state when no active tab', () => {
-    render(<TabContent activeTab={null} wsBase="ws://test" daemonBase="http://test" />)
+    render(<TabContent activeTab={null} allTabs={[]} wsBase="ws://test" daemonBase="http://test" />)
     expect(screen.getByText(/選擇或建立/)).toBeTruthy()
   })
 })

@@ -53,7 +53,7 @@ describe('pinTab / unpinTab', () => {
   it('pinTab on already-pinned tab is no-op (preserves position)', () => {
     const a = addTab('a')
     const b = addTab('b')
-    const c = addTab('c')
+    addTab('c') // third tab to verify ordering preserved
     useTabStore.getState().pinTab(a.id)
     useTabStore.getState().pinTab(b.id)
     const orderBefore = [...useTabStore.getState().tabOrder]

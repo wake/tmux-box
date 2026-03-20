@@ -29,21 +29,21 @@ describe('tab-registry', () => {
       component: mockComponent,
       icon: (tab) => tab.viewMode === 'stream' ? 'ChatCircleDots' : 'Terminal',
     })
-    const termTab: Tab = { id: '1', type: 'session', label: 't', icon: '', hostId: 'h', viewMode: 'terminal', data: {} }
-    const streamTab: Tab = { id: '2', type: 'session', label: 't', icon: '', hostId: 'h', viewMode: 'stream', data: {} }
+    const termTab: Tab = { id: '1', type: 'session', label: 't', icon: '', hostId: 'h', viewMode: 'terminal', data: {}, pinned: false, locked: false }
+    const streamTab: Tab = { id: '2', type: 'session', label: 't', icon: '', hostId: 'h', viewMode: 'stream', data: {}, pinned: false, locked: false }
     expect(getTabIcon(termTab)).toBe('Terminal')
     expect(getTabIcon(streamTab)).toBe('ChatCircleDots')
   })
 
   it('getTabIcon falls back to tab.icon for unregistered type', () => {
-    const tab: Tab = { id: '1', type: 'unknown', label: 't', icon: 'Fallback', hostId: 'h', data: {} }
+    const tab: Tab = { id: '1', type: 'unknown', label: 't', icon: 'Fallback', hostId: 'h', data: {}, pinned: false, locked: false }
     expect(getTabIcon(tab)).toBe('Fallback')
   })
 
   it('overwrites existing registration', () => {
     registerTabRenderer('session', { component: mockComponent, icon: () => 'A' })
     registerTabRenderer('session', { component: mockComponent, icon: () => 'B' })
-    const tab: Tab = { id: '1', type: 'session', label: 't', icon: '', hostId: 'h', data: {} }
+    const tab: Tab = { id: '1', type: 'session', label: 't', icon: '', hostId: 'h', data: {}, pinned: false, locked: false }
     expect(getTabIcon(tab)).toBe('B')
   })
 })

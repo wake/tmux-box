@@ -4,17 +4,17 @@ import type { Tab } from '../types/tab'
 
 const sessionTab: Tab = {
   id: 's1', type: 'session', label: 'dev', icon: 'Terminal', hostId: 'mlab',
-  viewMode: 'terminal', data: { sessionName: 'dev-server' },
+  viewMode: 'terminal', data: { sessionName: 'dev-server' }, pinned: false, locked: false,
 }
 
 const editorTab: Tab = {
   id: 'e1', type: 'editor', label: 'file.ts', icon: 'File', hostId: 'mlab',
-  data: { filePath: '/src/file.ts', isDirty: true },
+  data: { filePath: '/src/file.ts', isDirty: true }, pinned: false, locked: false,
 }
 
 const emptyTab: Tab = {
   id: 'x1', type: 'unknown', label: 'test', icon: 'X', hostId: 'mlab',
-  data: {},
+  data: {}, pinned: false, locked: false,
 }
 
 describe('getSessionName', () => {

@@ -1,11 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
-import { Terminal } from '@xterm/xterm'
-import { FitAddon } from '@xterm/addon-fit'
-import { WebglAddon } from '@xterm/addon-webgl'
-import { Unicode11Addon } from '@xterm/addon-unicode11'
-import { WebLinksAddon } from '@xterm/addon-web-links'
-import { connectTerminal } from '../lib/ws'
-import { useUISettingsStore } from '../stores/useUISettingsStore'
+import { useEffect, useState, useRef, useCallback } from 'react'
+import { useTerminal } from '../hooks/useTerminal'
+import { useTerminalWs } from '../hooks/useTerminalWs'
 import '@xterm/xterm/css/xterm.css'
 
 interface Props {
@@ -15,150 +10,30 @@ interface Props {
 }
 
 export default function TerminalView({ wsUrl, visible = true, connectingMessage }: Props) {
-  const containerRef = useRef<HTMLDivElement>(null)
-  const fitAddonRef = useRef<FitAddon | null>(null)
-  const connRef = useRef<ReturnType<typeof connectTerminal> | null>(null)
-  const termRef = useRef<Terminal | null>(null)
+  const { termRef, fitAddonRef, containerRef } = useTerminal()
   const [ready, setReady] = useState(false)
   const [disconnected, setDisconnected] = useState(false)
   const prevVisible = useRef(visible)
-  const revealDelayRef = useRef(useUISettingsStore.getState().terminalRevealDelay)
-  useEffect(() => {
-    return useUISettingsStore.subscribe((s) => { revealDelayRef.current = s.terminalRevealDelay })
-  }, [])
 
-  // Initial setup — create terminal + WS connection
+  const handleReady = useCallback(() => { setReady(true) }, [])
+  const handleDisconnect = useCallback(() => { setDisconnected(true) }, [])
+  const handleReconnect = useCallback(() => { setDisconnected(false) }, [])
+
+  const connRef = useTerminalWs({
+    wsUrl,
+    termRef,
+    fitAddonRef,
+    containerRef,
+    onReady: handleReady,
+    onDisconnect: handleDisconnect,
+    onReconnect: handleReconnect,
+  })
+
+  // Reset state on wsUrl change. React guarantees effects fire in declaration
+  // order, so useTerminal (mount) → useTerminalWs (connect) → this reset.
   useEffect(() => {
     setReady(false)
     setDisconnected(false)
-    if (!containerRef.current) return
-
-    const term = new Terminal({
-      theme: { background: '#0a0a1a', foreground: '#e0e0e0' },
-      fontSize: 14,
-      fontFamily: 'Menlo, Monaco, monospace',
-      cursorBlink: true,
-      macOptionClickForcesSelection: true,
-      rightClickSelectsWord: true,
-    })
-
-    const fitAddon = new FitAddon()
-    term.loadAddon(fitAddon)
-    term.open(containerRef.current)
-    fitAddonRef.current = fitAddon
-    termRef.current = term
-
-    const renderer = useUISettingsStore.getState().terminalRenderer
-    if (renderer === 'webgl') {
-      try { term.loadAddon(new WebglAddon()) } catch { /* fallback to DOM */ }
-    }
-    // DOM renderer is the default — no addon needed
-    try {
-      term.loadAddon(new Unicode11Addon())
-      term.unicode.activeVersion = '11'
-    } catch { /* fallback to unicode 6 */ }
-    try { term.loadAddon(new WebLinksAddon()) } catch { /* non-critical */ }
-
-    requestAnimationFrame(() => fitAddon.fit())
-
-    let revealed = false
-    const reveal = () => {
-      if (revealed) return
-      revealed = true
-      setReady(true)
-      term.focus()
-    }
-
-    // No fallback timer — overlay stays until first data arrives
-
-    const conn = connectTerminal(
-      wsUrl,
-      (data) => {
-        term.write(new Uint8Array(data))
-        if (!revealed) setTimeout(reveal, revealDelayRef.current)
-      },
-      () => setDisconnected(true),
-      () => {
-        setDisconnected(false)
-        // On reconnect, show terminal immediately (buffer already has content).
-        // On initial connect, let reveal() handle it after first data + delay.
-        if (revealed) setReady(true)
-        fitAddon.fit()
-        conn.resize(term.cols, term.rows)
-      },
-    )
-    connRef.current = conn
-
-    const container = containerRef.current
-    const ta = container.querySelector('.xterm-helper-textarea')
-
-    // --- Shift+Enter: send \n (line feed) instead of \r (carriage return) ---
-    // Traditional terminals can't distinguish Shift+Enter from Enter (both
-    // send \r). We intercept on the container in capture phase (before xterm.js
-    // handles it on the textarea) and send \n directly, which CC accepts as a
-    // newline insertion (same as Ctrl+J).
-    let shiftEnterHandled = false
-    const handleShiftEnter = (ev: Event) => {
-      const ke = ev as KeyboardEvent
-      if (ke.key === 'Enter' && ke.shiftKey && !ke.ctrlKey && !ke.metaKey) {
-        ke.stopPropagation()
-        ke.preventDefault()
-        shiftEnterHandled = true
-        conn.send('\n')
-      }
-    }
-    container.addEventListener('keydown', handleShiftEnter, true)
-
-    // --- IME duplicate guard ---
-    // On macOS, pressing Cmd during CJK composition triggers xterm.js
-    // _finalizeComposition (first send), then compositionend fires and sends
-    // again. Mouse clicks can also re-trigger from residual textarea content.
-    // Track last composed text and suppress duplicates until next compositionstart.
-    let lastComposedSent = ''
-    const handleCompositionStart = () => { lastComposedSent = '' }
-    ta?.addEventListener('compositionstart', handleCompositionStart)
-
-    term.onData((data) => {
-      // Suppress \r leaked from xterm.js after our Shift+Enter handler
-      if (shiftEnterHandled && data === '\r') {
-        shiftEnterHandled = false
-        return
-      }
-      shiftEnterHandled = false
-
-      // Suppress IME composition duplicates (same non-escape multi-char data)
-      const isComposed = data.length > 1 && data.charCodeAt(0) !== 0x1b
-      if (isComposed && data === lastComposedSent) return
-      if (isComposed) lastComposedSent = data
-      else lastComposedSent = '' // reset on non-composed input (fixes #21)
-
-      conn.send(data)
-    })
-    term.onResize(({ cols, rows }) => conn.resize(cols, rows))
-
-    // Suppress browser context menu on the terminal to avoid double-menu
-    const handleContextMenu = (e: MouseEvent) => e.preventDefault()
-    container.addEventListener('contextmenu', handleContextMenu)
-
-    let rafId = 0
-    const observer = new ResizeObserver(() => {
-      cancelAnimationFrame(rafId)
-      rafId = requestAnimationFrame(() => fitAddon.fit())
-    })
-    observer.observe(container)
-
-    return () => {
-      cancelAnimationFrame(rafId)
-      observer.disconnect()
-      container.removeEventListener('keydown', handleShiftEnter, true)
-      ta?.removeEventListener('compositionstart', handleCompositionStart)
-      container.removeEventListener('contextmenu', handleContextMenu)
-      conn.close()
-      term.dispose()
-      fitAddonRef.current = null
-      connRef.current = null
-      termRef.current = null
-    }
   }, [wsUrl])
 
   // Re-show overlay + refit when becoming visible after being hidden
@@ -173,9 +48,7 @@ export default function TerminalView({ wsUrl, visible = true, connectingMessage 
         // and onResize won't fire when cols/rows stay the same.
         const term = termRef.current
         const conn = connRef.current
-        if (term && conn) {
-          conn.resize(term.cols, term.rows)
-        }
+        if (term && conn) conn.resize(term.cols, term.rows)
       })
       const timer = setTimeout(() => {
         setReady(true)
@@ -185,15 +58,13 @@ export default function TerminalView({ wsUrl, visible = true, connectingMessage 
       return () => clearTimeout(timer)
     }
     prevVisible.current = visible
-  }, [visible])
+  }, [visible, termRef, fitAddonRef, connRef])
 
   const showOverlay = !ready || disconnected
 
   return (
     <div className="w-full h-full relative" style={{ background: '#0a0a1a' }}>
       <div ref={containerRef} className="w-full h-full" />
-
-      {/* Loading / reconnecting overlay */}
       <div
         data-testid="terminal-overlay"
         className="absolute inset-0 flex items-center justify-center pointer-events-none"
@@ -203,18 +74,10 @@ export default function TerminalView({ wsUrl, visible = true, connectingMessage 
           transition: 'opacity 0.3s ease-out',
         }}
       >
-        <span
-          className="text-gray-500 text-sm"
-          style={{ animation: 'breathing 2s ease-in-out infinite' }}
-        >
+        <span className="text-gray-500 text-sm" style={{ animation: 'breathing 2s ease-in-out infinite' }}>
           {disconnected ? 'reconnecting...' : (connectingMessage || 'connecting...')}
         </span>
-        <style>{`
-          @keyframes breathing {
-            0%, 100% { opacity: 0.3; }
-            50% { opacity: 1; }
-          }
-        `}</style>
+        <style>{`@keyframes breathing { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }`}</style>
       </div>
     </div>
   )

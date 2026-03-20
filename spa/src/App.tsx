@@ -165,6 +165,7 @@ export default function App() {
         <div className="flex-1 flex overflow-hidden">
           <TabContent
             activeTab={activeTab ?? null}
+            allTabs={tabOrder.map((id) => tabs[id]).filter(Boolean)}
             wsBase={wsBase}
             daemonBase={daemonBase}
           />
@@ -184,7 +185,6 @@ export default function App() {
         <SettingsPanel
           daemonBase={daemonBase}
           onClose={() => setSettingsOpen(false)}
-          onTerminalReconnect={() => {}}
         />
       )}
       {sessionPickerOpen && (

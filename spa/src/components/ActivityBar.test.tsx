@@ -9,7 +9,7 @@ const mockWorkspaces: Workspace[] = [
 ]
 
 const mockStandaloneTabs = [
-  { id: 'st-1', type: 'session' as const, label: 'misc', icon: 'Terminal', hostId: 'mlab', data: {} },
+  { id: 'st-1', type: 'session' as const, label: 'misc', icon: 'Terminal', hostId: 'mlab', pinned: false, locked: false, data: {} },
 ]
 
 describe('ActivityBar', () => {
