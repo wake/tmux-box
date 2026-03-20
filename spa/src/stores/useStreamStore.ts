@@ -108,7 +108,7 @@ export const useStreamStore = create<StreamStore>()(subscribeWithSelector((set) 
     const cur = useStreamStore.getState().sessions[session]
     cur?.conn?.close()
     set((s) => {
-      const { [session]: _, ...rest } = s.sessions
+      const { [session]: _cleared, ...rest } = s.sessions // eslint-disable-line @typescript-eslint/no-unused-vars
       return { sessions: rest }
     })
   },

@@ -9,8 +9,8 @@ const { mockClose, TerminalSpy, capturedCallbacks } = vi.hoisted(() => {
     onClose?: () => void
     onOpen?: () => void
   } = {}
-  const TerminalSpy = vi.fn(function (opts: Record<string, unknown>) {
-    ;(this as unknown as Record<string, unknown>)._opts = opts
+  const TerminalSpy = vi.fn(function (this: Record<string, unknown>, opts: Record<string, unknown>) {
+    this._opts = opts
     return {
       loadAddon: vi.fn(),
       open: vi.fn(),
@@ -139,5 +139,18 @@ describe('TerminalView', () => {
     act(() => capturedCallbacks.onOpen?.())
     overlay = container.querySelector('[data-testid="terminal-overlay"]')
     expect(overlay?.getAttribute('style')).toContain('opacity: 0')
+  })
+
+  it('does not recreate terminal when revealDelay changes', async () => {
+    const { useUISettingsStore } = await import('../stores/useUISettingsStore')
+    mockClose.mockClear()
+    TerminalSpy.mockClear()
+    render(<TerminalView wsUrl="ws://localhost:7860/ws/terminal/test" />)
+    expect(TerminalSpy).toHaveBeenCalledTimes(1)
+
+    // Change revealDelay — should NOT trigger terminal rebuild
+    act(() => useUISettingsStore.getState().setTerminalRevealDelay(500))
+    expect(mockClose).not.toHaveBeenCalled()
+    expect(TerminalSpy).toHaveBeenCalledTimes(1)
   })
 })

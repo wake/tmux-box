@@ -1,3 +1,4 @@
+// @deprecated Phase 1 — TopBar 功能已被 TabBar 取代。確認無其他引用後可刪除。
 // spa/src/components/TopBar.tsx
 import { Terminal, Lightning } from '@phosphor-icons/react'
 

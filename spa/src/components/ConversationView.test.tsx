@@ -1,8 +1,9 @@
 // spa/src/components/ConversationView.test.tsx
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach } from 'vitest'
 import { render, screen, cleanup, act } from '@testing-library/react'
 import ConversationView from './ConversationView'
 import { useStreamStore } from '../stores/useStreamStore'
+import type { StreamMessage } from '../lib/stream-ws'
 
 // No WS mock needed — ConversationView no longer manages WS connections
 
@@ -55,7 +56,7 @@ describe('ConversationView', () => {
           content: [{ type: 'text', text: 'Hello from Claude' }],
           stop_reason: 'end_turn',
         },
-      } as any)
+      } as StreamMessage)
     })
     expect(screen.getByText('Hello from Claude')).toBeInTheDocument()
   })

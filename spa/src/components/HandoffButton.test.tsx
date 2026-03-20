@@ -31,7 +31,7 @@ describe('HandoffButton', () => {
   })
 
   it('disables button when no CC running', () => {
-    render(<HandoffButton inProgress={false} sessionStatus="shell" onHandoff={() => {}} />)
+    render(<HandoffButton inProgress={false} sessionStatus="not-in-cc" onHandoff={() => {}} />)
     expect(screen.getByRole('button')).toBeDisabled()
     expect(screen.getByText('No CC running')).toBeInTheDocument()
   })
