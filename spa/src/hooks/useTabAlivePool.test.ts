@@ -45,7 +45,6 @@ describe('useTabAlivePool', () => {
       ({ activeId }) => useTabAlivePool(activeId, tabs),
       { initialProps: { activeId: 'a' as string } },
     )
-    // Visit b, c, d
     rerender({ activeId: 'b' })
     rerender({ activeId: 'c' })
     rerender({ activeId: 'd' })
@@ -70,13 +69,13 @@ describe('useTabAlivePool', () => {
     )
     rerender({ activeId: 'normal1' })
     rerender({ activeId: 'normal2' })
-    // Pool: normal2 (active) + normal1 (1 kept) + pinned1 (exempt). normal1 kept because limit=1+1=2.
+    // normal2 (active) + normal1 (1 kept) + pinned1 (exempt, doesn't count)
     expect(result.current.aliveIds).toContain('normal2')
     expect(result.current.aliveIds).toContain('pinned1')
     expect(result.current.aliveIds).toContain('normal1')
   })
 
-  it('terminalSettingsVersion bump resets pool', () => {
+  it('terminalSettingsVersion bump resets pool to only active tab', () => {
     resetSettings({ keepAliveCount: 3 })
     const tabs: MockTab[] = [
       { id: 'a', pinned: false },
@@ -93,7 +92,55 @@ describe('useTabAlivePool', () => {
     // Bump version
     act(() => useUISettingsStore.getState().bumpTerminalSettingsVersion())
     rerender({ activeId: 'b' })
-    // Pool rebuilt: only active tab (history cleared)
     expect(result.current.poolVersion).toBe(1)
+    expect(result.current.aliveIds).toEqual(['b'])
+  })
+
+  it('closed tab is removed from pool without backfill', () => {
+    resetSettings({ keepAliveCount: 2 })
+    const tabs: MockTab[] = [
+      { id: 'a', pinned: false },
+      { id: 'b', pinned: false },
+      { id: 'c', pinned: false },
+      { id: 'd', pinned: false },
+    ]
+
+    const { result, rerender } = renderHook(
+      ({ activeId, currentTabs }) => useTabAlivePool(activeId, currentTabs),
+      { initialProps: { activeId: 'a' as string, currentTabs: tabs } },
+    )
+    rerender({ activeId: 'b', currentTabs: tabs })
+    rerender({ activeId: 'c', currentTabs: tabs })
+    // Pool: [c, b, a]. d never visited.
+    expect(result.current.aliveIds).toEqual(['c', 'b', 'a'])
+
+    // Close tab b (remove from tabs)
+    const tabsWithoutB = tabs.filter((t) => t.id !== 'b')
+    rerender({ activeId: 'c', currentTabs: tabsWithoutB })
+    // b removed from pool. Next in history is a, which naturally stays.
+    expect(result.current.aliveIds).toContain('c')
+    expect(result.current.aliveIds).not.toContain('b')
+    expect(result.current.aliveIds).toContain('a')
+  })
+
+  it('keepAliveCount change clears history', () => {
+    resetSettings({ keepAliveCount: 2 })
+    const tabs: MockTab[] = [
+      { id: 'a', pinned: false },
+      { id: 'b', pinned: false },
+    ]
+
+    const { result, rerender } = renderHook(
+      ({ activeId }) => useTabAlivePool(activeId, tabs),
+      { initialProps: { activeId: 'a' as string } },
+    )
+    rerender({ activeId: 'b' })
+    expect(result.current.aliveIds).toContain('a')
+
+    // Change keepAliveCount
+    act(() => useUISettingsStore.getState().setKeepAliveCount(1))
+    rerender({ activeId: 'b' })
+    // History cleared, only active tab
+    expect(result.current.aliveIds).toEqual(['b'])
   })
 })

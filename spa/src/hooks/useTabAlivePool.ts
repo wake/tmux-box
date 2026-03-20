@@ -11,17 +11,28 @@ export function useTabAlivePool(activeTabId: string | null, tabs: MinimalTab[]) 
   const keepAlivePinned = useUISettingsStore((s) => s.keepAlivePinned)
   const settingsVersion = useUISettingsStore((s) => s.terminalSettingsVersion)
 
-  // LRU history: most-recent-first
+  // LRU history: most-recent-first, full visit order
   const historyRef = useRef<string[]>([])
   const prevVersionRef = useRef(settingsVersion)
+  const prevKeepAliveRef = useRef(keepAliveCount)
 
-  // Clear history on settings version bump (synchronous, before useMemo)
+  // Clear history on settings version bump or keepAliveCount change
+  // (synchronous, before useMemo to ensure fresh data)
   if (settingsVersion !== prevVersionRef.current) {
     historyRef.current = []
     prevVersionRef.current = settingsVersion
   }
+  if (keepAliveCount !== prevKeepAliveRef.current) {
+    historyRef.current = []
+    prevKeepAliveRef.current = keepAliveCount
+  }
 
-  // Update LRU history synchronously during render so useMemo reads fresh data
+  // Remove closed tabs from history (#6: no backfill for closed tabs)
+  const validIds = useMemo(() => new Set(tabs.map((t) => t.id)), [tabs])
+  historyRef.current = historyRef.current.filter((id) => validIds.has(id))
+
+  // Mutate history during render (not useEffect) so useMemo reads fresh data.
+  // Guards ensure idempotency across React StrictMode double-render.
   if (activeTabId) {
     const h = historyRef.current
     const idx = h.indexOf(activeTabId)
@@ -41,13 +52,14 @@ export function useTabAlivePool(activeTabId: string | null, tabs: MinimalTab[]) 
 
     const alive: string[] = []
     const pinnedAlive: string[] = []
-    let normalCount = 0
     const maxNormal = keepAliveCount + 1 // +1 for active tab
+    let normalCount = 0
 
     for (const id of h) {
       const tab = tabMap.get(id)
       if (!tab) continue
       if (keepAlivePinned && tab.pinned) {
+        // Pinned tabs kept alive separately, don't count toward normal limit
         pinnedAlive.push(id)
       } else {
         if (normalCount < maxNormal) {
@@ -57,6 +69,7 @@ export function useTabAlivePool(activeTabId: string | null, tabs: MinimalTab[]) 
       }
     }
     return [...pinnedAlive, ...alive]
+    // historyRef.current is mutated synchronously above, not a reactive dep
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId, keepAliveCount, keepAlivePinned, tabMap, settingsVersion])
 

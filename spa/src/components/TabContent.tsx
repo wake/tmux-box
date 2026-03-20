@@ -15,7 +15,10 @@ export function TabContent({ activeTab, allTabs, wsBase, daemonBase }: Props) {
     allTabs.map((t) => ({ id: t.id, pinned: t.pinned })),
   )
 
-  if (!activeTab && aliveIds.length === 0) {
+  const tabMap = new Map(allTabs.map((t) => [t.id, t]))
+  const hasAliveTab = aliveIds.some((id) => tabMap.has(id))
+
+  if (!activeTab && !hasAliveTab) {
     return (
       <div className="flex-1 flex items-center justify-center text-gray-600 text-sm">
         選擇或建立一個分頁開始使用
@@ -23,21 +26,23 @@ export function TabContent({ activeTab, allTabs, wsBase, daemonBase }: Props) {
     )
   }
 
-  const tabMap = new Map(allTabs.map((t) => [t.id, t]))
-
   return (
     <div className="flex-1 relative">
       {aliveIds.map((id) => {
         const tab = tabMap.get(id)
         if (!tab) return null
         const config = getTabRenderer(tab.type)
-        if (!config) return null
+        if (!config) {
+          if (import.meta.env.DEV) console.warn(`No renderer for tab type: ${tab.type}`)
+          return null
+        }
         const Renderer = config.component
         const isActive = id === activeTab?.id
         return (
           <div
             key={`${id}-${poolVersion}`}
-            style={{ display: isActive ? 'contents' : 'none' }}
+            className="absolute inset-0"
+            style={{ display: isActive ? 'block' : 'none' }}
           >
             <Renderer tab={tab} isActive={isActive} wsBase={wsBase} daemonBase={daemonBase} />
           </div>

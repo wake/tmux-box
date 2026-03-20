@@ -44,6 +44,7 @@ export function useTerminal(): UseTerminalResult {
     if (renderer === 'webgl') {
       try { term.loadAddon(new WebglAddon()) } catch { /* fallback to DOM */ }
     }
+    // DOM renderer is the default — no addon needed
     try {
       term.loadAddon(new Unicode11Addon())
       term.unicode.activeVersion = '11'
@@ -54,7 +55,10 @@ export function useTerminal(): UseTerminalResult {
 
     const container = containerRef.current
     let rafId = 0
-    const observer = new ResizeObserver(() => {
+    const observer = new ResizeObserver((entries) => {
+      // Guard against display:none (keep-alive hidden tabs) sending 0-cols resize
+      const { width, height } = entries[0]?.contentRect ?? {}
+      if (!width || !height) return
       cancelAnimationFrame(rafId)
       rafId = requestAnimationFrame(() => fitAddon.fit())
     })

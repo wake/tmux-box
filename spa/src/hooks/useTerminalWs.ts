@@ -18,6 +18,16 @@ export function useTerminalWs({ wsUrl, termRef, fitAddonRef, containerRef, onRea
   const connRef = useRef<ReturnType<typeof connectTerminal> | null>(null)
   const revealDelayRef = useRef(useUISettingsStore.getState().terminalRevealDelay)
 
+  // Stabilize callbacks via refs so the WS effect only re-runs on wsUrl change
+  const onReadyRef = useRef(onReady)
+  const onDisconnectRef = useRef(onDisconnect)
+  const onReconnectRef = useRef(onReconnect)
+  useEffect(() => {
+    onReadyRef.current = onReady
+    onDisconnectRef.current = onDisconnect
+    onReconnectRef.current = onReconnect
+  })
+
   useEffect(() => {
     return useUISettingsStore.subscribe((s) => { revealDelayRef.current = s.terminalRevealDelay })
   }, [])
@@ -31,7 +41,7 @@ export function useTerminalWs({ wsUrl, termRef, fitAddonRef, containerRef, onRea
     const reveal = () => {
       if (revealed) return
       revealed = true
-      onReady()
+      onReadyRef.current()
       term.focus()
     }
 
@@ -41,10 +51,12 @@ export function useTerminalWs({ wsUrl, termRef, fitAddonRef, containerRef, onRea
         term.write(new Uint8Array(data))
         if (!revealed) setTimeout(reveal, revealDelayRef.current)
       },
-      () => onDisconnect(),
+      () => onDisconnectRef.current(),
       () => {
-        onReconnect()
-        if (revealed) onReady()
+        // On reconnect, show terminal immediately (buffer already has content).
+        // On initial connect, let reveal() handle it after first data + delay.
+        onReconnectRef.current()
+        if (revealed) onReadyRef.current()
         fitAddonRef.current?.fit()
         conn.resize(term.cols, term.rows)
       },
@@ -54,6 +66,10 @@ export function useTerminalWs({ wsUrl, termRef, fitAddonRef, containerRef, onRea
     const ta = container.querySelector('.xterm-helper-textarea')
 
     // --- Shift+Enter: send \n (line feed) instead of \r (carriage return) ---
+    // Traditional terminals can't distinguish Shift+Enter from Enter (both
+    // send \r). We intercept on the container in capture phase (before xterm.js
+    // handles it on the textarea) and send \n directly, which CC accepts as a
+    // newline insertion (same as Ctrl+J).
     let shiftEnterHandled = false
     const handleShiftEnter = (ev: Event) => {
       const ke = ev as KeyboardEvent
@@ -67,28 +83,36 @@ export function useTerminalWs({ wsUrl, termRef, fitAddonRef, containerRef, onRea
     container.addEventListener('keydown', handleShiftEnter, true)
 
     // --- IME duplicate guard ---
+    // On macOS, pressing Cmd during CJK composition triggers xterm.js
+    // _finalizeComposition (first send), then compositionend fires and sends
+    // again. Mouse clicks can also re-trigger from residual textarea content.
+    // Track last composed text and suppress duplicates until next compositionstart.
     let lastComposedSent = ''
     const handleCompositionStart = () => { lastComposedSent = '' }
     ta?.addEventListener('compositionstart', handleCompositionStart)
 
-    term.onData((data) => {
+    // Suppress \r leaked from xterm.js after our Shift+Enter handler
+    const onDataDisp = term.onData((data) => {
       if (shiftEnterHandled && data === '\r') { shiftEnterHandled = false; return }
       shiftEnterHandled = false
+      // Suppress IME composition duplicates (same non-escape multi-char data, fixes #21)
       const isComposed = data.length > 1 && data.charCodeAt(0) !== 0x1b
       if (isComposed && data === lastComposedSent) return
       if (isComposed) lastComposedSent = data
-      else lastComposedSent = ''
+      else lastComposedSent = '' // reset on non-composed input (fixes #21)
       conn.send(data)
     })
-    term.onResize(({ cols, rows }) => conn.resize(cols, rows))
+    const onResizeDisp = term.onResize(({ cols, rows }) => conn.resize(cols, rows))
 
     return () => {
+      onDataDisp.dispose()
+      onResizeDisp.dispose()
       container.removeEventListener('keydown', handleShiftEnter, true)
       ta?.removeEventListener('compositionstart', handleCompositionStart)
       conn.close()
       connRef.current = null
     }
-  }, [wsUrl, termRef, fitAddonRef, containerRef, onReady, onDisconnect, onReconnect])
+  }, [wsUrl]) // Only re-run on wsUrl change; callbacks stabilized via refs
 
   return connRef
 }

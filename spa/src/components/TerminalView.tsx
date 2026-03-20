@@ -29,7 +29,8 @@ export default function TerminalView({ wsUrl, visible = true, connectingMessage 
     onReconnect: handleReconnect,
   })
 
-  // Reset state on wsUrl change
+  // Reset state on wsUrl change. React guarantees effects fire in declaration
+  // order, so useTerminal (mount) → useTerminalWs (connect) → this reset.
   useEffect(() => {
     setReady(false)
     setDisconnected(false)
@@ -38,9 +39,13 @@ export default function TerminalView({ wsUrl, visible = true, connectingMessage 
   // Re-show overlay + refit when becoming visible after being hidden
   useEffect(() => {
     if (visible && !prevVisible.current) {
+      // Becoming visible — show overlay, refit, then fade out
       setReady(false)
       requestAnimationFrame(() => {
         fitAddonRef.current?.fit()
+        // Explicitly send resize even if fit() didn't change dimensions,
+        // because tmux window may have been resized during stream mode
+        // and onResize won't fire when cols/rows stay the same.
         const term = termRef.current
         const conn = connRef.current
         if (term && conn) conn.resize(term.cols, term.rows)
