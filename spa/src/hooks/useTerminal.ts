@@ -51,7 +51,11 @@ export function useTerminal(): UseTerminalResult {
     } catch { /* fallback to unicode 6 */ }
     try { term.loadAddon(new WebLinksAddon()) } catch { /* non-critical */ }
 
-    requestAnimationFrame(() => fitAddon.fit())
+    // Guard: skip initial fit if container is hidden (display:none in keep-alive pool)
+    requestAnimationFrame(() => {
+      const { width, height } = container.getBoundingClientRect()
+      if (width && height) fitAddon.fit()
+    })
 
     const container = containerRef.current
     let rafId = 0
