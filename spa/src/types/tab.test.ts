@@ -67,3 +67,23 @@ describe('isStandaloneTab', () => {
     expect(isStandaloneTab(tab.id, [ws])).toBe(false)
   })
 })
+
+describe('pinned / locked defaults', () => {
+  it('createSessionTab defaults pinned=false, locked=false', () => {
+    const tab = createSessionTab({ label: 'x', hostId: 'local', sessionName: 'x' })
+    expect(tab.pinned).toBe(false)
+    expect(tab.locked).toBe(false)
+  })
+
+  it('createEditorTab defaults pinned=false, locked=false', () => {
+    const tab = createEditorTab({ label: 'x', hostId: 'local', filePath: '/tmp/x' })
+    expect(tab.pinned).toBe(false)
+    expect(tab.locked).toBe(false)
+  })
+
+  it('createTab defaults pinned=false, locked=false', () => {
+    const tab = createTab({ type: 'custom', label: 'x', hostId: 'local' })
+    expect(tab.pinned).toBe(false)
+    expect(tab.locked).toBe(false)
+  })
+})
