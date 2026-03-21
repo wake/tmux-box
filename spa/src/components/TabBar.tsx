@@ -1,6 +1,5 @@
-import { Fragment, useState } from 'react'
-import { DndContext, closestCenter, PointerSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
-import { restrictToParentElement } from '@dnd-kit/modifiers'
+import { Fragment, useRef, useState, useCallback } from 'react'
+import { DndContext, closestCenter, PointerSensor, useSensor, useSensors, type DragEndEvent, type Modifier } from '@dnd-kit/core'
 import { SortableContext, horizontalListSortingStrategy } from '@dnd-kit/sortable'
 import { Plus, CaretLeft, CaretRight, TerminalWindow, ChatCircleDots, File as FileIcon } from '@phosphor-icons/react'
 import { SortableTab } from './SortableTab'
@@ -36,8 +35,19 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onAddTab, o
   const pinnedIds = pinnedTabs.map((t) => t.id)
   const normalIds = normalTabs.map((t) => t.id)
   const [hoveredTabId, setHoveredTabId] = useState<string | null>(null)
+  const tabZoneRef = useRef<HTMLDivElement>(null)
   const { containerRef: normalZoneRef, canScrollLeft, canScrollRight, scrollLeft, scrollRight } = useScrollOverflow()
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
+
+  // Custom modifier: restrict drag to the tab zone (excludes + button)
+  const restrictToTabZone: Modifier = useCallback(({ transform, activeNodeRect }) => {
+    const zone = tabZoneRef.current
+    if (!zone || !activeNodeRect) return transform
+    const zoneRect = zone.getBoundingClientRect()
+    const minX = zoneRect.left - activeNodeRect.left
+    const maxX = zoneRect.right - activeNodeRect.right
+    return { ...transform, x: Math.min(Math.max(transform.x, minX), maxX), y: 0 }
+  }, [])
 
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event
@@ -72,7 +82,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onAddTab, o
 
   return (
     <div className="flex bg-[#12122a] border-b border-gray-800 items-center px-1 flex-shrink-0" style={{ height: 41 }}>
-      <DndContext sensors={sensors} collisionDetection={closestCenter} modifiers={[restrictToParentElement]} onDragEnd={handleDragEnd}>
+      <DndContext sensors={sensors} collisionDetection={closestCenter} modifiers={[restrictToTabZone]} onDragEnd={handleDragEnd}>
         {/* Pinned zone */}
         {pinnedTabs.length > 0 && (
           <>
@@ -112,23 +122,25 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onAddTab, o
             </button>
           )}
           <div ref={normalZoneRef} className="flex items-center h-full overflow-x-auto scrollbar-hide">
-            <SortableContext items={normalIds} strategy={horizontalListSortingStrategy}>
-              {normalTabs.map((tab, i) => (
-                <Fragment key={tab.id}>
-                  {i > 0 && <TabSeparator show={shouldShowSeparator(normalTabs[i - 1], tab)} />}
-                  <SortableTab
-                    tab={tab}
-                    isActive={tab.id === activeTabId}
-                    onSelect={onSelectTab}
-                    onClose={onCloseTab}
-                    onMiddleClick={onMiddleClick}
-                    onContextMenu={onContextMenu}
-                    onHover={setHoveredTabId}
-                    iconMap={ICON_MAP}
-                  />
-                </Fragment>
-              ))}
-            </SortableContext>
+            <div ref={tabZoneRef} className="flex items-center h-full">
+              <SortableContext items={normalIds} strategy={horizontalListSortingStrategy}>
+                {normalTabs.map((tab, i) => (
+                  <Fragment key={tab.id}>
+                    {i > 0 && <TabSeparator show={shouldShowSeparator(normalTabs[i - 1], tab)} />}
+                    <SortableTab
+                      tab={tab}
+                      isActive={tab.id === activeTabId}
+                      onSelect={onSelectTab}
+                      onClose={onCloseTab}
+                      onMiddleClick={onMiddleClick}
+                      onContextMenu={onContextMenu}
+                      onHover={setHoveredTabId}
+                      iconMap={ICON_MAP}
+                    />
+                  </Fragment>
+                ))}
+              </SortableContext>
+            </div>
             {/* Trailing separator + add button (outside SortableContext, inside scroll) */}
             {normalTabs.length > 0 && <TabSeparator show={!hoveredTabId || normalTabs[normalTabs.length - 1]?.id !== hoveredTabId} />}
             <button
