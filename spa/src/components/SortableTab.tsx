@@ -42,7 +42,6 @@ export function SortableTab({ tab, isActive, pinned, onSelect, onClose, onMiddle
     onContextMenu(e, tab.id)
   }
 
-  // Use inactive bg for X overlay (hover bg difference is negligible)
   const tabBg = isActive ? TAB_BG_ACTIVE : TAB_BG_INACTIVE
 
   if (pinned) {
@@ -82,33 +81,33 @@ export function SortableTab({ tab, isActive, pinned, onSelect, onClose, onMiddle
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
       onContextMenu={handleContextMenu}
-      className={`group relative flex items-center gap-1.5 pl-2 text-xs whitespace-nowrap cursor-pointer transition-colors duration-150 ease-out rounded-[6px] overflow-hidden ${
+      className={`group relative flex items-center gap-1.5 pl-2 pr-1 text-xs whitespace-nowrap cursor-pointer transition-colors duration-150 ease-out rounded-[6px] overflow-hidden ${
         isActive
           ? 'text-white bg-[rgba(122,106,170,0.2)] border border-[rgba(122,106,170,0.3)]'
           : 'text-gray-500 hover:text-gray-300 hover:bg-[rgba(255,255,255,0.05)] border border-transparent'
       }`}
     >
       {IconComponent && <IconComponent size={14} className="flex-shrink-0" />}
-      <span className="tab-label-fade overflow-hidden">{tab.label}</span>
+      <span className="overflow-hidden flex-1 min-w-0">{tab.label}</span>
       {isDirty(tab) && <span className="text-amber-400 text-[10px] flex-shrink-0">●</span>}
       {tab.locked && <Lock size={10} className="text-gray-600 ml-0.5 flex-shrink-0" />}
-      {/* Spacer: reserves X button width so tab size is stable */}
-      {showClose && <span className="w-5 flex-shrink-0" />}
       {showClose && (
-        <span
-          className={`absolute right-0 top-0 bottom-0 flex items-center transition-opacity duration-150 ease-out ${
-            isActive ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
-          }`}
-        >
+        <span className="absolute right-0 top-0 bottom-0 flex items-center">
+          {/* ② Gradient fade — always visible */}
           <span className="w-3 self-stretch" style={{ background: `linear-gradient(to right, transparent, ${tabBg})` }} />
+          {/* ③ X button — collapses to 0 width when hidden */}
           <span
             title="關閉分頁"
             role="button"
             onClick={(e) => { e.stopPropagation(); onClose(tab.id) }}
-            className="self-stretch flex items-center pr-1.5 pl-1 cursor-pointer rounded-r-[6px]"
+            className={`self-stretch flex items-center overflow-hidden cursor-pointer rounded-r-[6px] transition-all duration-150 ease-out ${
+              isActive
+                ? 'w-6 opacity-100'
+                : 'w-0 opacity-0 group-hover:w-6 group-hover:opacity-100'
+            }`}
             style={{ backgroundColor: tabBg }}
           >
-            <X size={12} />
+            <X size={12} className="mx-auto flex-shrink-0" />
           </span>
         </span>
       )}

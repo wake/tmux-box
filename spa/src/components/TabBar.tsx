@@ -1,5 +1,6 @@
 import { Fragment, useState } from 'react'
 import { DndContext, closestCenter, PointerSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
+import { restrictToParentElement } from '@dnd-kit/modifiers'
 import { SortableContext, horizontalListSortingStrategy } from '@dnd-kit/sortable'
 import { Plus, CaretLeft, CaretRight, TerminalWindow, ChatCircleDots, File as FileIcon } from '@phosphor-icons/react'
 import { SortableTab } from './SortableTab'
@@ -71,7 +72,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onAddTab, o
 
   return (
     <div className="flex bg-[#12122a] border-b border-gray-800 items-center px-1 flex-shrink-0" style={{ height: 41 }}>
-      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+      <DndContext sensors={sensors} collisionDetection={closestCenter} modifiers={[restrictToParentElement]} onDragEnd={handleDragEnd}>
         {/* Pinned zone */}
         {pinnedTabs.length > 0 && (
           <>
