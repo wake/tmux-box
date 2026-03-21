@@ -35,19 +35,22 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onAddTab, o
   const pinnedIds = pinnedTabs.map((t) => t.id)
   const normalIds = normalTabs.map((t) => t.id)
   const [hoveredTabId, setHoveredTabId] = useState<string | null>(null)
-  const tabZoneRef = useRef<HTMLDivElement>(null)
+  const pinnedZoneRef = useRef<HTMLDivElement>(null)
+  const normalZoneTabsRef = useRef<HTMLDivElement>(null)
   const { containerRef: normalZoneRef, canScrollLeft, canScrollRight, scrollLeft, scrollRight } = useScrollOverflow()
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
-  // Custom modifier: restrict drag to the tab zone (excludes + button)
-  const restrictToTabZone: Modifier = useCallback(({ transform, activeNodeRect }) => {
-    const zone = tabZoneRef.current
-    if (!zone || !activeNodeRect) return transform
+  // Custom modifier: restrict drag to the zone containing the active item
+  const restrictToTabZone: Modifier = useCallback(({ transform, activeNodeRect, active }) => {
+    if (!activeNodeRect || !active) return { ...transform, y: 0 }
+    const activeId = String(active.id)
+    const zone = pinnedIds.includes(activeId) ? pinnedZoneRef.current : normalZoneTabsRef.current
+    if (!zone) return { ...transform, y: 0 }
     const zoneRect = zone.getBoundingClientRect()
     const minX = zoneRect.left - activeNodeRect.left
     const maxX = zoneRect.right - activeNodeRect.right
     return { ...transform, x: Math.min(Math.max(transform.x, minX), maxX), y: 0 }
-  }, [])
+  }, [pinnedIds])
 
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event
@@ -87,7 +90,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onAddTab, o
         {pinnedTabs.length > 0 && (
           <>
             <SortableContext items={pinnedIds} strategy={horizontalListSortingStrategy}>
-              <div className="flex items-center h-full">
+              <div ref={pinnedZoneRef} className="flex items-center h-full">
                 {pinnedTabs.map((tab, i) => (
                   <Fragment key={tab.id}>
                     {i > 0 && <TabSeparator show={shouldShowSeparator(pinnedTabs[i - 1], tab)} />}
@@ -122,7 +125,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onAddTab, o
             </button>
           )}
           <div ref={normalZoneRef} className="flex items-center h-full overflow-x-auto scrollbar-hide">
-            <div ref={tabZoneRef} className="flex items-center h-full">
+            <div ref={normalZoneTabsRef} className="flex items-center h-full">
               <SortableContext items={normalIds} strategy={horizontalListSortingStrategy}>
                 {normalTabs.map((tab, i) => (
                   <Fragment key={tab.id}>
