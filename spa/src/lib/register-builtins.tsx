@@ -1,4 +1,4 @@
-// spa/src/lib/register-builtins.ts
+// spa/src/lib/register-builtins.tsx
 import { registerTabRenderer } from './tab-registry'
 import { SessionTabContent } from '../components/SessionTabContent'
 

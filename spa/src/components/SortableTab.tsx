@@ -94,9 +94,9 @@ export function SortableTab({ tab, isActive, pinned, onSelect, onClose, onMiddle
       {tab.locked && <Lock size={10} className="text-gray-600 ml-0.5 flex-shrink-0" />}
       {showClose && (
         <span className="absolute right-0 top-0 bottom-0 flex items-center">
-          {/* ② Gradient fade — always visible */}
+          {/* ① Gradient fade — always visible */}
           <span className="w-3 self-stretch" style={{ background: `linear-gradient(to right, transparent, ${tabBg})` }} />
-          {/* Solid padding after fade (visible when X hidden) */}
+          {/* ② Solid padding after fade (visible when X hidden) */}
           <span className={`self-stretch ${isActive ? 'w-0' : 'w-1.5 group-hover:w-0'}`} style={{ backgroundColor: tabBg }} />
           {/* ③ X button — hidden/shown instantly */}
           <span

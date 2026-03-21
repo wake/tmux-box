@@ -1,4 +1,4 @@
-import { Fragment, useRef, useState, useCallback } from 'react'
+import { Fragment, useRef, useState, useCallback, useMemo } from 'react'
 import { DndContext, closestCenter, PointerSensor, useSensor, useSensors, type DragEndEvent, type Modifier } from '@dnd-kit/core'
 import { SortableContext, horizontalListSortingStrategy } from '@dnd-kit/sortable'
 import { Plus, CaretLeft, CaretRight, TerminalWindow, ChatCircleDots, File as FileIcon } from '@phosphor-icons/react'
@@ -32,8 +32,8 @@ function TabSeparator({ show }: { show: boolean }) {
 export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onAddTab, onReorderTabs, onMiddleClick, onContextMenu }: Props) {
   const pinnedTabs = tabs.filter((t) => t.pinned)
   const normalTabs = tabs.filter((t) => !t.pinned)
-  const pinnedIds = pinnedTabs.map((t) => t.id)
-  const normalIds = normalTabs.map((t) => t.id)
+  const pinnedIds = useMemo(() => pinnedTabs.map((t) => t.id), [pinnedTabs])
+  const normalIds = useMemo(() => normalTabs.map((t) => t.id), [normalTabs])
   const [hoveredTabId, setHoveredTabId] = useState<string | null>(null)
   const pinnedZoneRef = useRef<HTMLDivElement>(null)
   const normalZoneTabsRef = useRef<HTMLDivElement>(null)
@@ -44,7 +44,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onAddTab, o
   const restrictToTabZone: Modifier = useCallback(({ transform, activeNodeRect, active }) => {
     if (!activeNodeRect || !active) return { ...transform, y: 0 }
     const activeId = String(active.id)
-    const zone = pinnedIds.includes(activeId) ? pinnedZoneRef.current : normalZoneTabsRef.current
+    const zone = pinnedIds.includes(activeId) ? pinnedZoneRef.current : normalZoneRef.current
     if (!zone) return { ...transform, y: 0 }
     const zoneRect = zone.getBoundingClientRect()
     const minX = zoneRect.left - activeNodeRect.left
@@ -52,7 +52,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onAddTab, o
     return { ...transform, x: Math.min(Math.max(transform.x, minX), maxX), y: 0 }
   }, [pinnedIds])
 
-  const handleDragEnd = (event: DragEndEvent) => {
+  const handleDragEnd = useCallback((event: DragEndEvent) => {
     const { active, over } = event
     if (!over || active.id === over.id) return
 
@@ -73,7 +73,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onAddTab, o
 
     const newOrder = inPinned ? [...zone, ...normalIds] : [...pinnedIds, ...zone]
     onReorderTabs(newOrder)
-  }
+  }, [pinnedIds, normalIds, onReorderTabs])
 
   // Separator visibility: hide near active or hovered tab
   const shouldShowSeparator = (leftTab: Tab | undefined, rightTab: Tab | undefined) => {

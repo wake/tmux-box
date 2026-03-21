@@ -46,6 +46,7 @@ export default function App() {
   const dismissedSessions = useTabStore((s) => s.dismissedSessions)
   const setActiveTab = useTabStore((s) => s.setActiveTab)
   const getActiveTab = useTabStore((s) => s.getActiveTab)
+  const reorderTabs = useTabStore((s) => s.reorderTabs)
 
   // Workspace store
   const workspaces = useWorkspaceStore((s) => s.workspaces)
@@ -55,6 +56,7 @@ export default function App() {
   const removeTabFromWorkspace = useWorkspaceStore((s) => s.removeTabFromWorkspace)
   const findWorkspaceByTab = useWorkspaceStore((s) => s.findWorkspaceByTab)
   const setWorkspaceActiveTab = useWorkspaceStore((s) => s.setWorkspaceActiveTab)
+  const reorderWorkspaceTabs = useWorkspaceStore((s) => s.reorderWorkspaceTabs)
 
   // --- Extracted hooks ---
   useRelayWsManager(wsBase)
@@ -98,6 +100,11 @@ export default function App() {
   const handleAddTab = useCallback(() => {
     setSessionPickerOpen(true)
   }, [])
+
+  const handleReorderTabs = useCallback((order: string[]) => {
+    reorderTabs(order)
+    if (activeWorkspaceId) reorderWorkspaceTabs(activeWorkspaceId, order)
+  }, [reorderTabs, activeWorkspaceId, reorderWorkspaceTabs])
 
   const handleSessionSelect = useCallback((session: typeof sessions[0]) => {
     setSessionPickerOpen(false)
@@ -170,6 +177,7 @@ export default function App() {
       case 'closeRight': {
         const displayIds = displayTabs.map((t) => t.id)
         const idx = displayIds.indexOf(tab.id)
+        if (idx === -1) break
         const toClose = displayIds.slice(idx + 1).filter((id) => !tabs[id]?.locked)
         toClose.forEach((id) => handleCloseTab(id))
         break
@@ -181,6 +189,14 @@ export default function App() {
       }
     }
   }, [contextMenu, tabs, displayTabs, handleCloseTab])
+
+  // Context menu derived state
+  const contextMenuHasRightUnlocked = (() => {
+    if (!contextMenu) return false
+    const ids = displayTabs.map((t) => t.id)
+    const idx = ids.indexOf(contextMenu.tab.id)
+    return idx !== -1 && ids.slice(idx + 1).some((id) => !tabs[id]?.locked)
+  })()
 
   // StatusBar info
   const statusHost = activeTab?.hostId === 'local' ? 'mlab' : activeTab?.hostId ?? null
@@ -208,10 +224,7 @@ export default function App() {
           onSelectTab={handleSelectTab}
           onCloseTab={handleCloseTab}
           onAddTab={handleAddTab}
-          onReorderTabs={(order) => {
-            useTabStore.getState().reorderTabs(order)
-            if (activeWorkspaceId) useWorkspaceStore.getState().reorderWorkspaceTabs(activeWorkspaceId, order)
-          }}
+          onReorderTabs={handleReorderTabs}
           onMiddleClick={handleMiddleClick}
           onContextMenu={handleContextMenu}
         />
@@ -255,11 +268,7 @@ export default function App() {
           onClose={() => setContextMenu(null)}
           onAction={handleContextAction}
           hasOtherUnlocked={displayTabs.some((t) => t.id !== contextMenu.tab.id && !t.locked)}
-          hasRightUnlocked={(() => {
-            const ids = displayTabs.map((t) => t.id)
-            const idx = ids.indexOf(contextMenu.tab.id)
-            return ids.slice(idx + 1).some((id) => !tabs[id]?.locked)
-          })()}
+          hasRightUnlocked={contextMenuHasRightUnlocked}
           hasDismissedSessions={dismissedSessions.length > 0}
         />
       )}

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Tab } from '../types/tab'
 
 export type ContextMenuAction =
@@ -26,8 +26,9 @@ interface MenuItem {
 
 export function TabContextMenu({ tab, position, onClose, onAction, hasOtherUnlocked, hasRightUnlocked, hasDismissedSessions }: Props) {
   const ref = useRef<HTMLDivElement>(null)
+  const [adjustedPos, setAdjustedPos] = useState(position)
 
-  // Viewport boundary correction — imperatively adjust position before paint
+  // Viewport boundary correction — adjust position before paint
   useLayoutEffect(() => {
     const el = ref.current
     if (!el) return
@@ -37,8 +38,7 @@ export function TabContextMenu({ tab, position, onClose, onAction, hasOtherUnloc
     if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 4
     if (x < 0) x = 4
     if (y < 0) y = 4
-    el.style.left = `${x}px`
-    el.style.top = `${y}px`
+    setAdjustedPos({ x, y })
   }, [position])
 
   useEffect(() => {
@@ -91,7 +91,7 @@ export function TabContextMenu({ tab, position, onClose, onAction, hasOtherUnloc
     <div
       ref={ref}
       className="fixed z-50 bg-[#1e1e2e] border border-gray-700 rounded-lg shadow-xl py-1 min-w-[200px] text-xs"
-      style={{ left: position.x, top: position.y }}
+      style={{ left: adjustedPos.x, top: adjustedPos.y }}
     >
       {cleaned.map((item, i) => {
         if (item === 'separator') {

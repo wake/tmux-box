@@ -4,7 +4,7 @@ import { TabContextMenu } from './TabContextMenu'
 import type { Tab } from '../types/tab'
 
 const baseTab: Tab = {
-  id: '1', type: 'session', label: 'test', icon: 'Terminal',
+  id: '1', type: 'session', label: 'test', icon: 'TerminalWindow',
   hostId: 'local', viewMode: 'terminal', data: { sessionName: 'test' },
   pinned: false, locked: false,
 }

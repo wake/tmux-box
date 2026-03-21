@@ -29,15 +29,15 @@ const defaultHandlers = {
 }
 
 const mockTabs: Tab[] = [
-  { id: 't1', type: 'session', label: 'dev-server', icon: 'Terminal', hostId: 'mlab', viewMode: 'terminal', data: { sessionName: 'dev' }, pinned: false, locked: false },
+  { id: 't1', type: 'session', label: 'dev-server', icon: 'TerminalWindow', hostId: 'mlab', viewMode: 'terminal', data: { sessionName: 'dev' }, pinned: false, locked: false },
   { id: 't2', type: 'session', label: 'claude', icon: 'ChatCircleDots', hostId: 'mlab', viewMode: 'stream', data: { sessionName: 'claude' }, pinned: false, locked: false },
   { id: 't3', type: 'editor', label: 'App.tsx', icon: 'File', hostId: 'mlab', data: { filePath: '/App.tsx', isDirty: true }, pinned: false, locked: false },
 ]
 
 const pinnedTabs: Tab[] = [
-  { id: 'p1', type: 'session', label: 'pinned-a', icon: 'Terminal', hostId: 'local', viewMode: 'terminal', data: { sessionName: 'a' }, pinned: true, locked: true },
-  { id: 't1', type: 'session', label: 'normal-b', icon: 'Terminal', hostId: 'local', viewMode: 'terminal', data: { sessionName: 'b' }, pinned: false, locked: false },
-  { id: 't2', type: 'session', label: 'normal-c', icon: 'Terminal', hostId: 'local', viewMode: 'terminal', data: { sessionName: 'c' }, pinned: false, locked: false },
+  { id: 'p1', type: 'session', label: 'pinned-a', icon: 'TerminalWindow', hostId: 'local', viewMode: 'terminal', data: { sessionName: 'a' }, pinned: true, locked: true },
+  { id: 't1', type: 'session', label: 'normal-b', icon: 'TerminalWindow', hostId: 'local', viewMode: 'terminal', data: { sessionName: 'b' }, pinned: false, locked: false },
+  { id: 't2', type: 'session', label: 'normal-c', icon: 'TerminalWindow', hostId: 'local', viewMode: 'terminal', data: { sessionName: 'c' }, pinned: false, locked: false },
 ]
 
 describe('TabBar', () => {
@@ -91,7 +91,7 @@ describe('TabBar', () => {
 
   it('locked tab hides close button', () => {
     const lockedTabs: Tab[] = [
-      { id: 't1', type: 'session', label: 'locked-tab', icon: 'Terminal', hostId: 'local', viewMode: 'terminal', data: { sessionName: 'x' }, pinned: false, locked: true },
+      { id: 't1', type: 'session', label: 'locked-tab', icon: 'TerminalWindow', hostId: 'local', viewMode: 'terminal', data: { sessionName: 'x' }, pinned: false, locked: true },
     ]
     render(<TabBar tabs={lockedTabs} activeTabId="t1" {...defaultHandlers} />)
     expect(screen.queryByTitle('關閉分頁')).not.toBeInTheDocument()
@@ -99,11 +99,15 @@ describe('TabBar', () => {
 
   it('shows lock icon on locked non-pinned tab', () => {
     const lockedTabs: Tab[] = [
-      { id: 't1', type: 'session', label: 'locked-tab', icon: 'Terminal', hostId: 'local', viewMode: 'terminal', data: { sessionName: 'x' }, pinned: false, locked: true },
+      { id: 't1', type: 'session', label: 'locked-tab', icon: 'TerminalWindow', hostId: 'local', viewMode: 'terminal', data: { sessionName: 'x' }, pinned: false, locked: true },
     ]
     render(<TabBar tabs={lockedTabs} activeTabId="t1" {...defaultHandlers} />)
-    // Lock icon rendered via Phosphor Lock component
     expect(screen.getByText('locked-tab')).toBeInTheDocument()
+    // Lock icon rendered — verify SVG with Lock's aria-label or test-id presence
+    const tabBtn = screen.getByText('locked-tab').closest('button')!
+    const svgs = tabBtn.querySelectorAll('svg')
+    // Should have at least 2 SVGs: tab icon + lock icon
+    expect(svgs.length).toBeGreaterThanOrEqual(2)
   })
 
   it('calls onAddTab on + button', () => {
