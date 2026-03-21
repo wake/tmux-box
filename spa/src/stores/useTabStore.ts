@@ -3,11 +3,16 @@ import { persist } from 'zustand/middleware'
 import type { Tab } from '../types/tab'
 import { getSessionName } from '../lib/tab-helpers'
 
+export interface DismissedSession {
+  sessionName: string
+  pinned: boolean
+}
+
 interface TabState {
   tabs: Record<string, Tab>
   tabOrder: string[]
   activeTabId: string | null
-  dismissedSessions: string[]
+  dismissedSessions: DismissedSession[]
 
   addTab: (tab: Tab) => void
   removeTab: (tabId: string) => void
@@ -61,6 +66,11 @@ export function migrateTabStore(persisted: any, version: number) {
     }
     persisted = { ...persisted, tabs: migrated }
   }
+  if (version < 3) {
+    // v2→v3: dismissedSessions string[] → { sessionName, pinned }[]
+    persisted.dismissedSessions = (persisted.dismissedSessions ?? [])
+      .map((s: any) => typeof s === 'string' ? { sessionName: s, pinned: false } : s)
+  }
   return persisted
 }
 
@@ -109,18 +119,18 @@ export const useTabStore = create<TabState>()(
           }
           const sessionName = getSessionName(tab)
           const dismissed = sessionName
-            ? [...state.dismissedSessions, sessionName]
+            ? [...state.dismissedSessions, { sessionName, pinned: tab.pinned }]
             : state.dismissedSessions
           return { tabs: remainingTabs, tabOrder: newOrder, activeTabId: newActiveId, dismissedSessions: dismissed }
         }),
 
       undismissSession: (sessionName) =>
         set((state) => ({
-          dismissedSessions: state.dismissedSessions.filter((s) => s !== sessionName),
+          dismissedSessions: state.dismissedSessions.filter((s) => s.sessionName !== sessionName),
         })),
 
       isSessionDismissed: (sessionName) => {
-        return get().dismissedSessions.includes(sessionName)
+        return get().dismissedSessions.some((s) => s.sessionName === sessionName)
       },
 
       setActiveTab: (tabId) =>
@@ -190,7 +200,7 @@ export const useTabStore = create<TabState>()(
     }),
     {
       name: 'tbox-tabs',
-      version: 2,
+      version: 3,
       migrate: migrateTabStore,
       partialize: (state) => ({
         tabs: state.tabs,

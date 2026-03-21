@@ -112,7 +112,7 @@ describe('useTabStore', () => {
     useTabStore.getState().addTab(tab)
     useTabStore.getState().dismissTab(tab.id)
     expect(useTabStore.getState().tabs[tab.id]).toBeUndefined()
-    expect(useTabStore.getState().dismissedSessions).toContain('dev')
+    expect(useTabStore.getState().dismissedSessions).toContainEqual({ sessionName: 'dev', pinned: false })
   })
 
   it('dismissTab is no-op for tab without sessionName', () => {
@@ -127,9 +127,9 @@ describe('useTabStore', () => {
     const tab = createSessionTab({ label: 'dev', hostId: 'mlab', sessionName: 'dev' })
     useTabStore.getState().addTab(tab)
     useTabStore.getState().dismissTab(tab.id)
-    expect(useTabStore.getState().dismissedSessions).toContain('dev')
+    expect(useTabStore.getState().dismissedSessions).toContainEqual({ sessionName: 'dev', pinned: false })
     useTabStore.getState().undismissSession('dev')
-    expect(useTabStore.getState().dismissedSessions).not.toContain('dev')
+    expect(useTabStore.getState().dismissedSessions).not.toContainEqual({ sessionName: 'dev', pinned: false })
   })
 
   it('isSessionDismissed returns correct value', () => {

@@ -154,6 +154,55 @@ describe('updateTab invariant protection', () => {
   })
 })
 
+describe('dismissTab stores pinned state', () => {
+  beforeEach(reset)
+
+  it('dismissTab stores pinned=false for normal tab', () => {
+    const a = addTab('a')
+    useTabStore.getState().dismissTab(a.id)
+    const dismissed = useTabStore.getState().dismissedSessions
+    expect(dismissed).toEqual([{ sessionName: 'a', pinned: false }])
+  })
+
+  it('dismissTab stores pinned=true for pinned tab', () => {
+    const a = addTab('a')
+    useTabStore.getState().pinTab(a.id)
+    useTabStore.getState().dismissTab(a.id)
+    const dismissed = useTabStore.getState().dismissedSessions
+    expect(dismissed).toEqual([{ sessionName: 'a', pinned: true }])
+  })
+
+  it('undismissSession removes by sessionName', () => {
+    const a = addTab('a')
+    useTabStore.getState().dismissTab(a.id)
+    useTabStore.getState().undismissSession('a')
+    expect(useTabStore.getState().dismissedSessions).toEqual([])
+  })
+
+  it('isSessionDismissed checks by sessionName', () => {
+    const a = addTab('a')
+    useTabStore.getState().dismissTab(a.id)
+    expect(useTabStore.getState().isSessionDismissed('a')).toBe(true)
+    expect(useTabStore.getState().isSessionDismissed('nonexistent')).toBe(false)
+  })
+})
+
+describe('persist migration v2→v3', () => {
+  it('converts dismissedSessions string[] to object[]', () => {
+    const old = {
+      tabs: {},
+      tabOrder: [],
+      activeTabId: null,
+      dismissedSessions: ['foo', 'bar'],
+    }
+    const result = migrateTabStore(old, 2) as any
+    expect(result.dismissedSessions).toEqual([
+      { sessionName: 'foo', pinned: false },
+      { sessionName: 'bar', pinned: false },
+    ])
+  })
+})
+
 describe('persist migration v1→v2', () => {
   it('adds pinned=false, locked=false to old tabs', () => {
     const old = {
