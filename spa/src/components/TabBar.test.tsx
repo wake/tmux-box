@@ -51,7 +51,7 @@ describe('TabBar', () => {
   it('highlights active tab', () => {
     render(<TabBar tabs={mockTabs} activeTabId="t1" {...defaultHandlers} />)
     const activeTab = screen.getByText('dev-server').closest('button')!
-    expect(activeTab.className).toContain('border-b')
+    expect(activeTab.className).toContain('text-white')
   })
 
   it('calls onSelectTab on click', () => {
@@ -119,10 +119,10 @@ describe('TabBar', () => {
     expect(separator).toBeInTheDocument()
   })
 
-  it('no separator when no pinned tabs', () => {
+  it('no pinned-zone separator when no pinned tabs', () => {
     const { container } = render(<TabBar tabs={mockTabs} activeTabId="t1" {...defaultHandlers} />)
-    // No separator div (the thin vertical line between pinned/normal zones)
-    const separators = container.querySelectorAll('.w-px.bg-gray-700')
-    expect(separators.length).toBe(0)
+    // No pinned/normal zone divider (h-4 height, distinct from tab separators which are h-3.5)
+    const zoneDividers = container.querySelectorAll('.w-px.h-4.bg-gray-700')
+    expect(zoneDividers.length).toBe(0)
   })
 })

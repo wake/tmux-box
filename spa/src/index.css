@@ -13,3 +13,9 @@ body {
 .scrollbar-hide::-webkit-scrollbar {
   display: none;
 }
+
+/* Tab label gradient fade-out (like Chrome) */
+.tab-label-fade {
+  mask-image: linear-gradient(to right, black calc(100% - 16px), transparent);
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - 16px), transparent);
+}

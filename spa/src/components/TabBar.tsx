@@ -22,6 +22,10 @@ interface Props {
   onContextMenu: (e: React.MouseEvent, tabId: string) => void
 }
 
+function TabSeparator({ show }: { show: boolean }) {
+  return <div className={`w-px h-3.5 flex-shrink-0 transition-opacity ${show ? 'bg-gray-700' : 'bg-transparent'}`} />
+}
+
 export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onAddTab, onReorderTabs, onMiddleClick, onContextMenu }: Props) {
   const pinnedTabs = tabs.filter((t) => t.pinned)
   const normalTabs = tabs.filter((t) => !t.pinned)
@@ -53,6 +57,13 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onAddTab, o
     onReorderTabs(newOrder)
   }
 
+  // Separator visibility: hide between active tab and its neighbors
+  const shouldShowSeparator = (leftTab: Tab | undefined, rightTab: Tab | undefined) => {
+    if (!leftTab || !rightTab) return false
+    if (leftTab.id === activeTabId || rightTab.id === activeTabId) return false
+    return true
+  }
+
   return (
     <div className="flex bg-[#12122a] border-b border-gray-800 h-9 items-center px-1 flex-shrink-0">
       <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
@@ -60,19 +71,21 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onAddTab, o
         {pinnedTabs.length > 0 && (
           <>
             <SortableContext items={pinnedIds} strategy={horizontalListSortingStrategy}>
-              <div className="flex gap-0.5 items-center h-full">
-                {pinnedTabs.map((tab) => (
-                  <SortableTab
-                    key={tab.id}
-                    tab={tab}
-                    isActive={tab.id === activeTabId}
-                    pinned
-                    onSelect={onSelectTab}
-                    onClose={onCloseTab}
-                    onMiddleClick={onMiddleClick}
-                    onContextMenu={onContextMenu}
-                    iconMap={ICON_MAP}
-                  />
+              <div className="flex items-center h-full">
+                {pinnedTabs.map((tab, i) => (
+                  <div key={tab.id} className="flex items-center h-full">
+                    {i > 0 && <TabSeparator show={shouldShowSeparator(pinnedTabs[i - 1], tab)} />}
+                    <SortableTab
+                      tab={tab}
+                      isActive={tab.id === activeTabId}
+                      pinned
+                      onSelect={onSelectTab}
+                      onClose={onCloseTab}
+                      onMiddleClick={onMiddleClick}
+                      onContextMenu={onContextMenu}
+                      iconMap={ICON_MAP}
+                    />
+                  </div>
                 ))}
               </div>
             </SortableContext>
@@ -91,19 +104,21 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onAddTab, o
               <CaretLeft size={14} className="text-gray-400" />
             </button>
           )}
-          <div ref={normalZoneRef} className="flex gap-0.5 items-center h-full overflow-x-auto scrollbar-hide">
+          <div ref={normalZoneRef} className="flex items-center h-full overflow-x-auto scrollbar-hide">
             <SortableContext items={normalIds} strategy={horizontalListSortingStrategy}>
-              {normalTabs.map((tab) => (
-                <SortableTab
-                  key={tab.id}
-                  tab={tab}
-                  isActive={tab.id === activeTabId}
-                  onSelect={onSelectTab}
-                  onClose={onCloseTab}
-                  onMiddleClick={onMiddleClick}
-                  onContextMenu={onContextMenu}
-                  iconMap={ICON_MAP}
-                />
+              {normalTabs.map((tab, i) => (
+                <div key={tab.id} className="flex items-center h-full">
+                  {i > 0 && <TabSeparator show={shouldShowSeparator(normalTabs[i - 1], tab)} />}
+                  <SortableTab
+                    tab={tab}
+                    isActive={tab.id === activeTabId}
+                    onSelect={onSelectTab}
+                    onClose={onCloseTab}
+                    onMiddleClick={onMiddleClick}
+                    onContextMenu={onContextMenu}
+                    iconMap={ICON_MAP}
+                  />
+                </div>
               ))}
             </SortableContext>
           </div>
