@@ -208,7 +208,10 @@ export default function App() {
           onSelectTab={handleSelectTab}
           onCloseTab={handleCloseTab}
           onAddTab={handleAddTab}
-          onReorderTabs={(order) => useTabStore.getState().reorderTabs(order)}
+          onReorderTabs={(order) => {
+            useTabStore.getState().reorderTabs(order)
+            if (activeWorkspaceId) useWorkspaceStore.getState().reorderWorkspaceTabs(activeWorkspaceId, order)
+          }}
           onMiddleClick={handleMiddleClick}
           onContextMenu={handleContextMenu}
         />

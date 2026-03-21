@@ -70,7 +70,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onAddTab, o
   }
 
   return (
-    <div className="flex bg-[#12122a] border-b border-gray-800 items-center px-1 flex-shrink-0" style={{ height: 40 }}>
+    <div className="flex bg-[#12122a] border-b border-gray-800 items-center px-1 flex-shrink-0" style={{ height: 41 }}>
       <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
         {/* Pinned zone */}
         {pinnedTabs.length > 0 && (

@@ -61,14 +61,20 @@ export function SortableTab({ tab, isActive, pinned, onSelect, onClose, onMiddle
     )
   }
 
-  // Active: always show X, inactive: show X on hover only
   const showClose = !tab.locked
   const alwaysShowClose = isActive && showClose
 
   return (
     <button
       ref={setNodeRef}
-      style={{ ...style, height: 26, margin: '0 1px', marginTop: 2, maxWidth: 180 }}
+      style={{
+        ...style,
+        height: 26,
+        margin: '0 1px',
+        marginTop: 2,
+        maxWidth: 180,
+        '--tab-bg': isActive ? '#1e1935' : '#12122a',
+      } as React.CSSProperties}
       {...attributes}
       {...listeners}
       onClick={() => onSelect(tab.id)}
@@ -76,7 +82,7 @@ export function SortableTab({ tab, isActive, pinned, onSelect, onClose, onMiddle
       onMouseEnter={() => onHover?.(tab.id)}
       onMouseLeave={() => onHover?.(null)}
       onContextMenu={handleContextMenu}
-      className={`group flex items-center gap-1.5 px-2 text-xs whitespace-nowrap cursor-pointer transition-all duration-150 ease-out rounded-[6px] ${
+      className={`group relative flex items-center gap-1.5 px-2 text-xs whitespace-nowrap cursor-pointer transition-all duration-150 ease-out rounded-[6px] overflow-hidden ${
         isActive
           ? 'text-white bg-[rgba(122,106,170,0.2)] border border-[rgba(122,106,170,0.3)]'
           : 'text-gray-500 hover:text-gray-300 hover:bg-[rgba(255,255,255,0.05)] border border-transparent'
@@ -87,16 +93,24 @@ export function SortableTab({ tab, isActive, pinned, onSelect, onClose, onMiddle
       {isDirty(tab) && <span className="text-amber-400 text-[10px] flex-shrink-0">●</span>}
       {tab.locked && <Lock size={10} className="text-gray-600 ml-0.5 flex-shrink-0" />}
       {showClose && (
-        <button
-          type="button"
-          title="關閉分頁"
-          onClick={(e) => { e.stopPropagation(); onClose(tab.id) }}
-          className={`ml-0.5 hover:text-red-400 transition-opacity duration-150 ease-out cursor-pointer flex-shrink-0 ${
+        <span
+          className={`absolute right-0 top-0 bottom-0 flex items-center pr-1.5 transition-opacity duration-150 ease-out ${
             alwaysShowClose ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
           }`}
+          style={{
+            background: 'linear-gradient(to right, transparent, var(--tab-bg) 6px)',
+            paddingLeft: 12,
+          }}
         >
-          <X size={12} />
-        </button>
+          <span
+            title="關閉分頁"
+            role="button"
+            onClick={(e) => { e.stopPropagation(); onClose(tab.id) }}
+            className="hover:text-red-400 cursor-pointer"
+          >
+            <X size={12} />
+          </span>
+        </span>
       )}
     </button>
   )
