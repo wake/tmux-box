@@ -40,7 +40,7 @@ export function SortableTab({ tab, isActive, pinned, onSelect, onClose, onMiddle
     return (
       <button
         ref={setNodeRef}
-        style={{ ...style, height: 26 }}
+        style={{ ...style, height: 28 }}
         {...attributes}
         {...listeners}
         onClick={() => onSelect(tab.id)}
@@ -48,7 +48,7 @@ export function SortableTab({ tab, isActive, pinned, onSelect, onClose, onMiddle
         onContextMenu={handleContextMenu}
         className={`relative flex items-center justify-center w-9 rounded-md cursor-pointer transition-all ${
           isActive
-            ? 'text-white bg-[rgba(122,106,170,0.2)] border border-[rgba(122,106,170,0.3)]'
+            ? 'text-white bg-[rgba(122,106,170,0.3)] border border-[rgba(122,106,170,0.45)]'
             : 'text-gray-500 hover:text-gray-300 hover:bg-[rgba(255,255,255,0.05)] border border-transparent'
         }`}
         title={tab.label}
@@ -61,15 +61,15 @@ export function SortableTab({ tab, isActive, pinned, onSelect, onClose, onMiddle
   return (
     <button
       ref={setNodeRef}
-      style={{ ...style, height: 26, maxWidth: 160 }}
+      style={{ ...style, height: 28, maxWidth: 180 }}
       {...attributes}
       {...listeners}
       onClick={() => onSelect(tab.id)}
       onMouseUp={handleMouseUp}
       onContextMenu={handleContextMenu}
-      className={`group flex items-center gap-1.5 px-3 text-xs whitespace-nowrap cursor-pointer transition-all rounded-md ${
+      className={`group flex items-center gap-2 px-4 text-xs whitespace-nowrap cursor-pointer transition-all rounded-md ${
         isActive
-          ? 'text-white bg-[rgba(122,106,170,0.2)] border border-[rgba(122,106,170,0.3)]'
+          ? 'text-white bg-[rgba(122,106,170,0.3)] border border-[rgba(122,106,170,0.45)]'
           : 'text-gray-500 hover:text-gray-300 hover:bg-[rgba(255,255,255,0.05)] border border-transparent'
       }`}
     >
@@ -82,7 +82,7 @@ export function SortableTab({ tab, isActive, pinned, onSelect, onClose, onMiddle
           type="button"
           title="關閉分頁"
           onClick={(e) => { e.stopPropagation(); onClose(tab.id) }}
-          className="ml-1 opacity-0 group-hover:opacity-100 hover:text-red-400 transition-opacity cursor-pointer flex-shrink-0"
+          className="ml-0.5 opacity-0 group-hover:opacity-100 hover:text-red-400 transition-opacity cursor-pointer flex-shrink-0"
         >
           <X size={12} />
         </button>

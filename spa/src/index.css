@@ -16,6 +16,6 @@ body {
 
 /* Tab label gradient fade-out (like Chrome) */
 .tab-label-fade {
-  mask-image: linear-gradient(to right, black calc(100% - 8px), transparent);
-  -webkit-mask-image: linear-gradient(to right, black calc(100% - 8px), transparent);
+  mask-image: linear-gradient(to right, black calc(100% - 6px), transparent);
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - 6px), transparent);
 }
