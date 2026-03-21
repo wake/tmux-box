@@ -16,9 +16,9 @@ interface Props {
   iconMap: Record<string, React.ComponentType<{ size: number; className?: string }>>
 }
 
-// Composite bg colors (pre-computed for opaque X button bg)
+// Composite bg colors (canvas-verified for opaque X button bg)
 const TAB_BG_INACTIVE = '#12122a'
-const TAB_BG_ACTIVE = '#1e1935'
+const TAB_BG_ACTIVE = '#272444'   // rgba(122,106,170,0.2) on #12122a
 
 export function SortableTab({ tab, isActive, pinned, onSelect, onClose, onMiddleClick, onContextMenu, onHover, iconMap }: Props) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: tab.id })
