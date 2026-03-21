@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tab Style Demo — tmux-box</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a1a; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 24px; }
+  h1 { font-size: 18px; margin-bottom: 24px; color: #7a6aaa; }
+  h2 { font-size: 13px; margin-bottom: 8px; color: #888; font-weight: 500; }
+  .demo-section { margin-bottom: 32px; }
+  .tab-bar { display: flex; align-items: center; height: 36px; padding: 0 4px; gap: 2px; flex-shrink: 0; }
+  .tab { display: flex; align-items: center; gap: 6px; padding: 0 12px; height: 100%; font-size: 12px; white-space: nowrap; cursor: pointer; transition: all 0.15s ease; }
+  .tab .icon { width: 14px; height: 14px; border-radius: 2px; flex-shrink: 0; }
+  .tab .icon.terminal { background: #7a6aaa; }
+  .tab .icon.stream { background: #6a9aaa; }
+  .tab .close { width: 12px; height: 12px; border-radius: 2px; opacity: 0; transition: opacity 0.15s; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #888; }
+  .tab:hover .close { opacity: 1; }
+  .tab .close:hover { color: #e55; background: rgba(255,80,80,0.15); }
+  .plus-btn { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; color: #555; font-size: 16px; cursor: pointer; flex-shrink: 0; }
+  .plus-btn:hover { color: #999; }
+
+  /* ===== Style A: 現有風格（底線） ===== */
+  .style-a .tab-bar { background: #12122a; border-bottom: 1px solid #222; }
+  .style-a .tab { color: #666; }
+  .style-a .tab:hover { color: #bbb; }
+  .style-a .tab.active { color: #fff; border-bottom: 2px solid #7a6aaa; }
+
+  /* ===== Style B: 圓角卡片 + 微底色 ===== */
+  .style-b .tab-bar { background: #0e0e20; border-bottom: 1px solid #1a1a30; padding-top: 4px; }
+  .style-b .tab { color: #666; border-radius: 6px 6px 0 0; height: calc(100% - 4px); }
+  .style-b .tab:hover { color: #bbb; background: rgba(255,255,255,0.03); }
+  .style-b .tab.active { color: #fff; background: #12122a; box-shadow: 0 -1px 0 #7a6aaa; }
+
+  /* ===== Style C: 膠囊（pill）+ 底色區分 ===== */
+  .style-c .tab-bar { background: #12122a; border-bottom: 1px solid #222; padding: 0 4px; }
+  .style-c .tab { color: #666; border-radius: 6px; height: 26px; margin: 0 1px; }
+  .style-c .tab:hover { color: #bbb; background: rgba(255,255,255,0.05); }
+  .style-c .tab.active { color: #fff; background: rgba(122, 106, 170, 0.2); border: 1px solid rgba(122, 106, 170, 0.3); }
+
+  /* ===== Style D: Chrome 風格（凸起卡片） ===== */
+  .style-d .tab-bar { background: #0a0a18; border-bottom: none; align-items: flex-end; padding-bottom: 0; }
+  .style-d .tab { color: #666; border-radius: 8px 8px 0 0; height: 30px; margin: 0 -2px; padding: 0 14px; position: relative; }
+  .style-d .tab:hover { color: #bbb; background: rgba(255,255,255,0.04); }
+  .style-d .tab.active { color: #fff; background: #12122a; z-index: 1; box-shadow: -1px -1px 0 #222, 1px -1px 0 #222; }
+
+  .note { font-size: 11px; color: #555; margin-top: 4px; padding-left: 4px; }
+</style>
+</head>
+<body>
+<h1>Tab Style Demo — tmux-box</h1>
+
+<div class="demo-section style-a">
+  <h2>A. 現有風格（底線標記）</h2>
+  <div class="tab-bar">
+    <div class="tab active"><div class="icon terminal"></div> tbox <span class="close">&times;</span></div>
+    <div class="tab"><div class="icon terminal"></div> system <span class="close">&times;</span></div>
+    <div class="tab"><div class="icon stream"></div> tbox2 <span class="close">&times;</span></div>
+    <div class="plus-btn">+</div>
+  </div>
+  <div class="note">最簡潔，但 tab 之間缺乏邊界感，不容易辨識</div>
+</div>
+
+<div class="demo-section style-b">
+  <h2>B. 圓角卡片 + 底色（推薦）</h2>
+  <div class="tab-bar">
+    <div class="tab active"><div class="icon terminal"></div> tbox <span class="close">&times;</span></div>
+    <div class="tab"><div class="icon terminal"></div> system <span class="close">&times;</span></div>
+    <div class="tab"><div class="icon stream"></div> tbox2 <span class="close">&times;</span></div>
+    <div class="plus-btn">+</div>
+  </div>
+  <div class="note">Active tab 有明顯底色 + 頂部紫色線，非 active 保持低調</div>
+</div>
+
+<div class="demo-section style-c">
+  <h2>C. 膠囊（Pill）+ 紫色邊框</h2>
+  <div class="tab-bar">
+    <div class="tab active"><div class="icon terminal"></div> tbox <span class="close">&times;</span></div>
+    <div class="tab"><div class="icon terminal"></div> system <span class="close">&times;</span></div>
+    <div class="tab"><div class="icon stream"></div> tbox2 <span class="close">&times;</span></div>
+    <div class="plus-btn">+</div>
+  </div>
+  <div class="note">膠囊形狀，active 有紫色底色 + 邊框，輕量但有辨識度</div>
+</div>
+
+<div class="demo-section style-d">
+  <h2>D. Chrome 風格（凸起卡片）</h2>
+  <div class="tab-bar">
+    <div class="tab active"><div class="icon terminal"></div> tbox <span class="close">&times;</span></div>
+    <div class="tab"><div class="icon terminal"></div> system <span class="close">&times;</span></div>
+    <div class="tab"><div class="icon stream"></div> tbox2 <span class="close">&times;</span></div>
+    <div class="plus-btn">+</div>
+  </div>
+  <div class="note">類 Chrome，active tab 凸起與內容區融為一體</div>
+</div>
+
+
+</body>
+</html>

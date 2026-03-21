@@ -10,7 +10,7 @@ describe('createSessionTab', () => {
     expect(tab.hostId).toBe('mlab')
     expect(tab.viewMode).toBe('terminal')
     expect(tab.data.sessionName).toBe('dev-server')
-    expect(tab.icon).toBe('Terminal')
+    expect(tab.icon).toBe('TerminalWindow')
   })
 
   it('creates a session tab with stream viewMode', () => {

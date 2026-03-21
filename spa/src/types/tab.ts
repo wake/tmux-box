@@ -77,7 +77,7 @@ export function createSessionTab(opts: CreateSessionTabOpts): Tab {
     id: generateId(),
     type: 'session',
     label: opts.label,
-    icon: opts.icon ?? 'Terminal',
+    icon: opts.icon ?? 'TerminalWindow',
     hostId: opts.hostId,
     viewMode: opts.viewMode ?? 'terminal',
     data: { sessionName: opts.sessionName },

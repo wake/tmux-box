@@ -12,6 +12,7 @@ interface WorkspaceState {
   addTabToWorkspace: (wsId: string, tabId: string) => void
   removeTabFromWorkspace: (wsId: string, tabId: string) => void
   setWorkspaceActiveTab: (wsId: string, tabId: string) => void
+  reorderWorkspaceTabs: (wsId: string, tabIds: string[]) => void
   findWorkspaceByTab: (tabId: string) => Workspace | null
   reset: () => void
 }
@@ -69,6 +70,13 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         set((state) => ({
           workspaces: state.workspaces.map((ws) =>
             ws.id === wsId ? { ...ws, activeTabId: tabId } : ws,
+          ),
+        })),
+
+      reorderWorkspaceTabs: (wsId, tabIds) =>
+        set((state) => ({
+          workspaces: state.workspaces.map((ws) =>
+            ws.id === wsId ? { ...ws, tabs: tabIds } : ws,
           ),
         })),
 
