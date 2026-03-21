@@ -58,9 +58,9 @@ describe('TabContextMenu', () => {
     expect(screen.queryByText('鎖定分頁')).not.toBeInTheDocument()
   })
 
-  it('hides "解鎖分頁" for pinned tab (pinned implies locked)', () => {
+  it('shows "解鎖分頁" for pinned + locked tab', () => {
     renderMenu({ tab: { pinned: true, locked: true } })
-    expect(screen.queryByText('解鎖分頁')).not.toBeInTheDocument()
+    expect(screen.getByText('解鎖分頁')).toBeInTheDocument()
   })
 
   // --- Pin/Unpin ---

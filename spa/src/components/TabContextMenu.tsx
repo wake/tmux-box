@@ -62,7 +62,7 @@ export function TabContextMenu({ tab, position, onClose, onAction, hasOtherUnloc
     ...(isSession ? ['separator' as const] : []),
     // Lock/Pin section
     { label: '鎖定分頁', action: 'lock' as const, show: !tab.locked },
-    { label: '解鎖分頁', action: 'unlock' as const, show: tab.locked && !tab.pinned },
+    { label: '解鎖分頁', action: 'unlock' as const, show: tab.locked },
     { label: '固定分頁', action: 'pin' as const, show: !tab.pinned },
     { label: '取消固定', action: 'unpin' as const, show: tab.pinned },
     'separator',
