@@ -109,6 +109,13 @@ func (c *Core) OnConfigChange(fn func()) {
 	c.onConfigChange = append(c.onConfigChange, fn)
 }
 
+// NotifyConfigChange invokes all registered config change callbacks.
+func (c *Core) NotifyConfigChange() {
+	for _, fn := range c.onConfigChange {
+		fn()
+	}
+}
+
 // RegisterCoreRoutes registers routes owned by Core itself (not by modules).
 func (c *Core) RegisterCoreRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/ws/session-events", c.Events.HandleSessionEvents)

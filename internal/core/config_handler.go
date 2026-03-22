@@ -82,9 +82,7 @@ func (c *Core) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Notify registered callbacks about config changes
 	if detectChanged {
-		for _, fn := range c.onConfigChange {
-			fn()
-		}
+		c.NotifyConfigChange()
 	}
 
 	// Write back to config file
