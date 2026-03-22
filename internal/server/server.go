@@ -30,6 +30,8 @@ type Server struct {
 	mux          *http.ServeMux
 }
 
+// Deprecated: New creates a full server with all routes (session + legacy).
+// Kept for existing tests. Production code should use NewLegacy + RegisterLegacyRoutes.
 func New(cfg config.Config, st *store.Store, tx tmux.Executor, cfgPath string) *Server {
 	s := &Server{
 		cfg:          cfg,
@@ -47,6 +49,22 @@ func New(cfg config.Config, st *store.Store, tx tmux.Executor, cfgPath string) *
 	return s
 }
 
+// NewLegacy creates a server that handles only legacy routes (handoff, history,
+// bridge, events, config). Session and terminal routes are now handled by the
+// session module. Does not call routes() or resetStaleModes().
+func NewLegacy(cfg config.Config, cfgPath string, st *store.Store, tx tmux.Executor) *Server {
+	return &Server{
+		cfg:          cfg,
+		cfgPath:      cfgPath,
+		store:        st,
+		tmux:         tx,
+		bridge:       bridge.New(),
+		events:       NewEventsBroadcaster(),
+		detector:     detect.New(tx, cfg.Detect.CCCommands),
+		handoffLocks: newHandoffLocks(),
+	}
+}
+
 // resetStaleModes resets any sessions stuck in stream/jsonl mode back to term.
 // On daemon startup no relays can be connected, so non-term modes are stale.
 func (s *Server) resetStaleModes() {
@@ -62,6 +80,8 @@ func (s *Server) resetStaleModes() {
 	}
 }
 
+// Deprecated: routes registers ALL routes on the internal mux (session + legacy).
+// Kept for existing tests that use New(). Production code uses RegisterLegacyRoutes.
 func (s *Server) routes() {
 	sh := NewSessionHandler(s.store, s.tmux, s.bridge)
 	s.mux.HandleFunc("GET /api/sessions", sh.List)
@@ -76,6 +96,25 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/ws/session-events", s.handleSessionEvents)
 	s.mux.HandleFunc("GET /api/config", s.handleGetConfig)
 	s.mux.HandleFunc("PUT /api/config", s.handlePutConfig)
+}
+
+// RegisterLegacyRoutes registers only the routes not yet migrated to modules.
+// Session and terminal routes are handled by the session module.
+func (s *Server) RegisterLegacyRoutes(mux *http.ServeMux) {
+	// Handoff + history (still use legacy store with integer id)
+	mux.HandleFunc("POST /api/sessions/{id}/handoff", s.handleHandoff)
+	mux.HandleFunc("GET /api/sessions/{id}/history", s.handleHistory)
+
+	// Bridge WS (still use session name)
+	mux.HandleFunc("/ws/cli-bridge/{session}", s.handleCliBridge)
+	mux.HandleFunc("/ws/cli-bridge-sub/{session}", s.handleCliBridgeSubscribe)
+
+	// Events (stays here until 1.6b)
+	mux.HandleFunc("/ws/session-events", s.handleSessionEvents)
+
+	// Config
+	mux.HandleFunc("GET /api/config", s.handleGetConfig)
+	mux.HandleFunc("PUT /api/config", s.handlePutConfig)
 }
 
 // RestoreWindowSizing clears manual window-size set by resize-window
