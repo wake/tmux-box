@@ -45,7 +45,7 @@ export function SessionPicker({ sessions, existingTabSessionNames, onSelect, onC
         <div className="flex-1 overflow-y-auto">
           {filtered.map((s) => (
             <button
-              key={s.id}
+              key={s.code}
               onClick={() => onSelect(s)}
               className="w-full px-4 py-2.5 flex items-center gap-2 text-sm text-left hover:bg-[#2a2a5a] cursor-pointer transition-colors"
             >

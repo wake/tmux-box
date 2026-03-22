@@ -26,7 +26,7 @@ export function useSessionEventWs(wsBase: string, daemonBase: string) {
             fetchSessions(daemonBase).then(() => {
               const sess = useSessionStore.getState().sessions.find((s) => s.name === event.session)
               if (sess && sess.mode !== 'term') {
-                fetchHistory(daemonBase, sess.id).then((msgs) => {
+                fetchHistory(daemonBase, sess.code).then((msgs) => {
                   useStreamStore.getState().loadHistory(event.session, msgs)
                 }).catch(() => { /* history fetch failed — non-critical */ })
               } else {

@@ -50,7 +50,7 @@ func newConfigTestServer(t *testing.T) (*httptest.Server, string) {
 		},
 	}
 
-	s := server.New(cfg, db, tmux.NewFakeExecutor(), cfgPath)
+	s := server.New(cfg, db, nil, tmux.NewFakeExecutor(), cfgPath)
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
 

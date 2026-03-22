@@ -6,30 +6,65 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 
 	"github.com/wake/tmux-box/internal/history"
+	"github.com/wake/tmux-box/internal/module/session"
 )
 
 const maxJSONLBytes = 2 * 1024 * 1024 // 2MB
 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
-	idStr := r.PathValue("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
+	code := r.PathValue("code")
+	tmuxID, err := session.DecodeSessionID(code)
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		http.Error(w, "invalid session code", http.StatusBadRequest)
 		return
 	}
 
-	sess, err := s.store.GetSession(id)
-	if err != nil {
-		http.Error(w, "session not found", http.StatusNotFound)
-		return
+	// Get cc_session_id and cwd: prefer MetaStore, fall back to legacy store.
+	var ccSessionID, cwd string
+	if s.meta != nil {
+		meta, err := s.meta.GetMeta(tmuxID)
+		if err != nil {
+			http.Error(w, "meta lookup error", http.StatusInternalServerError)
+			return
+		}
+		if meta == nil {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		ccSessionID = meta.CCSessionID
+		cwd = meta.Cwd
+	} else {
+		// Legacy fallback: resolve tmuxID → session name → legacy store
+		tmuxSessions, err := s.tmux.ListSessions()
+		if err != nil {
+			http.Error(w, "failed to list tmux sessions", http.StatusInternalServerError)
+			return
+		}
+		var sessionName string
+		for _, ts := range tmuxSessions {
+			if ts.ID == tmuxID {
+				sessionName = ts.Name
+				break
+			}
+		}
+		if sessionName == "" {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		sess, err := s.store.GetSessionByName(sessionName)
+		if err != nil {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		ccSessionID = sess.CCSessionID
+		cwd = sess.Cwd
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 
-	if sess.CCSessionID == "" {
+	if ccSessionID == "" {
 		json.NewEncoder(w).Encode([]interface{}{})
 		return
 	}
@@ -39,8 +74,8 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode([]interface{}{})
 		return
 	}
-	projectHash := history.CCProjectPath(sess.Cwd)
-	jsonlPath := filepath.Join(home, ".claude", "projects", projectHash, sess.CCSessionID+".jsonl")
+	projectHash := history.CCProjectPath(cwd)
+	jsonlPath := filepath.Join(home, ".claude", "projects", projectHash, ccSessionID+".jsonl")
 
 	f, err := os.Open(jsonlPath)
 	if err != nil {

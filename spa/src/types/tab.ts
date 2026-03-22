@@ -60,6 +60,7 @@ export interface CreateSessionTabOpts {
   label: string
   hostId: string
   sessionName: string
+  sessionCode: string
   viewMode?: 'terminal' | 'stream'
   icon?: string
 }
@@ -80,7 +81,7 @@ export function createSessionTab(opts: CreateSessionTabOpts): Tab {
     icon: opts.icon ?? 'TerminalWindow',
     hostId: opts.hostId,
     viewMode: opts.viewMode ?? 'terminal',
-    data: { sessionName: opts.sessionName },
+    data: { sessionName: opts.sessionName, sessionCode: opts.sessionCode },
     pinned: false,
     locked: false,
   }

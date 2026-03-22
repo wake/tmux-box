@@ -66,6 +66,9 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
+// DB returns the underlying *sql.DB for migration purposes.
+func (s *Store) DB() *sql.DB { return s.db }
+
 func migrate(db *sql.DB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS sessions (

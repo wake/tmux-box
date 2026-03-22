@@ -17,7 +17,7 @@ func TestBuildTerminalRelayDefault(t *testing.T) {
 	db, _ := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	defer db.Close()
 
-	srv := server.New(config.Config{}, db, fakeTmux, "")
+	srv := server.New(config.Config{}, db, nil, fakeTmux, "")
 
 	cmd, args, cleanup, err := srv.BuildTerminalRelay("myapp")
 	if err != nil {
@@ -46,7 +46,7 @@ func TestBuildTerminalRelayTerminalFirst(t *testing.T) {
 	cfg := config.Config{
 		Terminal: config.TerminalConfig{SizingMode: "terminal-first"},
 	}
-	srv := server.New(cfg, db, fakeTmux, "")
+	srv := server.New(cfg, db, nil, fakeTmux, "")
 
 	_, args, cleanup, err := srv.BuildTerminalRelay("myapp")
 	if err != nil {
@@ -76,7 +76,7 @@ func TestBuildTerminalRelayMinimalFirst(t *testing.T) {
 	cfg := config.Config{
 		Terminal: config.TerminalConfig{SizingMode: "minimal-first"},
 	}
-	srv := server.New(cfg, db, fakeTmux, "")
+	srv := server.New(cfg, db, nil, fakeTmux, "")
 
 	_, args, cleanup, err := srv.BuildTerminalRelay("myapp")
 	if err != nil {
@@ -98,7 +98,7 @@ func TestRestoreWindowSizingWithSmallest(t *testing.T) {
 	db, _ := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	defer db.Close()
 
-	srv := server.New(config.Config{}, db, fakeTmux, "")
+	srv := server.New(config.Config{}, db, nil, fakeTmux, "")
 	srv.RestoreWindowSizing("test:0", "smallest")
 
 	calls := fakeTmux.SetWindowOptionCalls()
@@ -116,7 +116,7 @@ func TestRestoreWindowSizingCallsBothMethods(t *testing.T) {
 	}
 	defer db.Close()
 
-	srv := server.New(config.Config{}, db, fakeTmux, "")
+	srv := server.New(config.Config{}, db, nil, fakeTmux, "")
 	srv.RestoreWindowSizing("test:0", "latest")
 
 	if len(fakeTmux.AutoResizeCalls()) != 1 || fakeTmux.AutoResizeCalls()[0] != "test:0" {

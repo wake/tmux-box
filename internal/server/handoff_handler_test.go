@@ -11,13 +11,15 @@ import (
 	"time"
 
 	"github.com/wake/tmux-box/internal/config"
+	"github.com/wake/tmux-box/internal/module/session"
 	"github.com/wake/tmux-box/internal/server"
 	"github.com/wake/tmux-box/internal/store"
 	"github.com/wake/tmux-box/internal/tmux"
 )
 
 // newHandoffTestServer creates a test server with preset config suitable for handoff tests.
-func newHandoffTestServer(t *testing.T) (*httptest.Server, *store.Store) {
+// It registers "test-session" in FakeExecutor with tmux ID "$0" and returns the encoded code.
+func newHandoffTestServer(t *testing.T) (*httptest.Server, *store.MetaStore, *tmux.FakeExecutor, string) {
 	t.Helper()
 	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -25,10 +27,18 @@ func newHandoffTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	}
 	t.Cleanup(func() { db.Close() })
 
+	meta, err := store.OpenMeta(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { meta.Close() })
+
 	fakeTmux := tmux.NewFakeExecutor()
+	// Register session in tmux (handoff now looks up via tmux, not legacy store)
+	fakeTmux.AddSession("test-session", "/tmp")
 	// Register at TmuxTarget format (session:window) to match handoff code.
 	fakeTmux.SetPaneCommand("test-session:0", "claude") // CC running (idle)
-	fakeTmux.SetPaneContent("test-session:0", "  Session ID: deadbeef-1234-5678-9abc-def012345678\n❯ ")
+	fakeTmux.SetPaneContent("test-session:0", "  Session ID: deadbeef-1234-5678-9abc-def012345678\n\u276f ")
 
 	cfg := config.Config{
 		Port: 7860,
@@ -48,30 +58,25 @@ func newHandoffTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 		},
 	}
 
-	s := server.New(cfg, db, fakeTmux, "")
+	s := server.New(cfg, db, meta, fakeTmux, "")
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
 
-	return srv, db
-}
-
-func TestHandoffHappyPath(t *testing.T) {
-	srv, db := newHandoffTestServer(t)
-
-	// Create a session in the DB
-	_, err := db.CreateSession(store.Session{
-		Name:       "test-session",
-		TmuxTarget: "test-session:0",
-		Cwd:        "/tmp",
-		Mode:       "term",
-	})
+	// Encode $0 → session code
+	code, err := session.EncodeSessionID("$0")
 	if err != nil {
 		t.Fatal(err)
 	}
 
+	return srv, meta, fakeTmux, code
+}
+
+func TestHandoffHappyPath(t *testing.T) {
+	srv, _, _, code := newHandoffTestServer(t)
+
 	// POST handoff
 	body, _ := json.Marshal(map[string]string{"mode": "stream", "preset": "cc"})
-	resp, err := http.Post(srv.URL+"/api/sessions/1/handoff", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(srv.URL+"/api/sessions/"+code+"/handoff", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,20 +101,10 @@ func TestHandoffHappyPath(t *testing.T) {
 }
 
 func TestHandoffPresetNotFound(t *testing.T) {
-	srv, db := newHandoffTestServer(t)
-
-	_, err := db.CreateSession(store.Session{
-		Name:       "test-session",
-		TmuxTarget: "test-session:0",
-		Cwd:        "/tmp",
-		Mode:       "term",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	srv, _, _, code := newHandoffTestServer(t)
 
 	body, _ := json.Marshal(map[string]string{"mode": "stream", "preset": "nonexistent"})
-	resp, err := http.Post(srv.URL+"/api/sessions/1/handoff", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(srv.URL+"/api/sessions/"+code+"/handoff", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,10 +116,12 @@ func TestHandoffPresetNotFound(t *testing.T) {
 }
 
 func TestHandoffSessionNotFound(t *testing.T) {
-	srv, _ := newHandoffTestServer(t)
+	srv, _, _, _ := newHandoffTestServer(t)
 
+	// Use a valid code that decodes to a tmux ID not in FakeExecutor
+	code, _ := session.EncodeSessionID("$999")
 	body, _ := json.Marshal(map[string]string{"mode": "stream", "preset": "cc"})
-	resp, err := http.Post(srv.URL+"/api/sessions/999/handoff", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(srv.URL+"/api/sessions/"+code+"/handoff", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,21 +133,11 @@ func TestHandoffSessionNotFound(t *testing.T) {
 }
 
 func TestHandoffConflict(t *testing.T) {
-	srv, db := newHandoffTestServer(t)
-
-	_, err := db.CreateSession(store.Session{
-		Name:       "test-session",
-		TmuxTarget: "test-session:0",
-		Cwd:        "/tmp",
-		Mode:       "term",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	srv, _, _, code := newHandoffTestServer(t)
 
 	// First handoff — should get 202
 	body, _ := json.Marshal(map[string]string{"mode": "stream", "preset": "cc"})
-	resp1, err := http.Post(srv.URL+"/api/sessions/1/handoff", "application/json", bytes.NewReader(body))
+	resp1, err := http.Post(srv.URL+"/api/sessions/"+code+"/handoff", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +148,7 @@ func TestHandoffConflict(t *testing.T) {
 
 	// Second handoff immediately — should get 409 (lock held by async goroutine)
 	body2, _ := json.Marshal(map[string]string{"mode": "stream", "preset": "cc"})
-	resp2, err := http.Post(srv.URL+"/api/sessions/1/handoff", "application/json", bytes.NewReader(body2))
+	resp2, err := http.Post(srv.URL+"/api/sessions/"+code+"/handoff", "application/json", bytes.NewReader(body2))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,20 +159,10 @@ func TestHandoffConflict(t *testing.T) {
 }
 
 func TestHandoffInvalidMode(t *testing.T) {
-	srv, db := newHandoffTestServer(t)
-
-	_, err := db.CreateSession(store.Session{
-		Name:       "test-session",
-		TmuxTarget: "test-session:0",
-		Cwd:        "/tmp",
-		Mode:       "term",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	srv, _, _, code := newHandoffTestServer(t)
 
 	body, _ := json.Marshal(map[string]string{"mode": "invalid", "preset": "cc"})
-	resp, err := http.Post(srv.URL+"/api/sessions/1/handoff", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(srv.URL+"/api/sessions/"+code+"/handoff", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,10 +173,11 @@ func TestHandoffInvalidMode(t *testing.T) {
 	}
 }
 
-func TestHandoffInvalidID(t *testing.T) {
-	srv, _ := newHandoffTestServer(t)
+func TestHandoffInvalidCode(t *testing.T) {
+	srv, _, _, _ := newHandoffTestServer(t)
 
 	body, _ := json.Marshal(map[string]string{"mode": "stream", "preset": "cc"})
+	// "abc" is not a valid 6-char base36 code
 	resp, err := http.Post(srv.URL+"/api/sessions/abc/handoff", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -212,9 +190,9 @@ func TestHandoffInvalidID(t *testing.T) {
 }
 
 func TestHandoffInvalidBody(t *testing.T) {
-	srv, _ := newHandoffTestServer(t)
+	srv, _, _, code := newHandoffTestServer(t)
 
-	resp, err := http.Post(srv.URL+"/api/sessions/1/handoff", "application/json", bytes.NewReader([]byte("not json")))
+	resp, err := http.Post(srv.URL+"/api/sessions/"+code+"/handoff", "application/json", bytes.NewReader([]byte("not json")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,22 +204,19 @@ func TestHandoffInvalidBody(t *testing.T) {
 }
 
 func TestHandoffTermMode(t *testing.T) {
-	srv, db := newHandoffTestServer(t)
+	srv, meta, _, code := newHandoffTestServer(t)
 
-	id, err := db.CreateSession(store.Session{
-		Name: "test-session", TmuxTarget: "test-session:0", Cwd: "/tmp", Mode: "stream",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Set cc_session_id so handoff-to-term has something to work with
+	// Set cc_session_id in MetaStore so handoff-to-term has something to work with
 	ccID := "01abc234-5678-9def-0123-456789abcdef"
-	db.UpdateSession(id, store.SessionUpdate{CCSessionID: &ccID})
+	meta.SetMeta("$0", store.SessionMeta{
+		TmuxID:      "$0",
+		Mode:        "stream",
+		CCSessionID: ccID,
+	})
 
 	// POST handoff with mode=term (no preset)
 	body, _ := json.Marshal(map[string]string{"mode": "term"})
-	resp, err := http.Post(srv.URL+"/api/sessions/1/handoff", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(srv.URL+"/api/sessions/"+code+"/handoff", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,18 +236,17 @@ func TestHandoffTermMode(t *testing.T) {
 }
 
 func TestHandoffTermModeNoPresetRequired(t *testing.T) {
-	srv, db := newHandoffTestServer(t)
+	srv, meta, _, code := newHandoffTestServer(t)
 
-	_, err := db.CreateSession(store.Session{
-		Name: "test-session", TmuxTarget: "test-session:0", Cwd: "/tmp", Mode: "stream",
+	meta.SetMeta("$0", store.SessionMeta{
+		TmuxID:      "$0",
+		Mode:        "stream",
+		CCSessionID: "some-session-id",
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	// mode=term without preset should still be accepted (not 400)
 	body, _ := json.Marshal(map[string]string{"mode": "term"})
-	resp, err := http.Post(srv.URL+"/api/sessions/1/handoff", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(srv.URL+"/api/sessions/"+code+"/handoff", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,9 +258,8 @@ func TestHandoffTermModeNoPresetRequired(t *testing.T) {
 }
 
 // TestHandoffUsesTmuxTarget verifies that runHandoff sends all tmux commands
-// (detect, send-keys, capture-pane) to sess.TmuxTarget ("session:0" format)
-// rather than the bare sess.Name. Using bare name causes tmux to resolve
-// ambiguously and potentially target the wrong pane.
+// (detect, send-keys, capture-pane) to TmuxTarget ("session:0" format)
+// rather than the bare session name.
 func TestHandoffUsesTmuxTarget(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -294,11 +267,19 @@ func TestHandoffUsesTmuxTarget(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
+	meta, err := store.OpenMeta(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { meta.Close() })
+
 	fakeTmux := tmux.NewFakeExecutor()
+	// Register session in tmux
+	fakeTmux.AddSession("my-session", "/tmp")
 	// Register pane data at TmuxTarget "my-session:0" — NOT bare "my-session".
 	// If handoff code uses bare Name, detect/capture will fail (map miss).
 	fakeTmux.SetPaneCommand("my-session:0", "claude")
-	fakeTmux.SetPaneContent("my-session:0", "  Session ID: deadbeef-1234\n  Cwd: /tmp/test\n❯ ")
+	fakeTmux.SetPaneContent("my-session:0", "  Session ID: deadbeef-1234\n  Cwd: /tmp/test\n\u276f ")
 
 	cfg := config.Config{
 		Port: 7860,
@@ -314,23 +295,15 @@ func TestHandoffUsesTmuxTarget(t *testing.T) {
 		},
 	}
 
-	s := server.New(cfg, db, fakeTmux, "")
+	s := server.New(cfg, db, meta, fakeTmux, "")
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
 
-	_, err = db.CreateSession(store.Session{
-		Name:       "my-session",
-		TmuxTarget: "my-session:0",
-		Cwd:        "/tmp",
-		Mode:       "term",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	code, _ := session.EncodeSessionID("$0")
 
 	// Trigger handoff
 	body, _ := json.Marshal(map[string]string{"mode": "stream", "preset": "cc"})
-	resp, err := http.Post(srv.URL+"/api/sessions/1/handoff", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(srv.URL+"/api/sessions/"+code+"/handoff", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +315,7 @@ func TestHandoffUsesTmuxTarget(t *testing.T) {
 	// Wait for async handoff goroutine to progress past detect + send-keys steps.
 	// It will eventually fail waiting for relay (expected), but the tmux calls
 	// should have been recorded by then.
-	time.Sleep(5 * time.Second)
+	time.Sleep(8 * time.Second)
 
 	// Verify SendKeys calls used TmuxTarget, not bare Name
 	for _, call := range fakeTmux.KeysSent() {
@@ -384,9 +357,16 @@ func TestHandoffResizesPaneTooSmall(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
+	meta, err := store.OpenMeta(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { meta.Close() })
+
 	fakeTmux := tmux.NewFakeExecutor()
+	fakeTmux.AddSession("small-session", "/tmp")
 	fakeTmux.SetPaneCommand("small-session:0", "claude")
-	fakeTmux.SetPaneContent("small-session:0", "  Session ID: deadbeef-1234\n  Cwd: /tmp/test\n❯ ")
+	fakeTmux.SetPaneContent("small-session:0", "  Session ID: deadbeef-1234\n  Cwd: /tmp/test\n\u276f ")
 	// Simulate a tiny pane (like when xterm.js container is display:none)
 	fakeTmux.SetPaneSize("small-session:0", 10, 5)
 
@@ -404,22 +384,14 @@ func TestHandoffResizesPaneTooSmall(t *testing.T) {
 		},
 	}
 
-	s := server.New(cfg, db, fakeTmux, "")
+	s := server.New(cfg, db, meta, fakeTmux, "")
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
 
-	_, err = db.CreateSession(store.Session{
-		Name:       "small-session",
-		TmuxTarget: "small-session:0",
-		Cwd:        "/tmp",
-		Mode:       "term",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	code, _ := session.EncodeSessionID("$0")
 
 	body, _ := json.Marshal(map[string]string{"mode": "stream", "preset": "cc"})
-	resp, err := http.Post(srv.URL+"/api/sessions/1/handoff", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(srv.URL+"/api/sessions/"+code+"/handoff", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -428,7 +400,7 @@ func TestHandoffResizesPaneTooSmall(t *testing.T) {
 		t.Fatalf("want 202, got %d", resp.StatusCode)
 	}
 
-	time.Sleep(5 * time.Second)
+	time.Sleep(8 * time.Second)
 
 	// Verify that ResizeWindow was called to enlarge the pane
 	sz, ok := fakeTmux.PaneSizeOf("small-session:0")
@@ -462,16 +434,23 @@ func TestHandoffResizesPaneTooSmall(t *testing.T) {
 	}
 }
 
-func TestHandoffSendsEscapeAndCuBeforeDetect(t *testing.T) {
+func TestHandoffSendsEscapeAndCcBeforeDetect(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
 
+	meta, err := store.OpenMeta(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { meta.Close() })
+
 	fakeTmux := tmux.NewFakeExecutor()
+	fakeTmux.AddSession("test-session", "/tmp")
 	fakeTmux.SetPaneCommand("test-session:0", "claude")
-	fakeTmux.SetPaneContent("test-session:0", "  Session ID: deadbeef-1234\n❯ ")
+	fakeTmux.SetPaneContent("test-session:0", "  Session ID: deadbeef-1234\n\u276f ")
 
 	cfg := config.Config{
 		Port: 7860,
@@ -486,22 +465,14 @@ func TestHandoffSendsEscapeAndCuBeforeDetect(t *testing.T) {
 		},
 	}
 
-	s := server.New(cfg, db, fakeTmux, "")
+	s := server.New(cfg, db, meta, fakeTmux, "")
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
 
-	_, err = db.CreateSession(store.Session{
-		Name:       "test-session",
-		TmuxTarget: "test-session:0",
-		Cwd:        "/tmp",
-		Mode:       "term",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	code, _ := session.EncodeSessionID("$0")
 
 	body, _ := json.Marshal(map[string]string{"mode": "stream", "preset": "cc"})
-	resp, err := http.Post(srv.URL+"/api/sessions/1/handoff", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(srv.URL+"/api/sessions/"+code+"/handoff", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -510,9 +481,9 @@ func TestHandoffSendsEscapeAndCuBeforeDetect(t *testing.T) {
 		t.Fatalf("want 202, got %d", resp.StatusCode)
 	}
 
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(2 * time.Second)
 
-	// Verify the first three raw key calls: -X cancel (exit copy-mode), Escape, C-u
+	// Verify the first three raw key calls: -X cancel (exit copy-mode), Escape, C-c
 	rawKeys := fakeTmux.RawKeysSent()
 	if len(rawKeys) < 3 {
 		t.Fatalf("expected at least 3 raw key calls, got %d", len(rawKeys))
@@ -523,27 +494,17 @@ func TestHandoffSendsEscapeAndCuBeforeDetect(t *testing.T) {
 	if len(rawKeys[1].Keys) == 0 || rawKeys[1].Keys[0] != "Escape" {
 		t.Errorf("second raw key should be Escape, got %v", rawKeys[1].Keys)
 	}
-	if len(rawKeys[2].Keys) == 0 || rawKeys[2].Keys[0] != "C-u" {
-		t.Errorf("third raw key should be C-u, got %v", rawKeys[2].Keys)
+	if len(rawKeys[2].Keys) == 0 || rawKeys[2].Keys[0] != "C-c" {
+		t.Errorf("third raw key should be C-c, got %v", rawKeys[2].Keys)
 	}
 }
 
 func TestHandoffJSONLPreset(t *testing.T) {
-	srv, db := newHandoffTestServer(t)
-
-	_, err := db.CreateSession(store.Session{
-		Name:       "test-session",
-		TmuxTarget: "test-session:0",
-		Cwd:        "/tmp",
-		Mode:       "term",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	srv, _, _, code := newHandoffTestServer(t)
 
 	// Use jsonl mode with jsonl preset
 	body, _ := json.Marshal(map[string]string{"mode": "jsonl", "preset": "cc-jsonl"})
-	resp, err := http.Post(srv.URL+"/api/sessions/1/handoff", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(srv.URL+"/api/sessions/"+code+"/handoff", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}

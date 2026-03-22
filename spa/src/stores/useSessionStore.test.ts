@@ -5,7 +5,7 @@ import { useSessionStore } from './useSessionStore'
 
 vi.mock('../lib/api', () => ({
   listSessions: vi.fn().mockResolvedValue([
-    { id: 1, name: 'test', tmux_target: 'test:0', cwd: '/tmp', mode: 'term', group_id: 0, sort_order: 0 },
+    { code: 'abc123', name: 'test', cwd: '/tmp', mode: 'term', cc_session_id: '', cc_model: '', has_relay: false },
   ]),
 }))
 
@@ -24,15 +24,15 @@ describe('useSessionStore', () => {
 
   it('sets active session', () => {
     const { result } = renderHook(() => useSessionStore())
-    act(() => { result.current.setActive(1) })
-    expect(result.current.activeId).toBe(1)
+    act(() => { result.current.setActive('abc123') })
+    expect(result.current.activeId).toBe('abc123')
   })
 
   it('persists to localStorage', () => {
     const { result } = renderHook(() => useSessionStore())
-    act(() => { result.current.setActive(42) })
+    act(() => { result.current.setActive('abc123') })
     // Zustand persist middleware writes to localStorage
     const stored = JSON.parse(localStorage.getItem('tbox-sessions') || '{}')
-    expect(stored.state?.activeId).toBe(42)
+    expect(stored.state?.activeId).toBe('abc123')
   })
 })

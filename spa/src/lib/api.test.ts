@@ -3,8 +3,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { listSessions, createSession, deleteSession, switchMode, handoff, type Session } from './api'
 
 const mockSession: Session = {
-  id: 1, uid: 'testuid1', name: 'test', tmux_target: 'test:0',
-  cwd: '/tmp', mode: 'term', group_id: 0, sort_order: 0, cc_session_id: '',
+  code: 'abc123', name: 'test',
+  cwd: '/tmp', mode: 'term', cc_session_id: '',
   cc_model: '', has_relay: false,
 }
 
@@ -44,9 +44,9 @@ describe('deleteSession', () => {
     const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(null, { status: 204 })
     )
-    await deleteSession('http://localhost:7860', 1)
+    await deleteSession('http://localhost:7860', 'abc123')
     expect(spy).toHaveBeenCalledWith(
-      'http://localhost:7860/api/sessions/1',
+      'http://localhost:7860/api/sessions/abc123',
       expect.objectContaining({ method: 'DELETE' })
     )
   })
@@ -58,10 +58,10 @@ describe('switchMode', () => {
     const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(JSON.stringify(updated), { status: 200 })
     )
-    const result = await switchMode('http://localhost:7860', 1, 'stream')
+    const result = await switchMode('http://localhost:7860', 'abc123', 'stream')
     expect(result.mode).toBe('stream')
     expect(spy).toHaveBeenCalledWith(
-      'http://localhost:7860/api/sessions/1/mode',
+      'http://localhost:7860/api/sessions/abc123/mode',
       expect.objectContaining({
         method: 'POST',
         headers: expect.objectContaining({ 'Content-Type': 'application/json' }),
@@ -74,7 +74,7 @@ describe('switchMode', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response('error', { status: 400, statusText: 'Bad Request' })
     )
-    await expect(switchMode('http://localhost:7860', 1, 'invalid')).rejects.toThrow('400')
+    await expect(switchMode('http://localhost:7860', 'abc123', 'invalid')).rejects.toThrow('400')
   })
 })
 
@@ -83,10 +83,10 @@ describe('handoff', () => {
     const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(JSON.stringify({ handoff_id: 'abc123' }), { status: 202 })
     )
-    const result = await handoff('http://localhost:7860', 1, 'stream', 'cc')
+    const result = await handoff('http://localhost:7860', 'abc123', 'stream', 'cc')
     expect(result.handoff_id).toBe('abc123')
     expect(spy).toHaveBeenCalledWith(
-      'http://localhost:7860/api/sessions/1/handoff',
+      'http://localhost:7860/api/sessions/abc123/handoff',
       expect.objectContaining({
         method: 'POST',
         body: JSON.stringify({ mode: 'stream', preset: 'cc' }),
@@ -98,9 +98,9 @@ describe('handoff', () => {
     const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(JSON.stringify({ handoff_id: 'def456' }), { status: 202 })
     )
-    await handoff('http://localhost:7860', 1, 'term')
+    await handoff('http://localhost:7860', 'abc123', 'term')
     expect(spy).toHaveBeenCalledWith(
-      'http://localhost:7860/api/sessions/1/handoff',
+      'http://localhost:7860/api/sessions/abc123/handoff',
       expect.objectContaining({
         body: JSON.stringify({ mode: 'term' }),
       })
@@ -111,7 +111,7 @@ describe('handoff', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response('preset not found', { status: 400 })
     )
-    await expect(handoff('http://localhost:7860', 1, 'stream', 'bad'))
+    await expect(handoff('http://localhost:7860', 'abc123', 'stream', 'bad'))
       .rejects.toThrow('handoff failed: 400 preset not found')
   })
 
@@ -119,7 +119,7 @@ describe('handoff', () => {
     const badResponse = new Response(null, { status: 500 })
     vi.spyOn(badResponse, 'text').mockRejectedValue(new Error('body consumed'))
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(badResponse)
-    await expect(handoff('http://localhost:7860', 1, 'stream'))
+    await expect(handoff('http://localhost:7860', 'abc123', 'stream'))
       .rejects.toThrow('handoff failed: 500')
   })
 })

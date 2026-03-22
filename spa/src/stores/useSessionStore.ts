@@ -5,9 +5,9 @@ import { type Session, listSessions } from '../lib/api'
 
 interface SessionState {
   sessions: Session[]
-  activeId: number | null
+  activeId: string | null
   fetch: (base: string) => Promise<void>
-  setActive: (id: number | null) => void
+  setActive: (code: string | null) => void
 }
 
 export const useSessionStore = create<SessionState>()(
@@ -19,7 +19,7 @@ export const useSessionStore = create<SessionState>()(
         const sessions = await listSessions(base)
         set({ sessions })
       },
-      setActive: (id) => set({ activeId: id }),
+      setActive: (code) => set({ activeId: code }),
     }),
     {
       name: 'tbox-sessions',

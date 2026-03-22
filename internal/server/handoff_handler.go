@@ -9,11 +9,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"time"
 
 	"github.com/wake/tmux-box/internal/detect"
+	"github.com/wake/tmux-box/internal/module/session"
 	"github.com/wake/tmux-box/internal/store"
 )
 
@@ -52,7 +52,16 @@ type handoffRequest struct {
 	Preset string `json:"preset"`
 }
 
-// handleHandoff handles POST /api/sessions/{id}/handoff.
+// handoffSession holds the minimal session info needed by runHandoff / runHandoffToTerm.
+type handoffSession struct {
+	Name        string
+	TmuxID      string
+	TmuxTarget  string
+	CCSessionID string
+	Mode        string
+}
+
+// handleHandoff handles POST /api/sessions/{code}/handoff.
 // It validates the request, acquires a per-session lock, returns 202 immediately,
 // then orchestrates the mode switch asynchronously in a goroutine.
 func (s *Server) handleHandoff(w http.ResponseWriter, r *http.Request) {
@@ -61,10 +70,12 @@ func (s *Server) handleHandoff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	idStr := r.PathValue("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
+	code := r.PathValue("code")
+
+	// Decode session code → tmux ID
+	tmuxID, err := session.DecodeSessionID(code)
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		http.Error(w, "invalid session code", http.StatusBadRequest)
 		return
 	}
 
@@ -79,11 +90,34 @@ func (s *Server) handleHandoff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Lookup session
-	sess, err := s.store.GetSession(id)
+	// Lookup session from tmux
+	tmuxSessions, err := s.tmux.ListSessions()
 	if err != nil {
+		http.Error(w, "tmux error", http.StatusInternalServerError)
+		return
+	}
+	var sess *handoffSession
+	for _, ts := range tmuxSessions {
+		if ts.ID == tmuxID {
+			sess = &handoffSession{
+				Name:       ts.Name,
+				TmuxID:     ts.ID,
+				TmuxTarget: ts.Name + ":0",
+			}
+			break
+		}
+	}
+	if sess == nil {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
+	}
+
+	// Merge meta from MetaStore (for CCSessionID, Mode)
+	if s.meta != nil {
+		if meta, err := s.meta.GetMeta(tmuxID); err == nil && meta != nil {
+			sess.CCSessionID = meta.CCSessionID
+			sess.Mode = meta.Mode
+		}
 	}
 
 	// Snapshot config under read lock
@@ -128,9 +162,9 @@ func (s *Server) handleHandoff(w http.ResponseWriter, r *http.Request) {
 
 	// Run async handoff in goroutine
 	if req.Mode == "term" {
-		go s.runHandoffToTerm(sess, handoffID)
+		go s.runHandoffToTerm(*sess, handoffID)
 	} else {
-		go s.runHandoff(sess, req.Mode, command, handoffID, token, port, bind)
+		go s.runHandoff(*sess, req.Mode, command, handoffID, token, port, bind)
 	}
 }
 
@@ -142,8 +176,8 @@ func (s *Server) handleHandoff(w http.ResponseWriter, r *http.Request) {
 //  5. Exit CC gracefully
 //  6. Launch tbox relay with --resume
 //  7. Wait for relay to connect back via cli-bridge
-//  8. Update DB (mode + cc_session_id + cwd) and broadcast success
-func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token string, port int, bind string) {
+//  8. Update MetaStore (mode + cc_session_id + cwd) and broadcast success
+func (s *Server) runHandoff(sess handoffSession, mode, command, handoffID, token string, port int, bind string) {
 	defer s.handoffLocks.Unlock(sess.Name)
 
 	broadcast := func(value string) {
@@ -153,9 +187,6 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 	// Use TmuxTarget (session:window format, e.g. "myapp:0") for all tmux
 	// Executor calls to prevent ambiguous target resolution.
 	target := sess.TmuxTarget
-	if target == "" {
-		target = sess.Name + ":0"
-	}
 
 	// Step 1: If relay already connected, shut it down
 	if s.bridge.HasRelay(sess.Name) {
@@ -341,22 +372,31 @@ func (s *Server) runHandoff(sess store.Session, mode, command, handoffID, token 
 		return
 	}
 
-	// Step 8: Update DB (mode + cc_session_id + cwd) and broadcast success
-	ccID := statusInfo.SessionID
-	update := store.SessionUpdate{Mode: &mode, CCSessionID: &ccID}
-	if statusInfo.Cwd != "" {
-		update.Cwd = &statusInfo.Cwd
-	}
-	if err := s.store.UpdateSession(sess.ID, update); err != nil {
-		broadcast("failed:db update: " + err.Error())
-		return
+	// Step 8: Update MetaStore (mode + cc_session_id + cwd) and broadcast success
+	if s.meta != nil {
+		ccID := statusInfo.SessionID
+		metaUpdate := store.MetaUpdate{Mode: &mode, CCSessionID: &ccID}
+		if statusInfo.Cwd != "" {
+			metaUpdate.Cwd = &statusInfo.Cwd
+		}
+		// Ensure meta record exists before partial update
+		s.meta.SetMeta(sess.TmuxID, store.SessionMeta{
+			TmuxID:      sess.TmuxID,
+			Mode:        mode,
+			CCSessionID: ccID,
+			Cwd:         statusInfo.Cwd,
+		})
+		if err := s.meta.UpdateMeta(sess.TmuxID, metaUpdate); err != nil {
+			broadcast("failed:meta update: " + err.Error())
+			return
+		}
 	}
 	broadcast("connected")
 }
 
 // runHandoffToTerm handles the handoff from stream back to interactive terminal mode.
 // It shuts down the relay, waits for shell, then launches claude --resume.
-func (s *Server) runHandoffToTerm(sess store.Session, handoffID string) {
+func (s *Server) runHandoffToTerm(sess handoffSession, handoffID string) {
 	defer s.handoffLocks.Unlock(sess.Name)
 
 	broadcast := func(value string) {
@@ -365,34 +405,36 @@ func (s *Server) runHandoffToTerm(sess store.Session, handoffID string) {
 
 	// Use TmuxTarget for all tmux operations (same rationale as runHandoff).
 	target := sess.TmuxTarget
-	if target == "" {
-		target = sess.Name + ":0"
-	}
 
-	// Step 1: Get session ID from DB
-	current, err := s.store.GetSession(sess.ID)
-	if err != nil {
-		broadcast("failed:db lookup error: " + err.Error())
-		return
+	// Step 1: Get CCSessionID from MetaStore
+	ccSessionID := sess.CCSessionID
+	origMode := sess.Mode
+	if s.meta != nil {
+		if meta, err := s.meta.GetMeta(sess.TmuxID); err == nil && meta != nil {
+			ccSessionID = meta.CCSessionID
+			origMode = meta.Mode
+		}
 	}
-	if current.CCSessionID == "" {
+	if ccSessionID == "" {
 		broadcast("failed:no CC session ID stored")
 		return
 	}
-	sessionID := current.CCSessionID
 
 	// Pre-update mode to "term" before shutting down relay.
 	// This prevents revertModeOnRelayDisconnect from firing a spurious
 	// "failed:relay disconnected" event during an intentional handoff.
 	// If later steps fail, the deferred rollback restores the original mode.
-	origMode := current.Mode
 	termMode := "term"
-	if err := s.store.UpdateSession(sess.ID, store.SessionUpdate{Mode: &termMode}); err != nil {
-		broadcast("failed:db pre-update error: " + err.Error())
-		return
+	if s.meta != nil {
+		if err := s.meta.UpdateMeta(sess.TmuxID, store.MetaUpdate{Mode: &termMode}); err != nil {
+			broadcast("failed:meta pre-update error: " + err.Error())
+			return
+		}
 	}
 	rollbackMode := func() {
-		s.store.UpdateSession(sess.ID, store.SessionUpdate{Mode: &origMode})
+		if s.meta != nil {
+			s.meta.UpdateMeta(sess.TmuxID, store.MetaUpdate{Mode: &origMode})
+		}
 	}
 
 	// Shut down relay
@@ -430,7 +472,7 @@ func (s *Server) runHandoffToTerm(sess store.Session, handoffID string) {
 
 	// Launch interactive CC with --resume
 	broadcast("launching-cc")
-	resumeCmd := fmt.Sprintf("claude --resume %s", sessionID)
+	resumeCmd := fmt.Sprintf("claude --resume %s", ccSessionID)
 	if err := s.tmux.SendKeys(target, resumeCmd); err != nil {
 		rollbackMode()
 		broadcast("failed:send-keys error: " + err.Error())
@@ -454,14 +496,14 @@ func (s *Server) runHandoffToTerm(sess store.Session, handoffID string) {
 	}
 
 	// Clear cc_session_id (mode already set to "term" above).
-	// Cwd is intentionally kept — it still represents the CC project directory
-	// and is needed by the history handler if the user later handoffs back to stream.
 	emptyID := ""
-	if err := s.store.UpdateSession(sess.ID, store.SessionUpdate{
-		CCSessionID: &emptyID,
-	}); err != nil {
-		broadcast("failed:db update error: " + err.Error())
-		return
+	if s.meta != nil {
+		if err := s.meta.UpdateMeta(sess.TmuxID, store.MetaUpdate{
+			CCSessionID: &emptyID,
+		}); err != nil {
+			broadcast("failed:meta update error: " + err.Error())
+			return
+		}
 	}
 	broadcast("connected")
 }
@@ -470,6 +512,29 @@ func (s *Server) runHandoffToTerm(sess store.Session, handoffID string) {
 // disconnects. This prevents sessions from being stuck in stream mode after
 // a failed or interrupted handoff.
 func (s *Server) revertModeOnRelayDisconnect(sessionName string) {
+	// Try MetaStore first
+	if s.meta != nil {
+		tmuxSessions, err := s.tmux.ListSessions()
+		if err != nil {
+			return
+		}
+		for _, ts := range tmuxSessions {
+			if ts.Name == sessionName {
+				meta, err := s.meta.GetMeta(ts.ID)
+				if err != nil || meta == nil {
+					return
+				}
+				if meta.Mode != "term" {
+					termMode := "term"
+					s.meta.UpdateMeta(ts.ID, store.MetaUpdate{Mode: &termMode})
+					s.events.Broadcast(sessionName, "handoff", "failed:relay disconnected")
+				}
+				return
+			}
+		}
+		return
+	}
+	// Fallback to legacy store
 	sessions, err := s.store.ListSessions()
 	if err != nil {
 		return

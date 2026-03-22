@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { getSessionName, getFilePath, isDirty } from './tab-helpers'
+import { getSessionName, getSessionCode, getFilePath, isDirty } from './tab-helpers'
 import type { Tab } from '../types/tab'
 
 const sessionTab: Tab = {
   id: 's1', type: 'session', label: 'dev', icon: 'Terminal', hostId: 'mlab',
-  viewMode: 'terminal', data: { sessionName: 'dev-server' }, pinned: false, locked: false,
+  viewMode: 'terminal', data: { sessionName: 'dev-server', sessionCode: 'abc123' }, pinned: false, locked: false,
 }
 
 const editorTab: Tab = {
@@ -23,6 +23,15 @@ describe('getSessionName', () => {
   })
   it('returns undefined from tab without sessionName', () => {
     expect(getSessionName(emptyTab)).toBeUndefined()
+  })
+})
+
+describe('getSessionCode', () => {
+  it('returns sessionCode from session tab', () => {
+    expect(getSessionCode(sessionTab)).toBe('abc123')
+  })
+  it('returns undefined from tab without sessionCode', () => {
+    expect(getSessionCode(emptyTab)).toBeUndefined()
   })
 })
 

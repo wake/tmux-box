@@ -31,6 +31,7 @@ export function useSessionTabSync(sessions: Session[]) {
           label: s.name,
           hostId: 'local',
           sessionName: s.name,
+          sessionCode: s.code,
           viewMode: s.mode === 'stream' ? 'stream' : 'terminal',
         })
         useTabStore.getState().addTab(tab)

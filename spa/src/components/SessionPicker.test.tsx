@@ -5,8 +5,8 @@ import { SessionPicker } from './SessionPicker'
 import type { Session } from '../lib/api'
 
 const mockSessions: Session[] = [
-  { id: 1, uid: 'abc', name: 'dev-server', mode: 'term', cwd: '/home', tmux_target: '', group_id: 0, sort_order: 0, cc_session_id: '', cc_model: '', has_relay: false },
-  { id: 2, uid: 'def', name: 'claude-code', mode: 'stream', cwd: '/home', tmux_target: '', group_id: 0, sort_order: 0, cc_session_id: '', cc_model: '', has_relay: true },
+  { code: 'abc001', name: 'dev-server', mode: 'term', cwd: '/home', cc_session_id: '', cc_model: '', has_relay: false },
+  { code: 'def002', name: 'claude-code', mode: 'stream', cwd: '/home', cc_session_id: '', cc_model: '', has_relay: true },
 ]
 
 beforeEach(() => cleanup())

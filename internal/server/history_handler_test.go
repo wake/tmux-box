@@ -3,22 +3,47 @@ package server_test
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/wake/tmux-box/internal/config"
+	"github.com/wake/tmux-box/internal/module/session"
+	"github.com/wake/tmux-box/internal/server"
 	"github.com/wake/tmux-box/internal/store"
+	"github.com/wake/tmux-box/internal/tmux"
 )
 
+// setupHistoryServer creates a test server with FakeExecutor that has a registered
+// tmux session, so code-based history lookups work through the legacy fallback path.
+func setupHistoryServer(t *testing.T) (*store.Store, *httptest.Server, *tmux.FakeExecutor) {
+	t.Helper()
+	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	cfg := config.Config{}
+	tx := tmux.NewFakeExecutor()
+	s := server.New(cfg, db, nil, tx, "")
+	srv := httptest.NewServer(s.Handler())
+	t.Cleanup(srv.Close)
+	return db, srv, tx
+}
+
 func TestHistoryEmptyCCSessionID(t *testing.T) {
-	db, srv := setupServerWithDB(t)
+	db, srv, tx := setupHistoryServer(t)
+
+	// Register tmux session so code lookup can resolve.
+	tx.AddSessionWithID("$0", "hist-test", "/tmp")
+	code, _ := session.EncodeSessionID("$0")
 
 	// Create session without cc_session_id
-	id, _ := db.CreateSession(store.Session{Name: "hist-test", Cwd: "/tmp", Mode: "stream"})
+	db.CreateSession(store.Session{Name: "hist-test", Cwd: "/tmp", Mode: "stream"})
 
-	resp, err := http.Get(fmt.Sprintf("%s/api/sessions/%d/history", srv.URL, id))
+	resp, err := http.Get(srv.URL + "/api/sessions/" + code + "/history")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +60,11 @@ func TestHistoryEmptyCCSessionID(t *testing.T) {
 }
 
 func TestHistoryReturnsMessages(t *testing.T) {
-	db, srv := setupServerWithDB(t)
+	db, srv, tx := setupHistoryServer(t)
+
+	// Register tmux session so code lookup can resolve.
+	tx.AddSessionWithID("$0", "hist-msg", "/tmp")
+	code, _ := session.EncodeSessionID("$0")
 
 	// Create temp CC JSONL file
 	homeDir := t.TempDir()
@@ -57,7 +86,7 @@ func TestHistoryReturnsMessages(t *testing.T) {
 	ccID := ccSessionID
 	db.UpdateSession(id, store.SessionUpdate{CCSessionID: &ccID})
 
-	resp, err := http.Get(fmt.Sprintf("%s/api/sessions/%d/history", srv.URL, id))
+	resp, err := http.Get(srv.URL + "/api/sessions/" + code + "/history")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,9 +111,11 @@ func TestHistoryReturnsMessages(t *testing.T) {
 }
 
 func TestHistoryNotFound(t *testing.T) {
-	_, srv := setupServerWithDB(t)
+	_, srv, _ := setupHistoryServer(t)
 
-	resp, err := http.Get(fmt.Sprintf("%s/api/sessions/999/history", srv.URL))
+	// Use a valid-format code for a tmux ID that doesn't exist in FakeExecutor.
+	notFoundCode, _ := session.EncodeSessionID("$999")
+	resp, err := http.Get(srv.URL + "/api/sessions/" + notFoundCode + "/history")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,16 +1,13 @@
 // spa/src/lib/api.ts
 export interface Session {
-  id: number
-  uid: string
+  code: string
   name: string
-  tmux_target: string
   cwd: string
   mode: string
-  group_id: number
-  sort_order: number
   cc_session_id: string
   cc_model: string
   has_relay: boolean
+  current_command?: string
 }
 
 export async function listSessions(base: string): Promise<Session[]> {
@@ -31,13 +28,13 @@ export async function createSession(
   return res.json()
 }
 
-export async function deleteSession(base: string, id: number): Promise<void> {
-  const res = await fetch(`${base}/api/sessions/${id}`, { method: 'DELETE' })
+export async function deleteSession(base: string, code: string): Promise<void> {
+  const res = await fetch(`${base}/api/sessions/${code}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
 }
 
-export async function switchMode(base: string, id: number, mode: string): Promise<Session> {
-  const res = await fetch(`${base}/api/sessions/${id}/mode`, {
+export async function switchMode(base: string, code: string, mode: string): Promise<Session> {
+  const res = await fetch(`${base}/api/sessions/${code}/mode`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ mode }),
@@ -50,13 +47,13 @@ export async function switchMode(base: string, id: number, mode: string): Promis
 
 export async function handoff(
   base: string,
-  id: number,
+  code: string,
   mode: string,
   preset?: string,
 ): Promise<{ handoff_id: string }> {
   const body: Record<string, string> = { mode }
   if (preset) body.preset = preset
-  const res = await fetch(`${base}/api/sessions/${id}/handoff`, {
+  const res = await fetch(`${base}/api/sessions/${code}/handoff`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -70,8 +67,8 @@ export async function handoff(
 
 // --- History API ---
 
-export async function fetchHistory(base: string, sessionId: number): Promise<import('./stream-ws').StreamMessage[]> {
-  const res = await fetch(`${base}/api/sessions/${sessionId}/history`)
+export async function fetchHistory(base: string, sessionCode: string): Promise<import('./stream-ws').StreamMessage[]> {
+  const res = await fetch(`${base}/api/sessions/${sessionCode}/history`)
   if (!res.ok) return []
   return res.json()
 }

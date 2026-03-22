@@ -26,6 +26,11 @@ type DetectConfig struct {
 	PollInterval int      `toml:"poll_interval" json:"poll_interval"`
 }
 
+type FeaturesConfig struct {
+	FS  bool `toml:"fs"`
+	Git bool `toml:"git"`
+}
+
 type TerminalConfig struct {
 	SizingMode string `toml:"sizing_mode" json:"sizing_mode"`
 }
@@ -49,6 +54,7 @@ type Config struct {
 	Stream       StreamConfig   `toml:"stream"         json:"stream"`
 	JSONL        JSONLConfig    `toml:"jsonl"          json:"jsonl"`
 	Detect       DetectConfig   `toml:"detect"         json:"detect"`
+	Features     FeaturesConfig `toml:"features"       json:"features"`
 }
 
 func defaults() Config {

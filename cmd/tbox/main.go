@@ -13,6 +13,8 @@ import (
 	"syscall"
 
 	"github.com/wake/tmux-box/internal/config"
+	"github.com/wake/tmux-box/internal/core"
+	"github.com/wake/tmux-box/internal/module/session"
 	"github.com/wake/tmux-box/internal/relay"
 	"github.com/wake/tmux-box/internal/server"
 	"github.com/wake/tmux-box/internal/store"
@@ -44,6 +46,7 @@ func runServe(args []string) {
 	portOverride := fs.Int("port", 0, "override port")
 	fs.Parse(args)
 
+	// 1. Load config
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		log.Fatalf("config: %v", err)
@@ -57,32 +60,77 @@ func runServe(args []string) {
 
 	os.MkdirAll(cfg.DataDir, 0755)
 
+	// 2. Open MetaStore (new — session module uses this)
+	meta, err := store.OpenMeta(filepath.Join(cfg.DataDir, "meta.db"))
+	if err != nil {
+		log.Fatalf("meta store: %v", err)
+	}
+	defer meta.Close()
+
+	// 3. Open legacy Store (kept for handoff/bridge until 1.6b)
 	st, err := store.Open(filepath.Join(cfg.DataDir, "state.db"))
 	if err != nil {
 		log.Fatalf("store: %v", err)
 	}
 	defer st.Close()
 
+	// 4. Create tmux executor
 	tx := tmux.NewRealExecutor()
 
-	// Resolve config path for config API write-back.
+	// 5. Create Core with config + tmux
+	c := core.New(core.CoreDeps{
+		Config: &cfg,
+		Tmux:   tx,
+	})
+
+	// 6. Add session module to Core
+	c.AddModule(session.NewSessionModule(meta))
+
+	// 7. Init all modules (registers SessionProvider in ServiceRegistry)
+	if err := c.InitModules(); err != nil {
+		log.Fatalf("core init: %v", err)
+	}
+
+	// 8. Create shared http.ServeMux
+	mux := http.NewServeMux()
+
+	// 9. Register module routes (session: GET/POST /api/sessions, GET/DELETE /api/sessions/{code}, etc.)
+	c.RegisterRoutes(mux)
+
+	// 10. Create legacy server and register its routes on same mux
 	resolvedCfgPath := *cfgPath
 	if resolvedCfgPath == "" {
 		resolvedCfgPath = filepath.Join(cfg.DataDir, "config.toml")
 	}
+	legacySrv := server.NewLegacy(cfg, resolvedCfgPath, st, meta, tx)
+	legacySrv.RegisterLegacyRoutes(mux)
 
-	s := server.New(cfg, st, tx, resolvedCfgPath)
-
-	// Context for background goroutines (status poller).
+	// Context for background goroutines (modules + status poller).
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	s.StartStatusPoller(ctx)
+	// 11. Migrate legacy session data → meta.db (once, on startup; errors are non-fatal)
+	if tmuxSessions, err := tx.ListSessions(); err == nil {
+		meta.MigrateFromLegacy(st.DB(), tmuxSessions)
+	}
+
+	// 12. Start modules (session module resets stale modes in MetaStore)
+	if err := c.StartModules(ctx); err != nil {
+		log.Fatalf("core start: %v", err)
+	}
+
+	// 13. Start status poller (on legacy server — uses legacy store)
+	legacySrv.StartStatusPoller(ctx)
+
+	// 14. Apply middleware chain and start HTTP server
+	handler := server.CORS(
+		server.IPWhitelist(cfg.Allow)(
+			server.TokenAuth(cfg.Token)(mux)))
 
 	addr := fmt.Sprintf("%s:%d", cfg.Bind, cfg.Port)
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: s.Handler(),
+		Handler: handler,
 	}
 
 	sigCh := make(chan os.Signal, 1)
@@ -91,7 +139,10 @@ func runServe(args []string) {
 	go func() {
 		<-sigCh
 		fmt.Println("\nshutting down...")
-		cancel() // stop status poller
+		cancel() // stop status poller + modules
+		if err := c.StopModules(); err != nil {
+			log.Printf("stop modules: %v", err)
+		}
 		srv.Shutdown(context.Background())
 	}()
 

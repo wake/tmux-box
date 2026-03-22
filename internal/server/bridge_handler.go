@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 
 	"github.com/wake/tmux-box/internal/store"
@@ -76,6 +77,20 @@ func (s *Server) handleCliBridge(w http.ResponseWriter, r *http.Request) {
 					if init.Model != "" {
 						if sess, err := s.store.GetSessionByName(sessionName); err == nil {
 							s.store.UpdateSession(sess.ID, store.SessionUpdate{CCModel: &init.Model})
+							// Sync MetaStore: update cc_model
+							if s.meta != nil {
+								tmuxSessions, err := s.tmux.ListSessions()
+								if err == nil {
+									for _, ts := range tmuxSessions {
+										if ts.Name == sessionName {
+											if err := s.meta.UpdateMeta(ts.ID, store.MetaUpdate{CCModel: &init.Model}); err != nil {
+												log.Printf("bridge: meta sync cc_model error: %v", err)
+											}
+											break
+										}
+									}
+								}
+							}
 							s.events.Broadcast(sessionName, "init", init.Model)
 						}
 					}

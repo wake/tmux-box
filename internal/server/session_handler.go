@@ -14,20 +14,27 @@ import (
 	"github.com/wake/tmux-box/internal/tmux"
 )
 
+// TODO(1.6b): remove validSessionName after session module fully handles Create validation.
 var validSessionName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 // SessionResponse wraps store.Session with runtime state for API responses.
+// TODO(1.6b): remove after session module exposes its own DTO with has_relay.
 type SessionResponse struct {
 	store.Session
 	HasRelay bool `json:"has_relay"`
 }
 
+// Deprecated: SessionHandler handles session CRUD for legacy routes().
+// Session CRUD has been moved to the session module. This type is kept for
+// test compatibility only. TODO(1.6b): remove after migrating all tests.
 type SessionHandler struct {
 	store  *store.Store
 	tmux   tmux.Executor
 	bridge *bridge.Bridge
 }
 
+// Deprecated: NewSessionHandler creates a legacy SessionHandler.
+// TODO(1.6b): remove after migrating all tests to the session module.
 func NewSessionHandler(s *store.Store, t tmux.Executor, b *bridge.Bridge) *SessionHandler {
 	return &SessionHandler{store: s, tmux: t, bridge: b}
 }
@@ -37,6 +44,7 @@ type switchModeReq struct {
 }
 
 // SwitchMode switches a session between term, stream, and jsonl modes.
+// Deprecated: handled by session module. TODO(1.6b): remove after migrating tests.
 func (h *SessionHandler) SwitchMode(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -87,6 +95,8 @@ type createReq struct {
 	Mode string `json:"mode"`
 }
 
+// List lists all sessions with relay status.
+// Deprecated: handled by session module. TODO(1.6b): remove after migrating tests.
 func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 	// Sync: discover tmux sessions not yet in DB
 	h.syncTmuxSessions()
@@ -108,6 +118,7 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 // syncTmuxSessions discovers tmux sessions not yet tracked in SQLite and adds them.
+// TODO(1.6b): remove after session module handles sync.
 func (h *SessionHandler) syncTmuxSessions() {
 	tmuxSessions, err := h.tmux.ListSessions()
 	if err != nil {
@@ -137,6 +148,8 @@ func (h *SessionHandler) syncTmuxSessions() {
 	}
 }
 
+// Create creates a new session and starts a tmux session.
+// Deprecated: handled by session module. TODO(1.6b): remove after migrating tests.
 func (h *SessionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req createReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -179,6 +192,8 @@ func (h *SessionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(sess)
 }
 
+// Delete deletes a session and kills the tmux session.
+// Deprecated: handled by session module. TODO(1.6b): remove after migrating tests.
 func (h *SessionHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {

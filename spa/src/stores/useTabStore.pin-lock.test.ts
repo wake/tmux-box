@@ -3,7 +3,7 @@ import { useTabStore, migrateTabStore } from './useTabStore'
 import { createSessionTab } from '../types/tab'
 
 function addTab(name: string) {
-  const tab = createSessionTab({ label: name, hostId: 'local', sessionName: name })
+  const tab = createSessionTab({ label: name, hostId: 'local', sessionName: name, sessionCode: name })
   useTabStore.getState().addTab(tab)
   return tab
 }

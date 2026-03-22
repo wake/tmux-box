@@ -34,7 +34,7 @@ func setupServerWithDB(t *testing.T) (*store.Store, *httptest.Server) {
 	t.Cleanup(func() { db.Close() })
 	cfg := config.Config{}
 	tx := tmux.NewFakeExecutor()
-	s := server.New(cfg, db, tx, "")
+	s := server.New(cfg, db, nil, tx, "")
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
 	return db, srv

@@ -120,6 +120,7 @@ export default function App() {
       label: session.name,
       hostId: 'local',
       sessionName: session.name,
+      sessionCode: session.code,
       viewMode: session.mode === 'stream' ? 'stream' : 'terminal',
     })
     store.addTab(tab)
@@ -200,6 +201,7 @@ export default function App() {
               label: session.name,
               hostId: 'local',
               sessionName: session.name,
+              sessionCode: session.code,
               viewMode: session.mode === 'stream' ? 'stream' : 'terminal',
             })
             store.addTab(newTab)

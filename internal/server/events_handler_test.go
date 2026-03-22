@@ -175,7 +175,7 @@ func TestSessionEventsEndpoint(t *testing.T) {
 			PollInterval: 2,
 		},
 	}
-	s := server.New(cfg, db, tmux.NewFakeExecutor(), "")
+	s := server.New(cfg, db, nil, tmux.NewFakeExecutor(), "")
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
 

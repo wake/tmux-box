@@ -22,8 +22,8 @@ describe('SessionPanel', () => {
   it('renders session list', () => {
     useSessionStore.setState({
       sessions: [
-        { id: 1, uid: 'test0001', name: 'dev', tmux_target: 'dev:0', cwd: '/tmp', mode: 'term', group_id: 0, sort_order: 0, cc_session_id: '', cc_model: '', has_relay: false },
-        { id: 2, uid: 'test0002', name: 'prod', tmux_target: 'prod:0', cwd: '/tmp', mode: 'stream', group_id: 0, sort_order: 0, cc_session_id: '', cc_model: '', has_relay: false },
+        { code: 'abc001', name: 'dev', cwd: '/tmp', mode: 'term', cc_session_id: '', cc_model: '', has_relay: false },
+        { code: 'abc002', name: 'prod', cwd: '/tmp', mode: 'stream', cc_session_id: '', cc_model: '', has_relay: false },
       ],
       activeId: null,
     })
@@ -35,9 +35,9 @@ describe('SessionPanel', () => {
   it('highlights active session', () => {
     useSessionStore.setState({
       sessions: [
-        { id: 1, uid: 'test0001', name: 'dev', tmux_target: 'dev:0', cwd: '/tmp', mode: 'term', group_id: 0, sort_order: 0, cc_session_id: '', cc_model: '', has_relay: false },
+        { code: 'abc001', name: 'dev', cwd: '/tmp', mode: 'term', cc_session_id: '', cc_model: '', has_relay: false },
       ],
-      activeId: 1,
+      activeId: 'abc001',
     })
     render(<SessionPanel />)
     const btn = screen.getByRole('button', { name: /dev/i })
@@ -48,25 +48,25 @@ describe('SessionPanel', () => {
     const setActive = vi.fn()
     useSessionStore.setState({
       sessions: [
-        { id: 1, uid: 'test0001', name: 'dev', tmux_target: 'dev:0', cwd: '/tmp', mode: 'term', group_id: 0, sort_order: 0, cc_session_id: '', cc_model: '', has_relay: false },
+        { code: 'abc001', name: 'dev', cwd: '/tmp', mode: 'term', cc_session_id: '', cc_model: '', has_relay: false },
       ],
       activeId: null,
       setActive,
     })
     render(<SessionPanel />)
     fireEvent.click(screen.getByRole('button', { name: /dev/i }))
-    expect(setActive).toHaveBeenCalledWith(1)
+    expect(setActive).toHaveBeenCalledWith('abc001')
   })
 
   it('shows terminal icon for term mode', () => {
     useSessionStore.setState({
       sessions: [
-        { id: 1, uid: 'test0001', name: 'dev', tmux_target: 'dev:0', cwd: '/tmp', mode: 'term', group_id: 0, sort_order: 0, cc_session_id: '', cc_model: '', has_relay: false },
+        { code: 'abc001', name: 'dev', cwd: '/tmp', mode: 'term', cc_session_id: '', cc_model: '', has_relay: false },
       ],
       activeId: null,
     })
     render(<SessionPanel />)
     // Terminal icon should be present (Phosphor Terminal icon)
-    expect(screen.getByTestId('session-icon-1')).toBeInTheDocument()
+    expect(screen.getByTestId('session-icon-abc001')).toBeInTheDocument()
   })
 })

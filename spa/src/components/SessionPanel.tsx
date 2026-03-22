@@ -4,8 +4,8 @@ import { useStreamStore } from '../stores/useStreamStore'
 import { Terminal, Lightning, CircleDashed, GearSix } from '@phosphor-icons/react'
 import SessionStatusBadge, { type SessionStatus } from './SessionStatusBadge'
 
-function SessionIcon({ mode, id }: { mode: string; id: number }) {
-  const props = { size: 16, 'data-testid': `session-icon-${id}` }
+function SessionIcon({ mode, code }: { mode: string; code: string }) {
+  const props = { size: 16, 'data-testid': `session-icon-${code}` }
   switch (mode) {
     case 'stream': return <Lightning {...props} weight="fill" className="text-blue-400" />
     case 'jsonl': return <CircleDashed {...props} className="text-yellow-400" />
@@ -34,21 +34,21 @@ function mapStatus(raw: string): SessionStatus {
 
 interface Props {
   onSettingsOpen?: () => void
-  onSelectSession?: (id: number) => void
-  activeSessionUid?: string | null
+  onSelectSession?: (code: string) => void
+  activeSessionCode?: string | null
 }
 
-export default function SessionPanel({ onSettingsOpen, onSelectSession, activeSessionUid }: Props) {
+export default function SessionPanel({ onSettingsOpen, onSelectSession, activeSessionCode }: Props) {
   const { sessions, activeId, setActive } = useSessionStore()
   const sessionStatus = useStreamStore((s) => s.sessionStatus)
 
-  function handleClick(id: number) {
-    setActive(id)
-    onSelectSession?.(id)
+  function handleClick(code: string) {
+    setActive(code)
+    onSelectSession?.(code)
   }
 
-  const isActive = (s: { id: number; uid: string }) =>
-    activeSessionUid != null ? s.uid === activeSessionUid : activeId === s.id
+  const isActive = (s: { code: string }) =>
+    activeSessionCode != null ? s.code === activeSessionCode : activeId === s.code
 
   return (
     <div className="w-56 bg-gray-900 border-r border-gray-800 flex flex-col">
@@ -62,13 +62,13 @@ export default function SessionPanel({ onSettingsOpen, onSelectSession, activeSe
               : deriveStatus(s.mode)
             return (
               <button
-                key={s.id}
-                onClick={() => handleClick(s.id)}
+                key={s.code}
+                onClick={() => handleClick(s.code)}
                 className={`w-full text-left px-2 py-1.5 rounded text-sm cursor-pointer flex items-center gap-2 ${
                   isActive(s) ? 'bg-gray-800 text-gray-100' : 'text-gray-400 hover:bg-gray-800/50'
                 }`}
               >
-                <SessionIcon mode={s.mode} id={s.id} />
+                <SessionIcon mode={s.mode} code={s.code} />
                 <SessionStatusBadge status={status} />
                 <span className="flex-1 truncate">{s.name}</span>
                 <span className="text-xs text-gray-500">{s.mode}</span>

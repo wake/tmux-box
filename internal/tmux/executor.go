@@ -11,6 +11,7 @@ import (
 var ErrNoSession = errors.New("no such session")
 
 type TmuxSession struct {
+	ID   string // tmux session ID, e.g. "$0"
 	Name string
 	Cwd  string
 }
@@ -40,7 +41,7 @@ type RealExecutor struct{}
 func NewRealExecutor() *RealExecutor { return &RealExecutor{} }
 
 func (r *RealExecutor) ListSessions() ([]TmuxSession, error) {
-	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}\t#{session_path}").Output()
+	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_id}\t#{session_name}\t#{session_path}").Output()
 	if err != nil {
 		if strings.Contains(err.Error(), "no server running") ||
 			strings.Contains(string(out), "no server running") {
@@ -60,10 +61,13 @@ func (r *RealExecutor) ListSessions() ([]TmuxSession, error) {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 2)
-		s := TmuxSession{Name: parts[0]}
+		parts := strings.SplitN(line, "\t", 3)
+		s := TmuxSession{ID: parts[0]}
 		if len(parts) > 1 {
-			s.Cwd = parts[1]
+			s.Name = parts[1]
+		}
+		if len(parts) > 2 {
+			s.Cwd = parts[2]
 		}
 		sessions = append(sessions, s)
 	}
@@ -189,15 +193,17 @@ type SetWindowOptionCall struct {
 }
 
 type FakeExecutor struct {
-	sessions              map[string]TmuxSession
-	paneCommands          map[string]string   // target → command name
-	paneContents          map[string]string   // target → captured text
-	paneChildren          map[string][]string // target → child command names
-	paneSizes             map[string][2]int   // target → [cols, rows]
-	rawKeysCalls          []RawKeysCall
-	keysCalls             []KeysCall
-	autoResizeCalls       []string              // targets passed to ResizeWindowAuto
-	setWindowOptionCalls  []SetWindowOptionCall // calls to SetWindowOption
+	sessions             map[string]TmuxSession // keyed by name for O(1) lookup
+	sessionOrder         []string               // insertion order of session names
+	nextID               int                    // auto-incrementing ID counter
+	paneCommands         map[string]string      // target → command name
+	paneContents         map[string]string      // target → captured text
+	paneChildren         map[string][]string    // target → child command names
+	paneSizes            map[string][2]int      // target → [cols, rows]
+	rawKeysCalls         []RawKeysCall
+	keysCalls            []KeysCall
+	autoResizeCalls      []string              // targets passed to ResizeWindowAuto
+	setWindowOptionCalls []SetWindowOptionCall // calls to SetWindowOption
 }
 
 func NewFakeExecutor() *FakeExecutor {
@@ -210,20 +216,36 @@ func NewFakeExecutor() *FakeExecutor {
 	}
 }
 
+// AddSession adds a session with an auto-assigned ID ($0, $1, …).
 func (f *FakeExecutor) AddSession(name, cwd string) {
-	f.sessions[name] = TmuxSession{Name: name, Cwd: cwd}
+	id := fmt.Sprintf("$%d", f.nextID)
+	f.nextID++
+	f.sessions[name] = TmuxSession{ID: id, Name: name, Cwd: cwd}
+	f.sessionOrder = append(f.sessionOrder, name)
+}
+
+// AddSessionWithID adds a session with an explicit ID (for test control).
+func (f *FakeExecutor) AddSessionWithID(id, name, cwd string) {
+	f.sessions[name] = TmuxSession{ID: id, Name: name, Cwd: cwd}
+	f.sessionOrder = append(f.sessionOrder, name)
 }
 
 func (f *FakeExecutor) ListSessions() ([]TmuxSession, error) {
-	out := make([]TmuxSession, 0, len(f.sessions))
-	for _, s := range f.sessions {
-		out = append(out, s)
+	out := make([]TmuxSession, 0, len(f.sessionOrder))
+	for _, name := range f.sessionOrder {
+		if s, ok := f.sessions[name]; ok {
+			out = append(out, s)
+		}
 	}
 	return out, nil
 }
 
+// NewSession creates a session with an auto-assigned ID.
 func (f *FakeExecutor) NewSession(name, cwd string) error {
-	f.sessions[name] = TmuxSession{Name: name, Cwd: cwd}
+	id := fmt.Sprintf("$%d", f.nextID)
+	f.nextID++
+	f.sessions[name] = TmuxSession{ID: id, Name: name, Cwd: cwd}
+	f.sessionOrder = append(f.sessionOrder, name)
 	return nil
 }
 
@@ -232,6 +254,13 @@ func (f *FakeExecutor) KillSession(name string) error {
 		return ErrNoSession
 	}
 	delete(f.sessions, name)
+	// Remove from insertion-order slice.
+	for i, n := range f.sessionOrder {
+		if n == name {
+			f.sessionOrder = append(f.sessionOrder[:i], f.sessionOrder[i+1:]...)
+			break
+		}
+	}
 	return nil
 }
 

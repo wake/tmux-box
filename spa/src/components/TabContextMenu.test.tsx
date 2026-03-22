@@ -5,7 +5,7 @@ import type { Tab } from '../types/tab'
 
 const baseTab: Tab = {
   id: '1', type: 'session', label: 'test', icon: 'TerminalWindow',
-  hostId: 'local', viewMode: 'terminal', data: { sessionName: 'test' },
+  hostId: 'local', viewMode: 'terminal', data: { sessionName: 'test', sessionCode: 'tst001' },
   pinned: false, locked: false,
 }
 

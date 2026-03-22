@@ -28,7 +28,7 @@ beforeEach(() => {
 
 const sessionTab: Tab = {
   id: 't1', type: 'session', label: 'dev', icon: 'Terminal', hostId: 'mlab',
-  viewMode: 'terminal', data: { sessionName: 'dev' }, pinned: false, locked: false,
+  viewMode: 'terminal', data: { sessionName: 'dev', sessionCode: 'dev001' }, pinned: false, locked: false,
 }
 const editorTab: Tab = {
   id: 't3', type: 'editor', label: 'file.ts', icon: 'File', hostId: 'mlab',
