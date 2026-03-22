@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 
 	"github.com/wake/tmux-box/internal/config"
 	"github.com/wake/tmux-box/internal/tmux"
@@ -30,10 +31,13 @@ type CoreDeps struct {
 // Core holds shared infrastructure and manages module lifecycle.
 type Core struct {
 	Cfg      *config.Config
+	CfgMu   sync.RWMutex // protects Cfg
+	CfgPath  string       // path to config.toml for persistence
 	Tmux     tmux.Executor
 	Registry *ServiceRegistry
 	Events   *EventsBroadcaster
 	modules  []Module
+	onConfigChange []func() // config change callbacks
 }
 
 // New creates a Core from the given dependencies.
@@ -100,7 +104,14 @@ func (c *Core) StopModules(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
+// OnConfigChange registers a callback invoked after config is updated via PUT.
+func (c *Core) OnConfigChange(fn func()) {
+	c.onConfigChange = append(c.onConfigChange, fn)
+}
+
 // RegisterCoreRoutes registers routes owned by Core itself (not by modules).
 func (c *Core) RegisterCoreRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/ws/session-events", c.Events.HandleSessionEvents)
+	mux.HandleFunc("GET /api/config", c.handleGetConfig)
+	mux.HandleFunc("PUT /api/config", c.handlePutConfig)
 }
