@@ -35,7 +35,7 @@ const mockTabs: Tab[] = [
 ]
 
 const pinnedTabs: Tab[] = [
-  { id: 'p1', type: 'session', label: 'pinned-a', icon: 'TerminalWindow', hostId: 'local', viewMode: 'terminal', data: { sessionName: 'a' }, pinned: true, locked: true },
+  { id: 'p1', type: 'session', label: 'pinned-a', icon: 'TerminalWindow', hostId: 'local', viewMode: 'terminal', data: { sessionName: 'a' }, pinned: true, locked: false },
   { id: 't1', type: 'session', label: 'normal-b', icon: 'TerminalWindow', hostId: 'local', viewMode: 'terminal', data: { sessionName: 'b' }, pinned: false, locked: false },
   { id: 't2', type: 'session', label: 'normal-c', icon: 'TerminalWindow', hostId: 'local', viewMode: 'terminal', data: { sessionName: 'c' }, pinned: false, locked: false },
 ]

@@ -71,7 +71,7 @@ describe('TabContextMenu', () => {
   })
 
   it('shows "取消固定" for pinned tab', () => {
-    renderMenu({ tab: { pinned: true, locked: true } })
+    renderMenu({ tab: { pinned: true } })
     expect(screen.getByText('取消固定')).toBeInTheDocument()
     expect(screen.queryByText('固定分頁')).not.toBeInTheDocument()
   })

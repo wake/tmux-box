@@ -41,7 +41,6 @@ export default function App() {
   const tabs = useTabStore((s) => s.tabs)
   const tabOrder = useTabStore((s) => s.tabOrder)
   const activeTabId = useTabStore((s) => s.activeTabId)
-  const addTab = useTabStore((s) => s.addTab)
   const dismissTab = useTabStore((s) => s.dismissTab)
   const dismissedSessions = useTabStore((s) => s.dismissedSessions)
   const setActiveTab = useTabStore((s) => s.setActiveTab)
@@ -52,7 +51,6 @@ export default function App() {
   const workspaces = useWorkspaceStore((s) => s.workspaces)
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId)
   const setActiveWorkspace = useWorkspaceStore((s) => s.setActiveWorkspace)
-  const addTabToWorkspace = useWorkspaceStore((s) => s.addTabToWorkspace)
   const removeTabFromWorkspace = useWorkspaceStore((s) => s.removeTabFromWorkspace)
   const findWorkspaceByTab = useWorkspaceStore((s) => s.findWorkspaceByTab)
   const setWorkspaceActiveTab = useWorkspaceStore((s) => s.setWorkspaceActiveTab)
@@ -108,13 +106,14 @@ export default function App() {
 
   const handleSessionSelect = useCallback((session: typeof sessions[0]) => {
     setSessionPickerOpen(false)
-    const dismissedEntry = useTabStore.getState().dismissedSessions.find(
+    const store = useTabStore.getState()
+    const dismissedEntry = store.dismissedSessions.find(
       (s) => s.sessionName === session.name
     )
-    useTabStore.getState().undismissSession(session.name)
-    const existing = Object.values(tabs).find((t) => getSessionName(t) === session.name)
+    store.undismissSession(session.name)
+    const existing = Object.values(store.tabs).find((t) => getSessionName(t) === session.name)
     if (existing) {
-      setActiveTab(existing.id)
+      store.setActiveTab(existing.id)
       return
     }
     const tab = createSessionTab({
@@ -123,14 +122,14 @@ export default function App() {
       sessionName: session.name,
       viewMode: session.mode === 'stream' ? 'stream' : 'terminal',
     })
-    addTab(tab)
-    if (dismissedEntry?.pinned) useTabStore.getState().pinTab(tab.id)
-    setActiveTab(tab.id)
+    store.addTab(tab)
+    if (dismissedEntry?.pinned) store.pinTab(tab.id)
+    store.setActiveTab(tab.id)
     if (activeWorkspaceId) {
-      addTabToWorkspace(activeWorkspaceId, tab.id)
-      setWorkspaceActiveTab(activeWorkspaceId, tab.id)
+      useWorkspaceStore.getState().addTabToWorkspace(activeWorkspaceId, tab.id)
+      useWorkspaceStore.getState().setWorkspaceActiveTab(activeWorkspaceId, tab.id)
     }
-  }, [tabs, setActiveTab, addTab, activeWorkspaceId, addTabToWorkspace, setWorkspaceActiveTab])
+  }, [activeWorkspaceId])
 
   // --- Derive visible tabs for display ---
   const activeWs = workspaces.find((w) => w.id === activeWorkspaceId)

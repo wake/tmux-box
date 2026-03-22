@@ -65,6 +65,7 @@ export function SortableTab({ tab, isActive, pinned, onSelect, onClose, onMiddle
         title={tab.label}
       >
         {IconComponent && <IconComponent size={14} className="flex-shrink-0" />}
+        {tab.locked && <Lock size={10} className="absolute bottom-0.5 right-0.5" />}
       </button>
     )
   }
