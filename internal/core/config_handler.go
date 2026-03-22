@@ -13,10 +13,10 @@ import (
 // handleGetConfig returns the current config as JSON with the token field redacted.
 func (c *Core) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	c.CfgMu.RLock()
-	cfg := *c.Cfg // struct copy via dereference
-	c.CfgMu.RUnlock()
+	defer c.CfgMu.RUnlock()
 
-	// Redact sensitive fields
+	// Shallow copy to redact token; encode under lock to avoid slice race
+	cfg := *c.Cfg
 	cfg.Token = ""
 
 	w.Header().Set("Content-Type", "application/json")

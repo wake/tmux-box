@@ -43,20 +43,32 @@ func (m *CCModule) Exit(ctx context.Context, tmuxTarget string) error {
 		log.Printf("cc: Exit pane-prep cancel (%s): %v", tmuxTarget, err)
 	}
 	sleepCtx(ctx, 500*time.Millisecond)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if err := tx.SendKeysRaw(tmuxTarget, "Escape"); err != nil {
 		log.Printf("cc: Exit pane-prep Escape (%s): %v", tmuxTarget, err)
 	}
 	sleepCtx(ctx, 500*time.Millisecond)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if err := tx.SendKeysRaw(tmuxTarget, "C-c"); err != nil {
 		log.Printf("cc: Exit pane-prep C-c (%s): %v", tmuxTarget, err)
 	}
 	sleepCtx(ctx, 500*time.Millisecond)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 
 	// Send /exit
 	if err := tx.SendKeysRaw(tmuxTarget, "Escape"); err != nil {
 		log.Printf("cc: Exit pane-prep Escape2 (%s): %v", tmuxTarget, err)
 	}
 	sleepCtx(ctx, 500*time.Millisecond)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if err := tx.SendKeys(tmuxTarget, "/exit"); err != nil {
 		return fmt.Errorf("send /exit: %w", err)
 	}
@@ -90,25 +102,21 @@ func (m *CCModule) GetStatus(ctx context.Context, tmuxTarget string) (*detect.St
 		sleepCtx(ctx, 200*time.Millisecond)
 	}
 
+	// defer cleanup instead of repeating the check at every return point
+	if didManualResize {
+		defer restoreWindowSizing(tx, tmuxTarget)
+	}
+
 	// Staged /status send
 	if err := tx.SendKeysRaw(tmuxTarget, "-l", "/"); err != nil {
-		if didManualResize {
-			restoreWindowSizing(tx, tmuxTarget)
-		}
 		return nil, fmt.Errorf("send /: %w", err)
 	}
 	sleepCtx(ctx, 1*time.Second)
 	if err := tx.SendKeysRaw(tmuxTarget, "-l", "status"); err != nil {
-		if didManualResize {
-			restoreWindowSizing(tx, tmuxTarget)
-		}
 		return nil, fmt.Errorf("send status: %w", err)
 	}
 	sleepCtx(ctx, 500*time.Millisecond)
 	if err := tx.SendKeysRaw(tmuxTarget, "Enter"); err != nil {
-		if didManualResize {
-			restoreWindowSizing(tx, tmuxTarget)
-		}
 		return nil, fmt.Errorf("send Enter: %w", err)
 	}
 
@@ -117,6 +125,9 @@ func (m *CCModule) GetStatus(ctx context.Context, tmuxTarget string) (*detect.St
 	var lastErr error
 	for attempt := 0; attempt < 6; attempt++ {
 		sleepCtx(ctx, 500*time.Millisecond)
+		if ctx.Err() != nil {
+			break
+		}
 		paneContent, err := tx.CapturePaneContent(tmuxTarget, 200)
 		if err != nil {
 			lastErr = err
@@ -128,10 +139,6 @@ func (m *CCModule) GetStatus(ctx context.Context, tmuxTarget string) (*detect.St
 			break
 		}
 		lastErr = err
-	}
-
-	if didManualResize {
-		restoreWindowSizing(tx, tmuxTarget)
 	}
 
 	if statusInfo.SessionID == "" {
