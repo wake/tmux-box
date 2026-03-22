@@ -2,10 +2,13 @@ package session
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"regexp"
+	"time"
 
 	"github.com/wake/tmux-box/internal/store"
+	"github.com/wake/tmux-box/internal/terminal"
 )
 
 var nameRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
@@ -125,9 +128,66 @@ func (m *SessionModule) UpdateMeta(code string, update MetaUpdate) error {
 	return m.meta.UpdateMeta(tmuxID, storeUpdate)
 }
 
-// HandleTerminalWS is a stub — will be implemented in Task 7.
+// HandleTerminalWS attaches a WebSocket connection to the tmux session PTY relay.
 func (m *SessionModule) HandleTerminalWS(w http.ResponseWriter, r *http.Request, code string) {
-	http.Error(w, "terminal WebSocket not implemented", http.StatusNotImplemented)
+	info, err := m.GetSession(code)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if info == nil {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	// Determine sizing mode from config (default to "auto" if no config).
+	sizingMode := "auto"
+	if m.core != nil && m.core.Cfg != nil {
+		sizingMode = m.core.Cfg.Terminal.GetSizingMode()
+	}
+
+	// Build tmux attach-session command and args.
+	target := info.Name + ":0"
+	args := []string{"attach-session", "-t", target}
+	if sizingMode == "terminal-first" {
+		args = append(args, "-f", "ignore-size")
+	}
+
+	relay := terminal.NewRelay("tmux", args, "/")
+
+	switch sizingMode {
+	case "terminal-first":
+		// no OnStart — relay uses -f ignore-size, sizing handled by terminal
+	case "minimal-first":
+		relay.OnStart = func() {
+			go func() {
+				time.Sleep(1200 * time.Millisecond)
+				if err := m.tmux.ResizeWindowAuto(target); err != nil {
+					log.Printf("HandleTerminalWS: ResizeWindowAuto(%s): %v", target, err)
+				}
+				if err := m.tmux.SetWindowOption(target, "window-size", "smallest"); err != nil {
+					log.Printf("HandleTerminalWS: SetWindowOption(%s): %v", target, err)
+				}
+			}()
+		}
+	default:
+		if sizingMode != "auto" && sizingMode != "" {
+			log.Printf("HandleTerminalWS: unknown sizing_mode %q, falling back to auto", sizingMode)
+		}
+		relay.OnStart = func() {
+			go func() {
+				time.Sleep(1200 * time.Millisecond)
+				if err := m.tmux.ResizeWindowAuto(target); err != nil {
+					log.Printf("HandleTerminalWS: ResizeWindowAuto(%s): %v", target, err)
+				}
+				if err := m.tmux.SetWindowOption(target, "window-size", "latest"); err != nil {
+					log.Printf("HandleTerminalWS: SetWindowOption(%s): %v", target, err)
+				}
+			}()
+		}
+	}
+
+	relay.HandleWebSocket(w, r)
 }
 
 // --- HTTP Handlers ---
