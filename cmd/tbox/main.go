@@ -11,9 +11,11 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/wake/tmux-box/internal/config"
 	"github.com/wake/tmux-box/internal/core"
+	"github.com/wake/tmux-box/internal/middleware"
 	"github.com/wake/tmux-box/internal/module/session"
 	"github.com/wake/tmux-box/internal/relay"
 	"github.com/wake/tmux-box/internal/server"
@@ -125,9 +127,9 @@ func runServe(args []string) {
 	legacySrv.StartStatusPoller(ctx)
 
 	// 14. Apply middleware chain and start HTTP server
-	handler := server.CORS(
-		server.IPWhitelist(cfg.Allow)(
-			server.TokenAuth(cfg.Token)(mux)))
+	handler := middleware.CORS(
+		middleware.IPWhitelist(cfg.Allow)(
+			middleware.TokenAuth(cfg.Token)(mux)))
 
 	addr := fmt.Sprintf("%s:%d", cfg.Bind, cfg.Port)
 	srv := &http.Server{
@@ -142,7 +144,9 @@ func runServe(args []string) {
 		<-sigCh
 		fmt.Println("\nshutting down...")
 		cancel() // stop status poller + modules
-		if err := c.StopModules(); err != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		if err := c.StopModules(shutdownCtx); err != nil {
 			log.Printf("stop modules: %v", err)
 		}
 		srv.Shutdown(context.Background())

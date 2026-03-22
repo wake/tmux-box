@@ -21,7 +21,8 @@ func NewSessionModule(meta *store.MetaStore) *SessionModule {
 	return &SessionModule{meta: meta}
 }
 
-func (m *SessionModule) Name() string { return "session" }
+func (m *SessionModule) Name() string         { return "session" }
+func (m *SessionModule) Dependencies() []string { return nil }
 
 func (m *SessionModule) Init(c *core.Core) error {
 	m.core = c
@@ -43,6 +44,6 @@ func (m *SessionModule) Start(ctx context.Context) error {
 	return m.meta.ResetStaleModes()
 }
 
-func (m *SessionModule) Stop() error {
+func (m *SessionModule) Stop(_ context.Context) error {
 	return nil
 }

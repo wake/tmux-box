@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 
 	"github.com/wake/tmux-box/internal/config"
 	"github.com/wake/tmux-box/internal/tmux"
@@ -13,10 +14,11 @@ import (
 // Module is the interface all daemon modules implement.
 type Module interface {
 	Name() string
+	Dependencies() []string
 	Init(core *Core) error
 	RegisterRoutes(mux *http.ServeMux)
 	Start(ctx context.Context) error
-	Stop() error
+	Stop(ctx context.Context) error
 }
 
 // CoreDeps holds the shared infrastructure injected into Core.
@@ -29,9 +31,14 @@ type CoreDeps struct {
 // Core holds shared infrastructure and manages module lifecycle.
 type Core struct {
 	Cfg      *config.Config
+	CfgMu   sync.RWMutex // protects Cfg
+	CfgPath  string       // path to config.toml for persistence
 	Tmux     tmux.Executor
 	Registry *ServiceRegistry
-	modules  []Module
+	Events   *EventsBroadcaster
+	modules        []Module
+	configChangeMu sync.Mutex // protects onConfigChange
+	onConfigChange []func()   // config change callbacks
 }
 
 // New creates a Core from the given dependencies.
@@ -44,6 +51,7 @@ func New(deps CoreDeps) *Core {
 		Cfg:      deps.Config,
 		Tmux:     deps.Tmux,
 		Registry: reg,
+		Events:   NewEventsBroadcaster(),
 	}
 }
 
@@ -52,8 +60,14 @@ func (c *Core) AddModule(m Module) {
 	c.modules = append(c.modules, m)
 }
 
-// InitModules calls Init on each module in registration order.
+// InitModules sorts modules by dependency order, then calls Init on each.
 func (c *Core) InitModules() error {
+	sorted, err := topoSort(c.modules)
+	if err != nil {
+		return fmt.Errorf("dependency sort: %w", err)
+	}
+	c.modules = sorted
+
 	for _, m := range c.modules {
 		if err := m.Init(c); err != nil {
 			return fmt.Errorf("module %s init: %w", m.Name(), err)
@@ -81,12 +95,37 @@ func (c *Core) StartModules(ctx context.Context) error {
 
 // StopModules calls Stop on each module in reverse registration order.
 // All modules are stopped even if some return errors.
-func (c *Core) StopModules() error {
+func (c *Core) StopModules(ctx context.Context) error {
 	var errs []error
 	for i := len(c.modules) - 1; i >= 0; i-- {
-		if err := c.modules[i].Stop(); err != nil {
+		if err := c.modules[i].Stop(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("module %s stop: %w", c.modules[i].Name(), err))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// OnConfigChange registers a callback invoked after config is updated via PUT.
+func (c *Core) OnConfigChange(fn func()) {
+	c.configChangeMu.Lock()
+	defer c.configChangeMu.Unlock()
+	c.onConfigChange = append(c.onConfigChange, fn)
+}
+
+// NotifyConfigChange invokes all registered config change callbacks.
+func (c *Core) NotifyConfigChange() {
+	c.configChangeMu.Lock()
+	fns := make([]func(), len(c.onConfigChange))
+	copy(fns, c.onConfigChange)
+	c.configChangeMu.Unlock()
+	for _, fn := range fns {
+		fn()
+	}
+}
+
+// RegisterCoreRoutes registers routes owned by Core itself (not by modules).
+func (c *Core) RegisterCoreRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/ws/session-events", c.Events.HandleSessionEvents)
+	mux.HandleFunc("GET /api/config", c.handleGetConfig)
+	mux.HandleFunc("PUT /api/config", c.handlePutConfig)
 }

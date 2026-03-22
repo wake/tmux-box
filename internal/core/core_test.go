@@ -20,7 +20,8 @@ type fakeModule struct {
 	initErr error
 }
 
-func (m *fakeModule) Name() string { return m.name }
+func (m *fakeModule) Name() string         { return m.name }
+func (m *fakeModule) Dependencies() []string { return nil }
 func (m *fakeModule) Init(c *Core) error {
 	m.tracker.calls = append(m.tracker.calls, m.name+".Init")
 	return m.initErr
@@ -32,7 +33,7 @@ func (m *fakeModule) Start(ctx context.Context) error {
 	m.tracker.calls = append(m.tracker.calls, m.name+".Start")
 	return nil
 }
-func (m *fakeModule) Stop() error {
+func (m *fakeModule) Stop(_ context.Context) error {
 	m.tracker.calls = append(m.tracker.calls, m.name+".Stop")
 	return nil
 }
@@ -65,7 +66,7 @@ func TestCoreStopReverseOrder(t *testing.T) {
 	_ = c.StartModules(context.Background())
 
 	tracker.calls = nil // reset
-	err := c.StopModules()
+	err := c.StopModules(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, []string{"b.Stop", "a.Stop"}, tracker.calls)
 }
