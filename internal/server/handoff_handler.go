@@ -379,14 +379,11 @@ func (s *Server) runHandoff(sess handoffSession, mode, command, handoffID, token
 		if statusInfo.Cwd != "" {
 			metaUpdate.Cwd = &statusInfo.Cwd
 		}
-		// Ensure meta record exists before partial update
-		s.meta.SetMeta(sess.TmuxID, store.SessionMeta{
-			TmuxID:      sess.TmuxID,
+		if err := s.meta.SetMeta(sess.TmuxID, store.SessionMeta{
 			Mode:        mode,
 			CCSessionID: ccID,
 			Cwd:         statusInfo.Cwd,
-		})
-		if err := s.meta.UpdateMeta(sess.TmuxID, metaUpdate); err != nil {
+		}); err != nil {
 			broadcast("failed:meta update: " + err.Error())
 			return
 		}
