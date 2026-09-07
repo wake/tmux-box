@@ -2,10 +2,14 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { probeSessionCwd, probeMissingCwds, resetCwdProbes } from './cwd-probe'
 import { useTabStore } from '../../stores/useTabStore'
+import { useHostStore } from '../../stores/useHostStore'
 import { createTab, type TmuxSessionContent } from '../../types/tab'
 import { fetchSessionCwd } from '../host-api'
 
 vi.mock('../host-api', () => ({ fetchSessionCwd: vi.fn() }))
+
+/** The daemon's answer: a cwd plus the generation it was sampled in. */
+const answer = (cwd: string, tmuxInstance = '222:2000') => ({ cwd, tmuxInstance })
 
 function seed(overrides?: Partial<TmuxSessionContent>) {
   const tab = createTab({
@@ -39,23 +43,38 @@ function rebind(tabId: string, sessionCode: string) {
 /** Flush every pending microtask (the probe chain is then → catch → finally). */
 const flush = () => new Promise((r) => setTimeout(r, 0))
 
+type Answer = { cwd: string; tmuxInstance: string }
+
 function deferred() {
-  let resolve!: (v: string) => void
+  let resolve!: (v: Answer) => void
   let reject!: (e: unknown) => void
-  const promise = new Promise<string>((res, rej) => { resolve = res; reject = rej })
+  const promise = new Promise<Answer>((res, rej) => { resolve = res; reject = rej })
   return { promise, resolve, reject }
+}
+
+/** The attach gate for a host, which the probe waits on (spec §4.6.2). */
+function setGate(hostId: string, open: boolean) {
+  useHostStore.setState({
+    runtime: {
+      ...useHostStore.getState().runtime,
+      [hostId]: { status: 'connected', attachReady: open },
+    },
+  })
 }
 
 beforeEach(() => {
   resetCwdProbes()
   vi.mocked(fetchSessionCwd).mockReset()
   useTabStore.setState({ tabs: {}, tabOrder: [], activeTabId: null })
+  useHostStore.setState({ runtime: {} })
+  setGate('h1', true)
+  setGate('h2', true)
 })
 
 describe('probeSessionCwd', () => {
   it('writes the probed cwd as a pane-probe baseline', async () => {
     const tab = seed()
-    vi.mocked(fetchSessionCwd).mockResolvedValue('/w/late')
+    vi.mocked(fetchSessionCwd).mockResolvedValue(answer('/w/late'))
     probeSessionCwd('h1', 'abc123', '222:2000')
     await vi.waitFor(() => expect(recordOf(tab.id)?.cwd).toBe('/w/late'))
     expect(recordOf(tab.id)?.cwdSource).toBe('pane-probe')
@@ -69,7 +88,7 @@ describe('probeSessionCwd', () => {
     probeSessionCwd('h1', 'abc123', '222:2000')
     probeMissingCwds('h1')
     expect(fetchSessionCwd).toHaveBeenCalledTimes(1)
-    d.resolve('/w/one')
+    d.resolve(answer('/w/one'))
     await vi.waitFor(() => expect(recordOf(tab.id)?.cwd).toBe('/w/one'))
   })
 
@@ -79,7 +98,7 @@ describe('probeSessionCwd', () => {
     vi.mocked(fetchSessionCwd).mockReturnValue(d.promise)
     probeSessionCwd('h1', 'abc123', '222:2000')
     rebind(tab.id, 'other-code')
-    d.resolve('/w/stale')
+    d.resolve(answer('/w/stale'))
     await flush()
     expect(recordOf(tab.id)?.cwd).toBeUndefined()
   })
@@ -110,14 +129,78 @@ describe('probeSessionCwd', () => {
     probeSessionCwd('h1', 'abc123', '222:2000')
     d.reject(new Error('boom'))
     await flush()
-    vi.mocked(fetchSessionCwd).mockResolvedValue('/w/retry')
+    vi.mocked(fetchSessionCwd).mockResolvedValue(answer('/w/retry'))
     probeSessionCwd('h1', 'abc123', '222:2000')
     expect(fetchSessionCwd).toHaveBeenCalledTimes(2)
   })
 
+  // --- Generation preconditions (spec §4.6.2) ---
+
+  it('discards an answer stamped with a generation other than the one it asked with', async () => {
+    const tab = seed()
+    vi.mocked(fetchSessionCwd).mockResolvedValue(answer('/w/stranger', '333:3000'))
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    await flush()
+    expect(fetchSessionCwd).toHaveBeenCalledTimes(1)
+    expect(recordOf(tab.id)?.cwd).toBeUndefined()
+  })
+
+  it('does not re-ask after a conclusive generation mismatch', async () => {
+    seed()
+    vi.mocked(fetchSessionCwd).mockResolvedValue(answer('/w/stranger', '333:3000'))
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    await flush()
+    probeMissingCwds('h1')
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    await flush()
+    expect(fetchSessionCwd).toHaveBeenCalledTimes(1)
+  })
+
+  it('discards an answer whose generation is unknown, but allows a later retry', async () => {
+    const tab = seed()
+    // "" is a transient answer (a `tmux display-message` timeout, or a
+    // generation that moved mid-read), not evidence the binding is stale.
+    vi.mocked(fetchSessionCwd).mockResolvedValueOnce(answer('/w/unknown', ''))
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    await flush()
+    expect(recordOf(tab.id)?.cwd).toBeUndefined()
+
+    vi.mocked(fetchSessionCwd).mockResolvedValue(answer('/w/settled'))
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    await vi.waitFor(() => expect(recordOf(tab.id)?.cwd).toBe('/w/settled'))
+    expect(fetchSessionCwd).toHaveBeenCalledTimes(2)
+  })
+
+  it('writes when a generation-less pane gets a generation-less answer', async () => {
+    const tab = seed({ tmuxInstance: '' })
+    vi.mocked(fetchSessionCwd).mockResolvedValue(answer('/w/legacy', ''))
+    probeSessionCwd('h1', 'abc123', '')
+    await vi.waitFor(() => expect(recordOf(tab.id)?.cwd).toBe('/w/legacy'))
+  })
+
+  it('does not ask while the host attach gate is closed', () => {
+    seed()
+    setGate('h1', false)
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    probeMissingCwds('h1')
+    expect(fetchSessionCwd).not.toHaveBeenCalled()
+  })
+
+  it('asks once the attach gate opens', async () => {
+    const tab = seed()
+    setGate('h1', false)
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    expect(fetchSessionCwd).not.toHaveBeenCalled()
+
+    setGate('h1', true)
+    vi.mocked(fetchSessionCwd).mockResolvedValue(answer('/w/gated'))
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    await vi.waitFor(() => expect(recordOf(tab.id)?.cwd).toBe('/w/gated'))
+  })
+
   it('writes nothing when the host answers with an empty cwd', async () => {
     const tab = seed()
-    vi.mocked(fetchSessionCwd).mockResolvedValue('')
+    vi.mocked(fetchSessionCwd).mockResolvedValue(answer(''))
     probeSessionCwd('h1', 'abc123', '222:2000')
     await flush()
     expect(fetchSessionCwd).toHaveBeenCalledTimes(1)
@@ -140,7 +223,7 @@ describe('probeMissingCwds', () => {
       tabs: { ...useTabStore.getState().tabs, [b.id]: b, [foreign.id]: foreign },
       tabOrder: [a.id, b.id, foreign.id],
     })
-    vi.mocked(fetchSessionCwd).mockImplementation(async (_h, code) => `/w/${code}`)
+    vi.mocked(fetchSessionCwd).mockImplementation(async (_h, code) => answer(`/w/${code}`))
 
     probeMissingCwds('h1')
 

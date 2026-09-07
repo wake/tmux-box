@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, screen, cleanup, act } from '@testing-library/react'
 import { SessionPaneContent } from './SessionPaneContent'
 import { useHostStore } from '../stores/useHostStore'
 import { useSessionStore } from '../stores/useSessionStore'
@@ -78,6 +78,9 @@ beforeEach(() => {
     hosts: { [HOST_ID]: { id: HOST_ID, name: 'mlab', ip: '100.64.0.2', port: 7860, order: 0 } },
     hostOrder: [HOST_ID],
     activeHostId: HOST_ID,
+    // The attach gate is open by default here; the probe waits on it
+    // (spec §4.6.2) and its own suite covers the closed case.
+    runtime: { [HOST_ID]: { status: 'connected' as const, attachReady: true } },
   })
   useSessionStore.setState({
     sessions: {
@@ -181,6 +184,40 @@ describe('SessionPaneContent', () => {
       const view = render(<SessionPaneContent pane={pane} isActive={true} />)
       view.rerender(<SessionPaneContent pane={pane} isActive={false} />)
       expect(probeSessionCwd).toHaveBeenCalledTimes(1)
+      expect(probeSessionCwd).toHaveBeenCalledWith(HOST_ID, 'dev001', '222:2000')
+    })
+
+    // The mount trigger must respect the same gate as the terminal attach
+    // (spec §4.6.2): a connection whose first `sessions` payload has not
+    // landed has not proved which generation the pane's code belongs to.
+    it('does not probe while the host attach gate is closed', () => {
+      useHostStore.setState({ runtime: { [HOST_ID]: { status: 'connected' as const, attachReady: false } } })
+      const pane = makePane({
+        content: {
+          kind: 'tmux-session', hostId: HOST_ID, sessionCode: 'dev001',
+          mode: 'terminal', cachedName: '', tmuxInstance: '222:2000',
+        },
+      })
+      setupTabStore(pane)
+      render(<SessionPaneContent pane={pane} isActive={true} />)
+      expect(probeSessionCwd).not.toHaveBeenCalled()
+    })
+
+    it('probes as soon as the gate opens under the mounted pane', async () => {
+      useHostStore.setState({ runtime: { [HOST_ID]: { status: 'connected' as const, attachReady: false } } })
+      const pane = makePane({
+        content: {
+          kind: 'tmux-session', hostId: HOST_ID, sessionCode: 'dev001',
+          mode: 'terminal', cachedName: '', tmuxInstance: '222:2000',
+        },
+      })
+      setupTabStore(pane)
+      render(<SessionPaneContent pane={pane} isActive={true} />)
+      expect(probeSessionCwd).not.toHaveBeenCalled()
+
+      await act(async () => {
+        useHostStore.setState({ runtime: { [HOST_ID]: { status: 'connected' as const, attachReady: true } } })
+      })
       expect(probeSessionCwd).toHaveBeenCalledWith(HOST_ID, 'dev001', '222:2000')
     })
 

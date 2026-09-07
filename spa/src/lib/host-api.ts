@@ -176,15 +176,30 @@ export async function fetchHistory(hostId: string, sessionCode: string): Promise
   return res.json()
 }
 
+/**
+ * A cwd reading and the tmux generation it was sampled in (spec §4.6.2).
+ *
+ * The pair travels together because a bare string cannot be attributed: a
+ * caller that stamps the answer with the generation it *asked* with writes the
+ * new session's directory into the old one's record whenever tmux restarted
+ * and reused the code mid-request. `tmuxInstance` is `''` when unknown — an
+ * old daemon, or a generation that moved during the read — and `''` never
+ * equals a real generation, so unknown can only ever mean "do not write".
+ */
+export interface SessionCwd {
+  cwd: string
+  tmuxInstance: string
+}
+
 export async function fetchSessionCwd(
   hostId: string,
   sessionCode: string,
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<SessionCwd> {
   const res = await hostFetch(hostId, `/api/sessions/${sessionCode}/cwd`, { signal })
   if (!res.ok) throw new Error(`fetchSessionCwd failed: ${res.status}`)
   const body = await res.json()
-  return String(body.cwd ?? '')
+  return { cwd: String(body.cwd ?? ''), tmuxInstance: String(body.tmux_instance ?? '') }
 }
 
 export async function fetchSessionHome(

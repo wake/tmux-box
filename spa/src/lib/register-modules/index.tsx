@@ -431,7 +431,11 @@ export function registerBuiltinModules(): void {
       tryOpenFile: (file, source, ctx) => tryOpenFileForTerminalLink(file, source, ctx),
       openAsBuffer: (file, source, ctx) => openFileAsBufferDirect(file, source, ctx),
       getActiveWorkspaceId: () => useWorkspaceStore.getState().activeWorkspaceId,
-      fetchPaneCwd: (hostId, sessionCode, signal) => fetchSessionCwd(hostId, sessionCode, signal),
+      // The terminal-link opener resolves a relative path at click time and
+      // does not persist the answer against a pane binding, so it takes the
+      // cwd alone; the generation stamp is the cwd probe's business (§4.6.2).
+      fetchPaneCwd: (hostId, sessionCode, signal) =>
+        fetchSessionCwd(hostId, sessionCode, signal).then((r) => r.cwd),
       fetchPaneHome: (hostId, sessionCode, signal) => fetchSessionHome(hostId, sessionCode, signal),
       resolveOpenContextCwd: (hostId, sessionCode) =>
         resolveOpenContextCwdFromSessions(hostId, sessionCode),

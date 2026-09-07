@@ -60,10 +60,18 @@ export function SessionPaneContent({ pane, isActive }: PaneRendererProps) {
   // session list has settled gets no further `sessions` broadcast, so it would
   // otherwise never learn its own directory. Once per binding — the probe
   // itself deduplicates against the sessions-branch sweep.
+  //
+  // Gated on the same attach gate as the terminal WS (spec §4.6.2). The other
+  // trigger fires from inside the reconciliation that opens the gate, so only
+  // this one can run against a connection that has not yet proved which
+  // generation owns the pane's code. Subscribed rather than merely read, so
+  // the probe fires when the gate opens under an already-mounted pane.
+  const attachGateOpen = useHostStore((s) => (hostId ? s.runtime[hostId]?.attachReady === true : true))
   useEffect(() => {
     if (mode !== 'terminal' || terminated) return
+    if (!attachGateOpen) return
     probeSessionCwd(hostId, sessionCode, tmuxInstance)
-  }, [hostId, sessionCode, tmuxInstance, mode, terminated])
+  }, [hostId, sessionCode, tmuxInstance, mode, terminated, attachGateOpen])
 
   // Look up tabId from store (pane renderers don't receive tabId as a prop)
   const tabId = useTabStore((s) => {
