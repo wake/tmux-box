@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.0.0-alpha.332] - 2026-09-07
+
+### Feat: 每個分頁記住自己怎麼被重建（#970）
+
+使用者的需求：主機重開之後 tmux session 全滅，希望每個崩掉的分頁能「一鍵還原」——記住自己的 pwd、tmux id、跑的是 claude/codex/opencode，以及對應的 resume 指令。
+
+**先量再寫。** 三家 agent 的 hook payload 全部實地觀測，沒有一項靠推論：cc 與 codex 的 `SessionStart` 從 `agent_trace_steps` 逐字撈出，兩者都帶 `session_id` + `cwd`；opencode 的則是實跑一次才拿到——它**只**帶 `session_id`，所以 `cwd` 只能從 plugin 的 `PluginInput` 取，而且 `session.created` 只在第一次送出 prompt 時才發，TUI 啟動不發。六個 resume flag 全部用 `--help` 驗過。
+
+**判定「這個 SessionStart 屬不屬於這個 pane」花掉最多來回。** spec 三輪 review：第一輪要求把判定從 frame layer 移到 process ancestry（因為同型巢狀 `cc` 裡開 `cc` 不走 proxy 收摺），第二輪指出那會踩到 launcher 反例——`codex.js` 用 `spawn` 不是 exec-replace，node launcher 全程是 native codex 的父程序，而 `codex.Identify` 對 argv 含 `/codex/` 的 JS runtime 回 true，所以**每一個 npm 裝的 codex 都會被判成巢狀在自己裡面**，永遠不記錄。實測確認後 v3 退回 frame layer：frame 只由 hook sender 建立，launcher 從不送 hook 所以永遠沒有 frame——「要求祖先有 frame」正是讓判定安全的那個條件。最終只把既有走訪那個被過載的 `(nil, nil)` 拆成四態，並把 envelope 掛在**變更結果**而非預先判定上（`applyFrameEvent` 在 Upsert 之後還有第二次 proxy 收摺會撤銷 root 判定）。
+
+實測數據也顯示原本擔心的 subagent 情形在事件層根本不會發生：cc `PdxSubagentStart` 21 次 vs `PdxSessionStart` 16 次、codex 9 vs 270，subagent 走獨立事件；跨型巢狀已被既有 proxy 收摺擋掉 45 次。真正的洞只有同型巢狀一種。
+
+**世代（tmux server identity）貫穿整條路徑。** session code 是 tmux `$N` 的可逆編碼，重開機後 `$0` 會鑄出同一個 code，所以 pane 可能靜默接到陌生 session。`tmux_instance` 現在蓋在每個 `Session`、每個 provenance envelope 上，並**併入 watcher 的 hash**——否則「重啟後重建出完全相同的清單」不會觸發廣播，SPA 會永遠停在舊世代。`tmuxInstance` 這個宣告已久卻從無人寫入的欄位，同時被補實。
+
+**PR 四輪 review、20 項發現、19 修 1 延後。** 反覆出現的其實是同一條規則的兩個方向：**沒有證據就不動作**——世代不明時不宣告 pane 已死（避免誤殺），世代不明時也不授權寫入或送指令（避免誤傷）。前三輪的每個洞都是把前者的「不判死」誤讀成後者的「可執行」：cwd probe 用**問的時候**的世代寫入回應值、retry 拿 SPA 快取當授權、`created.tmux_instance` 為空時直接省略前置條件。修法是給 daemon 兩個前置條件（`/cwd` 回傳與 cwd 同時採樣的世代、`send-keys` 接受 `expected_tmux_instance` 不符回 409），並讓 `/cwd` 在 pane 讀取的**前後兩側**各採樣一次、不一致就回空——`GetSession` 原本是在 pane 讀取之前蓋章，中間重啟會把新伺服器的 cwd 配上舊戳記交出去。
+
+**送鍵的檢查與送出必須是同一次 tmux 呼叫。** 分成兩次呼叫的任何做法都留有窗口，再採樣一次也沒用，因為 `SendKeysRaw` 會重新連線並按名稱解析目標。改用 `if-shell -F` 讓**收到按鍵的那台 server 自己評估條件**：server 若重啟，指令連到的是新 server，`#{pid}:#{start_time}` 不符即走 else 分支。按鍵以 hex 送出（巢狀指令字串會被 tmux 二次解析）、目標用 session id 而非名稱、sentinel 是唯一判決通道（`if-shell` 兩分支都 exit 0）。對真 server 實測過相符與不符兩路。
+
+**入口三處**：崩掉的 pane 上三列可勾可改的動作集 + 一顆 Rebuild；double-click 分頁名稱展開同樣三項（活著的 session 也能看能改，split tab 每個 pane 一塊）；Settings → Snapshot 的批次表，依 `(hostId, tmuxInstance, sessionCode)` 分組，兩個 pane 指向同一個死 session 只會建一個。舊的 snapshot capture／layout restore／undo **保留**——它們是另一件事，能力邊界寫在 spec §4.11：legacy 動作只開 shell，永遠不執行 agent 指令。
+
+**行為變更**（非功能本身、但你會看到）：原本靜默接錯 session 的 pane 現在會正確顯示成 terminated；opencode plugin template 改了而 `CheckHooks` 是 byte-compare，已安裝的 plugin 會判定 drift 需重裝；terminal attach 現在要等該連線的第一份 session payload 才建立。另外修掉一個既有 transport bug：`connect()` 在 ticket 飛行中提前返回，導致 `reconnectWithTicket()` 存進的新 ticket 從未被使用、舊 ticket 反而開了 socket。
+
+延後：`SnapshotSettingsSection` 拆檔（#975）。既有缺陷另開 #971 / #972 / #973 / #974。
+
+**尚未做**：重開機路徑無法單元測試，plan 末尾有 6 步手動驗證清單，需要在 Air 上真的 `tmux kill-server` 跑一次。
+
+
 ## [1.0.0-alpha.331] - 2026-09-07
 
 ### Refactor(store): trace store 依職責拆分（#968）
