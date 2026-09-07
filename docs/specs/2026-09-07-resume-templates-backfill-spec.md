@@ -1,7 +1,7 @@
 # Spec — Resume command templates & provenance backfill
 
-**Status:** v3
-**Review history:** v1 → codex `task-mtre55dl-hnlmvd` (2 Blocker, 9 Important, 1 Minor); v2 → codex `task-mtrggpct-ub3biv` (2 Blocker, 8 Important, 2 Minor). Dispositions in §10.
+**Status:** v4
+**Review history:** v1 → codex `task-mtre55dl-hnlmvd` (2 Blocker, 9 Important, 1 Minor); v2 → codex `task-mtrggpct-ub3biv` (2 Blocker, 8 Important, 2 Minor); v3 → codex `task-mtrgvcef-75s6gi` (1 Blocker, 4 Important, 2 Minor). Dispositions in §10.
 **Follows:** `docs/specs/2026-09-07-tab-rebuild-spec.md` (shipped alpha.332)
 **Supersedes:** that spec's §9.1 "Daemon-side backfill (cut from v1)"
 
@@ -317,24 +317,31 @@ separated token of the template, with `{id}` never substituted.
 ```
 request   { "command": "cld-yolo" }
 400       malformed body — `command` missing or not a string
-200       { "resolved": true,  "kind": "file",       "detail": "/Users/wake/.local/bin/claude" }
-200       { "resolved": true,  "kind": "shell-word", "detail": "cld-yolo" }
-200       { "resolved": false, "kind": "not-found",    "detail": "" }
-200       { "resolved": false, "kind": "unverifiable", "reason": "shell_metacharacters" | "too_long" | "timeout" | "shell_failed" }
+200       { "resolved": true,  "detail": "/Users/wake/.local/bin/claude" }
+200       { "resolved": true,  "detail": "cld-yolo" }
+200       { "resolved": true,  "detail": "alias cld='cld-yolo'" }
+200       { "resolved": false, "reason": "not_found" }
+200       { "resolved": false, "reason": "shell_metacharacters" | "too_long" | "timeout" | "shell_failed" }
 ```
 
 Everything that is not a malformed request body is a **200 with a verdict**.
 There is no 504: a timeout is a verdict about the probe, not a transport
 failure, and the UI renders all outcomes the same way.
 
-**Only two success kinds, and they are derived structurally.** `resolved` comes
-from the exit status; `kind` is `file` when the output looks like an absolute
-path and `shell-word` otherwise (function, alias, builtin, keyword). Human
-`type` output is **not** parsed: zsh prints `demo_fn is a shell function from
-zsh` while bash prints `demo_fn is a function` *followed by the whole function
-body*, so no single string test works across both and rc chatter can pollute
-either. The probe therefore uses `command -v`, whose output is a path or a
-word, and reads only the **last non-empty line** of stdout.
+**There is no `kind` field, deliberately.** `resolved` comes from the exit
+status and `detail` is what the shell printed; the API makes **no claim about
+what species of thing was found**. Two earlier drafts tried and both were
+wrong. Parsing `type` output does not survive the shell difference — zsh prints
+`demo_fn is a shell function from zsh`, bash prints `demo_fn is a function`
+*followed by the entire function body*. Classifying `command -v` output by
+shape does not survive PATH: measured on this machine, an alias prints its whole
+definition (`alias demo_alias='/bin/echo hello'`), and a PATH entry that is
+relative prints a relative path (`usr/bin/dirname`), so "starts with `/`" is not
+"is a file" and "one word" is not "is a shell word". The user does not need the
+species — they need to know it resolves, and to what. `detail` is the
+**last non-empty line** of stdout, so rc chatter before the answer is dropped;
+a multi-line alias definition is therefore shown truncated, which is a display
+limitation and not a wrong verdict.
 
 **Which shell.** The one tmux will actually start, asked of tmux:
 `show-options -gv default-shell` through the existing executor
@@ -453,14 +460,18 @@ the next event fills it.
 the whole concurrency design, and it is what keeps them out of the optimistic
 retry loops:
 
+Every method of `FramesStore`, so nothing is left to inference:
+
 | Store method | session_id / cwd |
 |---|---|
-| `Upsert` — INSERT branch | written from the struct |
-| `Upsert` — UPDATE branch (`frames.go:129-141`) | **omitted**; the existing "zero value keeps the stored value" pattern is extended to them for the struct that is returned |
+| `Upsert` (`frames.go:124`) — the `INSERT` column list | written from the struct |
+| `Upsert` — the `ON CONFLICT … DO UPDATE SET` list (`frames.go:165-173`) | **omitted**, so an existing row keeps its stored identity. The method then re-`SELECT`s through `GetByIdentity` (`frames.go:179`) and returns the persisted row, so the returned struct carries the stored value **by construction** — no zero-value merge is added, and none is needed |
 | `UpsertIfUnchanged` (`frames.go:372`) | **omitted from the SQL** — the proxy-attach retry loop reloads and re-writes whole rows, and including them would let a reloaded stale baseline clobber a fresh id |
-| `UpdateHookPath` / `UpdateHookPathAndResetSubagents` (`frames.go:305`) | **omitted** — this is the narrow UPDATE that ordinary hook events take |
-| **`UpdateSessionIdentity(frameID, sessionID, cwd)`** (new) | the **only** post-insert writer: a two-column UPDATE keyed by `frame_id`, each column written only when the new value is non-empty |
-| every SELECT / scan | included, so reads are complete |
+| `UpdateHookPath` (`frames.go:305`) / `UpdateHookPathAndResetSubagents` (`frames.go:337`) | **omitted** — this is the narrow UPDATE that ordinary hook events take |
+| `UpdateStatusAndLastSeen` (`frames.go:280`) | **omitted** |
+| `Delete` (`frames.go:254`) / `DeleteIfUnchanged` (`frames.go:263`) | whole-row delete; the identity goes with the frame, which is correct — the process is gone |
+| **`UpdateSessionIdentity(frameID, sessionID, cwd)`** (new) | the **only** post-insert writer: a two-column UPDATE keyed by `frame_id`, each column written only when the incoming value is non-empty |
+| `GetByIdentity`, `FindByPanePID`, `ListByPane`, `ListAll`, and the shared `scanFrame` | included, so every read is complete |
 
 Because identity is written by its own statement, no CAS retry has to
 re-apply it and no read-modify-write can lose it.
@@ -481,8 +492,21 @@ written, so a payload that carries neither clears nothing.
 
 **Reading the identity cheaply.** cc `PostToolUse` payloads embed whole tool
 inputs, so a full `map[string]any` unmarshal per event is not acceptable. The
-extractor unmarshals into `map[string]json.RawMessage`, which parses only the
-top-level key structure, and then decodes just `session_id` and `cwd`:
+extractor decodes into a **typed struct with exactly the two fields**:
+
+```go
+var id struct {
+    SessionID string `json:"session_id"`
+    Cwd       string `json:"cwd"`
+}
+```
+
+`encoding/json` skips an unknown field's value without materialising it, so a
+large `tool_input` costs a scan and no allocation. A `map[string]json.RawMessage`
+would *not* have been enough — v3 claimed it "parses only the top-level key
+structure", which is wrong: `RawMessage.UnmarshalJSON` **copies** every value's
+bytes, so the big field would have been allocated anyway. Plan adds a
+`benchmem` benchmark over a representative large payload to hold this.
 
 ```go
 // internal/agent/provider.go
@@ -524,23 +548,40 @@ fails — `""` authorises nothing on the SPA side (§5.4).
 Resolution:
 
 1. Resolve `{code}` to the tmux session and its panes.
-2. Resolve each pane's **current** process (`resolvePanePIDFn`). A pane whose
-   PID cannot be resolved contributes nothing.
-3. For each frame from `frames.ListByPane`, keep it only if **all** hold:
-   alive; `processStartTime` matches the stored value; and
-   `pidAncestorIncludesFn(frame.PID, panePID)` — the pane-tree check every
-   accepted event passes (`verify.go:60-65`). The third is what stops a
-   surviving agent from a previous tmux generation being handed back under a
-   reused pane id.
-4. A surviving frame is a **root** iff walking its own PPID chain (capped at
-   `proxyMaxDepth`) finds no other surviving frame of that pane. This is
-   `classifyAncestor`'s loop with the starting PID as a parameter; the
-   traversal is **extracted into one shared function** and `classifyAncestor`
-   becomes its first caller, so there is one implementation of the depth cap,
-   the self-parent guard and the unreadable-process rule. The walk needs only
-   a boolean here — "something framed is above me" — so
-   `VerdictSameTypeAbove`'s hard stop is correct for this use as well; the
-   ancestor it returns is *not* claimed to be the outermost one.
+2. Resolve each pane's **current** process (`resolvePanePIDFn`, whose real
+   signature is `func(tmux.Executor, string) (int, error)`). A pane whose PID
+   cannot be resolved contributes nothing.
+3. For each frame from `frames.ListByPane`, keep it only if it is alive and its
+   `processStartTime` matches the stored value.
+4. **One walk per surviving frame answers both questions.** Walking
+   `frame.PID`'s PPID chain, the traversal reports:
+   - whether `panePID` appears on the chain — the pane-tree check every
+     accepted event passes (`verify.go:60-65`), and what stops a surviving
+     agent from a previous tmux generation being handed back under a reused
+     pane id;
+   - whether any *other* surviving frame of that pane appears on it — which
+     makes this frame a non-root.
+
+   A frame is a **root** iff the first is true and the second is false.
+
+   The traversal is `classifyAncestor`'s loop **extracted into one shared
+   function**, with `classifyAncestor` as its first caller, so the depth cap,
+   the self-parent guard and the unreadable-process rule have one
+   implementation. The walk needs only a boolean here — "something framed is
+   above me" — so `VerdictSameTypeAbove`'s hard stop is correct for this use;
+   the ancestor it returns is *not* claimed to be the outermost one.
+
+   **`pidAncestorIncludesFn` is not called.** v3 proposed reusing it and that
+   was wrong on two counts: `PidAncestorIncludes` (`probe/liveness.go:303`)
+   walks with **no depth cap**, and it calls `agentpkg.ReadProcessInfo`
+   directly rather than the `readProcessInfoFn` seam — so it would bypass both
+   the memo and the test stubs, and the cost contract below could not be met or
+   asserted. Its *semantics* are what step 4 reproduces, including that a frame
+   whose PID equals the pane PID counts as inside the tree.
+
+   The projection's own pane filter (`frame_ops.go:951-978`) is **also** not
+   reused: it keeps a frame when resolution fails, which is the opposite of the
+   policy here.
 5. A walk that cannot complete excludes that frame rather than promoting it:
    no evidence, no action.
 6. Among roots with a non-empty `session_id`: none → `found: false`; one → that
@@ -557,10 +598,20 @@ paper over it, and §9 states it.
 
 **Cost.** §3.4: one process read is four `ps` forks on darwin, and this walks
 every frame in the pane. So the handler builds **one memoizing process reader
-per request** — each PID is read at most once across every walk — and runs
-under a request deadline (5 s), answering `found: false` if it expires. The
-memo is per-request, never shared, so it cannot serve stale ancestry to a later
-call. Read-only: no store writes, no envelope, no state between calls.
+per request**, wrapping `readProcessInfoFn`, and every walk in the request goes
+through it — including the pane-tree half of step 4, which is why that half had
+to stop being a separate helper. Each PID is then read at most once for the
+whole request. Frames in a pane share almost all of their ancestry, so the memo
+turns O(frames × depth) reads into roughly O(distinct PIDs).
+
+The request carries a 5 s deadline, **checked between process reads**. It
+cannot interrupt one: `readProcessInfoPlatform` uses `exec.Command(...).Output()`
+with no context (`process_info_darwin.go:9`), and giving it one is a change to
+a shipped hot path that this spec does not make (§11). A single `ps` does not
+hang for long, and the deadline still bounds the walk.
+
+The memo is per-request, never shared, so it cannot serve stale ancestry to a
+later call. Read-only: no store writes, no envelope, no state between calls.
 
 ### 5.4 SPA — the probe
 
@@ -586,7 +637,9 @@ its named helpers rather than paraphrasing its rules:
 
 **A pane wants a provenance probe when** it is live, terminal-mode, its
 generation matches, and either `rebuild.agent` is absent **or**
-`rebuild.unverified` is true.
+`rebuild.unverified` is true. Nothing else makes a pane eligible: a record with
+a confirmed agent never asks again, which is what makes the whole thing
+terminate (§5.5).
 
 **Three triggers**, because two are not enough:
 
@@ -595,23 +648,47 @@ generation matches, and either `rebuild.agent` is absent **or**
 2. Pane attach in `SessionPaneContent` — covers a pane opened after the list
    settled.
 3. **A hook broadcast for a session whose pane still wants provenance.** This
-   is the trigger v2 lacked, and without it the common case fails: the first
+   is the trigger v2 lacked, and without it the everyday case fails: the first
    probe runs before any event has filled the frame's `session_id`, gets
    `found: false`, and nothing ever asks again — the session list has not
    changed and the pane is not re-attached. The hook stream is exactly the
    signal that the daemon now knows more than it did.
 
-**Stop conditions**, so trigger 3 cannot become a poll:
+#### 5.4.1 The re-query state machine
 
-- A binding that answered `found: false` is not re-asked for **30 s**, and the
-  timer resets only on a hook broadcast for that session — so an idle session
-  is asked once, and a busy one at most twice a minute.
-- A binding that answered with an identity **equal to what the record already
-  holds** is not re-asked for 30 s either. This is the oscillation guard for the
-  `unverified` clause: the projection's `TopFrame` type can legitimately
-  disagree with the ancestry root indefinitely (§3.2), and without this the
-  pane would ask on every broadcast forever.
-- `disowned` remains permanent, as in `cwd-probe`.
+Rate limiting a trigger by dropping requests loses the one hook that mattered:
+a session that emits a single event at t=5 s and then goes idle would be
+skipped by a bare cooldown and never asked again. So a suppressed trigger is
+**deferred, never dropped**. Per binding:
+
+```
+{ nextAllowedAt: number, pending: boolean, timer: handle | null }
+```
+
+- A trigger fires a request immediately when nothing is in flight and
+  `now >= nextAllowedAt`.
+- Otherwise it sets `pending = true` and, if no timer is armed, arms one for
+  `nextAllowedAt`. **Later triggers never move `nextAllowedAt`** — it is
+  computed only when a request *completes*, as `completedAt + 30 s`. A busy
+  session therefore cannot starve its own deferred run by pushing the deadline
+  forward, which is the failure a debounce would have.
+- When the timer fires, or an in-flight request completes with `pending` set,
+  exactly **one** further request runs and `pending` clears. Coalescing is the
+  point: ten hooks during a cooldown buy one re-query, not ten.
+- Before that deferred run, the binding, the attach gate and the pane
+  eligibility are **re-checked**. A pane that stopped wanting an answer in the
+  meantime issues no request.
+- Cooldown state lives beside `inFlight` / `disowned` in the module and is
+  cleared by the same `reset*` test seam.
+
+**This terminates.** The only states that keep a pane eligible are "no agent"
+and "unverified", and §5.5 guarantees every answer leaves at least one of them
+closed: an answer with an identity ends "no agent"; an answer that agrees with
+an `unverified` record clears the flag; an answer that disagrees replaces the
+record. A binding that keeps answering `found: false` costs one request per 30 s
+**only while hooks keep arriving**, and none at all once the session is idle.
+
+`disowned` remains permanent, as in `cwd-probe`.
 
 ### 5.5 SPA — the write
 
@@ -624,19 +701,40 @@ New `RebuildPatch` arm, applied in `useTabStore.setPaneRebuild`:
 The generation guard is unchanged: the write matches panes on
 `(hostId, sessionCode, tmuxInstance)`.
 
-Three modes, chosen by comparing the answer's identity with the record's:
+**Four modes, evaluated in order; the first match wins.** They are mutually
+exclusive by construction, which v3's table was not — it let "agent present,
+same identity, verified" match two rows at once:
 
-| Record state | Mode | Effect |
-|---|---|---|
-| no `agent` | **fill** | writes `agent`; writes `cwd` only if the answer has one and the existing `cwd` is absent or `cwdSource === 'pane-probe'`; sets `cwdSource: 'agent-backfill'` when it writes one; leaves `resumeCommandOverride` alone |
-| `agent` with the **same** type and sessionId | **refresh** | fills only fields the record lacks (typically a `cwd` that arrived late, §5.2). Never clears, never touches the override |
-| `agent` present, `unverified`, **different** type or sessionId | **replace** | writes the whole agent group as one unit, exactly as `agent-group` does: new `agent`, the answer's `cwd` (or none), `unverified` cleared, **and `resumeCommandOverride` cleared** (§4.3). A `cwdSource: 'user'` cwd is the one thing kept |
-| `agent` present, not `unverified` | **no-op** | the "有了就跳過" policy |
+| # | Condition | Mode | Effect |
+|---|---|---|---|
+| 1 | `prev.agent` absent | **fill** | writes `agent`; writes `cwd` only if the answer has one and the existing `cwd` is absent or `cwdSource === 'pane-probe'`; sets `cwdSource: 'agent-backfill'` when it writes one; leaves `resumeCommandOverride` alone |
+| 2 | `prev.unverified` **and** the answer's `type` or `sessionId` differs | **replace** | writes the whole agent group as one unit, exactly as `agent-group` does: new `agent`, the answer's `cwd` (or none), `unverified` cleared, **and `resumeCommandOverride` cleared** (§4.3). A `cwdSource: 'user'` cwd is the one thing kept |
+| 3 | `prev.unverified` **and** the answer's identity matches | **confirm** | clears `unverified` and nothing else |
+| 4 | otherwise (`agent` present and verified) | **no-op** | the "有了就跳過" policy |
 
-The **replace** mode is why the fill-only rule of v2 was not enough: correcting
-the agent while leaving the previous agent's `cwd` and override attached would
-recreate exactly the cross-identity mixture v1 §4.1 introduced whole-group
-writes to prevent.
+**Mode 3 is the convergence rule.** Without it an `unverified` record whose
+agent the daemon agrees with would stay flagged and stay eligible forever,
+re-asking every 30 s for the life of the session — the projection's `TopFrame`
+type can legitimately differ from the ancestry root indefinitely (§3.2), so the
+flag would never lift on its own. An ancestry answer that names the same agent
+is positive evidence the record is right, and saying so is what ends the loop.
+
+**Mode 2** is why the fill-only rule of v2 was not enough: correcting the agent
+while leaving the previous agent's `cwd` and override attached would recreate
+exactly the cross-identity mixture v1 §4.1 introduced whole-group writes to
+prevent.
+
+**There is no "refresh" mode, and no promise to fill a late `cwd`.** v3 had
+one, and it was unreachable: once a fill succeeds the record has an agent and
+is not `unverified`, so the pane stops being eligible and the refresh could
+never run. Rather than widen eligibility to chase it — which would make every
+verified pane ask forever — the promise is withdrawn. It costs little: the cwd
+probe already supplies a `cwd` independently, so what is lost is a provenance
+upgrade from `'pane-probe'` to `'agent-backfill'`, not the directory itself.
+The same withdrawal applies to opencode's in-process session switch (§3.3):
+the daemon's column follows it, but a record that is already verified will not
+ask again, and `unverified` is only raised by the replay's agent-**type**
+comparison. §9 states both.
 
 **Phase 1 additionally writes `resumeCommand`** through the existing
 `composeResumeCommand` — but **only when the record's `resumeCommand` is
@@ -686,7 +784,9 @@ not clear it; a **different** id from an ordinary event replaces it (the
 opencode session-switch case, §3.3); a `cwd` arriving later than the id fills
 in; a `SessionStart` with `source == "compact"` changes nothing. Concurrency: a
 proxy attach retry loop interleaved with an identity write leaves both the
-merged subagents list and the new id intact — pinning the §5.2 table.
+merged subagents list and the new id intact — pinning the §5.2 table. A
+`benchmem` benchmark over a cc `PostToolUse` payload with a large `tool_input`
+holds the extractor's allocation claim (§5.2).
 
 **Go — the ownership query (Phase 1).** Table-driven over frame layouts, using
 the `isPidAliveFn` / `processStartTimeFn` / `readProcessInfoFn` /
@@ -712,10 +812,12 @@ including `TestProvenance_NonSessionStart_NoEnvelope` — correct precisely
 because Phase 1 adds no new envelope.
 
 **Go — probe (Phase 2).** `resolve-command`: metacharacter and oversize
-rejection without exec; malformed body → 400; timeout → 200 `unverifiable`;
-exit 0 with a `/`-prefixed last line → `kind: "file"`; exit 0 with a bare word →
-`kind: "shell-word"`; exit 1 → `not-found`; rc chatter before the answer is
-ignored because only the last non-empty line is read. The shell invocation sits
+rejection without exec; malformed body → 400; timeout → 200 with
+`reason: "timeout"`; exit 1 → `reason: "not_found"`; exit 0 returns the last
+non-empty line as `detail`, so rc chatter before the answer is ignored. Real
+shells are exercised over the shapes measured in §4.4 — absolute path, relative
+PATH entry, function, alias, builtin, keyword — each asserting `resolved` only,
+because the API makes no claim beyond it. The shell invocation sits
 behind a function variable so tests substitute a stub. Two integration tests run
 the real shell: one resolving a builtin, and one where the rc file spawns a
 long-lived descendant holding the output pipe, asserting the request returns
@@ -728,17 +830,33 @@ assertion pinning the `parentID` child filter.
 **Vitest — probe client (Phase 1).** Attach gate closed → no request;
 in-flight dedup; both-non-empty-and-different disowns, and neither an answered
 `''` nor a requested `''` does; a pane re-pointed mid-flight takes nothing; a
-pane with `unverified` asks even though it has an agent; **`found: false`
-followed by a hook broadcast re-asks after the cooldown and not before**; an
-answer identical to the record does not re-ask on the next broadcast.
+pane with `unverified` asks even though it has an agent.
 
-**Vitest — store (Phase 1).** The four modes of §5.5 in a table: fill on an
-empty record; refresh filling only a missing `cwd`; replace on an `unverified`
-identity change writing the whole group and clearing the override; no-op on a
-verified record. Plus: a `'user'` cwd survives fill and replace; a
-`'pane-probe'` cwd is replaced; the generation guard; a later `agent-group`
-overwrites; a manual cwd edit sets `cwdSource: 'user'`; **a hand-typed
-`resumeCommand` on an agent-less record survives a fill**.
+The §5.4.1 state machine gets its own suite, on fake timers, because it is the
+part review has broken twice:
+
+- **the single-hook case**: `found: false` at t=0, one hook broadcast at t=5 s
+  while the cooldown holds, then total silence — a request must still run when
+  the cooldown expires. This is the round-3 Blocker and it fails against a
+  drop-on-cooldown implementation;
+- **no deadline extension**: hooks at t=5, 10, 15, 20 s produce exactly one
+  deferred request, and it runs at t≈30 s, not at t≈50;
+- **coalescing**: ten hooks inside one cooldown buy one request;
+- **in-flight**: a hook arriving while a request is open schedules exactly one
+  follow-up after it completes;
+- **re-checked before the deferred run**: a pane that gained an agent, was
+  re-pointed, terminated, or lost its attach gate during the cooldown issues
+  no request;
+- **termination**: after a `confirm` the pane makes no further request on any
+  number of broadcasts.
+
+**Vitest — store (Phase 1).** The four modes of §5.5 as an ordered table,
+including the case v3 left ambiguous (agent present, same identity, verified →
+**no-op**, matched by row 4 and not by any earlier row). Plus: `confirm` clears
+`unverified` and changes nothing else; a `'user'` cwd survives fill and
+replace; a `'pane-probe'` cwd is replaced; the generation guard; a later
+`agent-group` overwrites; a manual cwd edit sets `cwdSource: 'user'`; **a
+hand-typed `resumeCommand` on an agent-less record survives a fill**.
 
 **Vitest — resolution (Phase 2).** Three layers × (usable id / unusable id / no
 id) × (override / no override); `{id}` replaced at every occurrence; an unsafe
@@ -793,6 +911,14 @@ endpoint, whose 404 renders as `unverifiable`.
   than papering over it.
 - **A pane whose agent has exited gets no answer.** The query reads live
   frames; the pane rebuilds as a shell.
+- **A confirmed record is never revisited.** Once a pane has an agent and is
+  not `unverified` it stops asking, so two things do not propagate: a `cwd` the
+  daemon learns after the agent was recorded (the record keeps its probed one),
+  and an opencode in-process switch to a different session id (§3.3) — the
+  daemon's column follows it, the record does not, because `unverified` is
+  raised only by a disagreement in agent **type**. Both are visible and
+  editable in the panel. This is the price of terminating (§5.5), and it is the
+  same bound the shipped design already lives under.
 - **Two root agents in one tmux session:** the `SessionStart` writer records the
   most recent `SessionStart`, the query returns the most recently *seen* frame.
   They can name different agents; both are real roots of the session (§5.3).
@@ -801,7 +927,19 @@ endpoint, whose 404 renders as `unverifiable`.
 
 ## 10. Review disposition
 
-### 10.1 Round 2 — codex `task-mtrggpct-ub3biv` on v2
+### 10.1 Round 3 — codex `task-mtrgvcef-75s6gi` on v3
+
+| # | Finding | Disposition |
+|---|---|---|
+| 1 | Blocker — a cooldown drops the one hook that mattered; a debounce would starve a busy session | **Accepted.** §5.4.1 is a defer-never-drop state machine with a fixed `nextAllowedAt`, a coalesced `pending` run, re-checks before the deferred request, and a termination argument. The single-hook timing is now a named test |
+| 2 | Important — a successful fill removes eligibility, so the promised late-`cwd` refresh was unreachable | **Accepted by withdrawal.** The refresh mode and the promise are removed rather than widening eligibility, which would make every verified pane ask forever. Stated as a limit (§5.5, §9) |
+| 3 | Important — the modes were not mutually exclusive; `unverified` never converged | **Accepted.** An ordered four-row table, plus the new **confirm** mode that clears `unverified` on an agreeing answer — the rule that makes the loop terminate (§5.5) |
+| 4 | Important — `pidAncestorIncludesFn` bypasses the memo and the test seam, and has no cap | **Accepted.** It is no longer called; step 4 of §5.3 answers both questions in the one shared, memoized traversal. The deadline is honestly scoped to "between reads" |
+| 5 | Important — `map[string]json.RawMessage` still scans and copies the big field | **Accepted.** A two-field typed struct, with a `benchmem` benchmark (§5.2, §7) |
+| 6 | Minor — `command -v` output is not "path or word"; an alias prints its definition, a relative PATH entry a relative path | **Accepted.** `kind` is removed from the API entirely; the endpoint returns `resolved` plus what the shell printed and claims nothing about species (§4.4) |
+| 7 | Minor — `Upsert` is `ON CONFLICT DO UPDATE` then re-`SELECT`; the method table was wrong and incomplete | **Accepted.** The table is rewritten against the real code and covers every `FramesStore` method (§5.2) |
+
+### 10.2 Round 2 — codex `task-mtrggpct-ub3biv` on v2
 
 | # | Finding | Disposition |
 |---|---|---|
@@ -818,7 +956,7 @@ endpoint, whose 404 renders as `unverifiable`.
 | 11 | Minor — imprecise summary of `disowned` and the generation comparisons | **Accepted.** §5.4 names the helpers and separates eligibility from write authorisation |
 | 12 | Minor — a test result survived a host switch | **Accepted.** Keyed by `(hostId, commandWord)` (§4.5) |
 
-### 10.2 Round 1 — codex `task-mtre55dl-hnlmvd` on v1
+### 10.3 Round 1 — codex `task-mtre55dl-hnlmvd` on v1
 
 Findings 1 and 2 (Blockers) drove the switch from a pushed envelope to a query
 (§5.1); 3 and 5 became moot with the envelope and the arming map; 4, 6, 7, 8,
