@@ -567,7 +567,11 @@ fails — `""` authorises nothing on the SPA side (§5.4).
 
 Resolution:
 
-1. Resolve `{code}` to the tmux session and its panes.
+1. Find the session's panes **through the frames and the tmux session id**:
+   the distinct panes that have any frame, each mapped to its `$N` and encoded
+   to a code. Never through the session *name* — that path runs through a cache
+   deliberately stale for 250 ms, and a rename between two live sessions inside
+   that window would answer one session's code with the other's agent.
 2. Resolve each pane's **current** process (`resolvePanePIDFn`, whose real
    signature is `func(tmux.Executor, string) (int, error)`). A pane whose PID
    cannot be resolved contributes nothing.

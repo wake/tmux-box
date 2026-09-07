@@ -799,7 +799,11 @@ treats "no answer" uniformly and a dead code is a normal race.
   `session_id` and `tmux_pane_id` are `$0`'s — not merely that `found` is true,
   which a crossed-over answer would also satisfy; unknown code → `found: false` with a 200; a
   disagreeing generation sample → `tmux_instance: ""`; the deadline expiring →
-  `found: false`; and **memoization across two panes**, asserted the same
+  `found: false`; **a deadline that expires only after one owner has already
+  been collected** → still `found: false`, which is the only way to tell a
+  handler that discards the partial slice from one that returns it (with an
+  immediate expiry the partial is empty and the two are indistinguishable); and
+  **memoization across two panes**, asserted the same
   positive way as Task 6 — the exact PID set, once each, including the ancestor
   the two panes share.
 - [ ] **Step 2: Run — fail**
