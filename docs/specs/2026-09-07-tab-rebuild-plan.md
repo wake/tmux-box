@@ -1,0 +1,2213 @@
+# Tab Rebuild Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Give every `tmux-session` pane a self-maintaining record of its tmux
+session name, launch cwd, running agent and resume command, so a pane whose
+session died to a host reboot can be recreated with one button.
+
+**Architecture:** The daemon already receives everything needed inside hook
+payloads and already decides which agent owns a pane; both are currently
+dropped before reaching the SPA. Phase 1–2 surface them as a self-contained
+`pdx_provenance` envelope gated on the frame-mutation outcome, and stamp the
+tmux generation onto the session payloads. Phase 3–4 make the SPA
+generation-aware and accumulate the record in the persisted tab store. Phase
+5–7 build the rebuild engine and its three entry points.
+
+**Tech Stack:** Go (net/http, modernc.org/sqlite, gorilla/websocket) · React 19
+/ Zustand 5 / Vitest / Tailwind 4 · pnpm
+
+**Spec:** `docs/specs/2026-09-07-tab-rebuild-spec.md` (v4)
+
+## Global Constraints
+
+- **TDD, no exceptions.** Every task writes the failing test first, runs it to
+  see it fail, then implements. Each task is one commit.
+- **Commit messages in English**; conversation replies in Traditional Chinese
+  (project convention). Every commit ends with:
+  ```
+  Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+  Claude-Session: https://claude.ai/code/session_01X87wCa7vVUw4yAH1b5PPfj
+  ```
+- **Verification commands** (the root `package.json` has no `lint`/`build`
+  scripts — these exact forms are required):
+  ```
+  go test ./...
+  pnpm --prefix spa exec vitest run
+  pnpm --prefix spa run lint
+  pnpm --prefix spa run build
+  ```
+- **No persist migration.** Alpha convention: `rebuild` is an optional field;
+  panes without it must behave exactly as today.
+- **Never widen an existing behaviour silently.** Phase 1 is a pure refactor:
+  if any existing test in `internal/module/agent` needs editing to pass, stop
+  and report instead of editing it.
+- **i18n**: every user-visible string goes in BOTH `spa/src/locales/en.json`
+  and `spa/src/locales/zh-TW.json`. Keys are flat dotted strings, e.g.
+  `"rebuild.create_session"`.
+- **Stream-mode panes (`mode: 'stream'`) are out of scope** in every task.
+  Guard on `content.mode === 'terminal'` wherever panes are selected.
+
+---
+
+## File Structure
+
+**Daemon (Go)**
+
+| File | Responsibility |
+|---|---|
+| `internal/module/agent/ancestor.go` *(new)* | `AncestorVerdict` + `classifyAncestor` — the single pane-ancestor traversal |
+| `internal/module/agent/frame_ops.go` *(modify)* | `findProxyParent` becomes a thin caller; envelope gated on mutation outcome |
+| `internal/module/agent/provenance.go` *(new)* | Builds the `pdx_provenance` map from a request + mutation outcome |
+| `internal/agent/{cc,codex,opencode}/status.go` *(modify)* | `SessionStart` passes `session_id` / `cwd` through `Detail` |
+| `internal/agent/opencode/plugin_template.go` *(modify)* | Plugin emits `cwd` |
+| `internal/module/session/{provider,service}.go` *(modify)* | `SessionInfo.TmuxInstance` |
+| `internal/module/session/watcher.go` *(modify)* | Instance read per tick and hashed with the list |
+
+**SPA (TypeScript)**
+
+| File | Responsibility |
+|---|---|
+| `spa/src/types/tab.ts` *(modify)* | `PaneRebuildRecord`, `rebuild?` on the `tmux-session` variant |
+| `spa/src/stores/useTabStore.ts` *(modify)* | `setPaneRebuild`, `markTerminatedForGeneration` |
+| `spa/src/lib/rebuild/composer.ts` *(new)* | Pure: agent + session id → resume command |
+| `spa/src/lib/rebuild/provenance.ts` *(new)* | Pure: envelope → record patch; validation |
+| `spa/src/lib/rebuild/engine.ts` *(new)* | The rebuild operation (create → resume → re-point) |
+| `spa/src/lib/rebuild/transport.ts` *(new)* | Host-pinned fetch, no active-host fallback |
+| `spa/src/stores/useRebuildStore.ts` *(new)* | Per-pane operation state + the global operation lock |
+| `spa/src/components/TerminatedPane.tsx` *(modify)* | Action set UI |
+| `spa/src/components/RebuildActionSet.tsx` *(new)* | The three editable rows, reused by pane + popover |
+| `spa/src/components/RenamePopover.tsx` *(modify)* | Per-pane detail blocks |
+| `spa/src/features/workspace/hooks.ts` *(modify)* | Popover entry point collects all terminal panes |
+| `spa/src/components/settings/SnapshotSettingsSection.tsx` *(modify)* | Batch view + Rebuild all + shared lock |
+
+---
+
+# Phase 1 — Ancestor classification (daemon, pure refactor)
+
+### Task 1: Split the ancestor walk's overloaded return
+
+**Files:**
+- Create: `internal/module/agent/ancestor.go`
+- Create: `internal/module/agent/ancestor_test.go`
+- Modify: `internal/module/agent/frame_ops.go` (`findProxyParent`, ~1963-2030)
+
+**Interfaces:**
+- Consumes: `EventRequest` (`handler.go:85-103`), `store.Frame`,
+  `m.frames.FindByPanePID`, `readProcessInfoFn`, `isPidAliveFn`,
+  `processStartTimeFn`, `proxyMaxDepth` — all existing package-level symbols.
+- Produces:
+  ```go
+  type AncestorVerdict int
+  const (
+      VerdictRoot          AncestorVerdict = iota
+      VerdictSameTypeAbove
+      VerdictProxyParent
+      VerdictIndeterminate
+  )
+  func (m *Module) classifyAncestor(req EventRequest) (AncestorVerdict, *store.Frame, error)
+  ```
+  Task 4 consumes `classifyAncestor`; nothing else does.
+
+**Context the implementer needs:** `findProxyParent` today returns
+`(nil, nil)` for five distinct outcomes — no framed ancestor, same-type hard
+stop, stale candidates, depth exceeded, and process-read errors. The walk is
+otherwise correct and heavily tested; **do not change how it walks**. Only
+record which outcome ended it. Liveness + identity gating already applies to
+same-type and cross-type candidates alike (`frame_ops.go:1996-2015`), so a
+*stale* same-type frame must keep the walk going — `frame_ops_test.go:1470`
+pins that.
+
+- [ ] **Step 1: Write the failing test**
+
+```go
+// internal/module/agent/ancestor_test.go
+package agent
+
+import "testing"
+
+func TestClassifyAncestor_NoFramedAncestor_Root(t *testing.T) {
+	m := newProxyTestModule(t)
+	req := EventRequest{TmuxPaneID: "%5", AgentType: "codex", SenderPID: 200, SenderStartTime: "t200"}
+	withProcessTree(t, map[int]int{200: 999}) // 999 has no frame
+
+	verdict, parent, err := m.classifyAncestor(req)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if verdict != VerdictRoot {
+		t.Fatalf("verdict = %v, want VerdictRoot", verdict)
+	}
+	if parent != nil {
+		t.Fatalf("parent = %v, want nil", parent)
+	}
+}
+
+func TestClassifyAncestor_LiveSameTypeAncestor_SameTypeAbove(t *testing.T) {
+	m := newProxyTestModule(t)
+	seedFrame(t, m, "%5", "cc", 100, "t100", 10)
+	req := EventRequest{TmuxPaneID: "%5", AgentType: "cc", SenderPID: 200, SenderStartTime: "t200"}
+	withProcessTree(t, map[int]int{200: 100})
+	withLivePids(t, map[int]string{100: "t100"})
+
+	verdict, _, err := m.classifyAncestor(req)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if verdict != VerdictSameTypeAbove {
+		t.Fatalf("verdict = %v, want VerdictSameTypeAbove", verdict)
+	}
+}
+
+func TestClassifyAncestor_LiveCrossTypeAncestor_ProxyParent(t *testing.T) {
+	m := newProxyTestModule(t)
+	parent := seedFrame(t, m, "%5", "cc", 100, "t100", 10)
+	req := EventRequest{TmuxPaneID: "%5", AgentType: "codex", SenderPID: 200, SenderStartTime: "t200"}
+	withProcessTree(t, map[int]int{200: 100})
+	withLivePids(t, map[int]string{100: "t100"})
+
+	verdict, got, err := m.classifyAncestor(req)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if verdict != VerdictProxyParent {
+		t.Fatalf("verdict = %v, want VerdictProxyParent", verdict)
+	}
+	if got == nil || got.FrameID != parent.FrameID {
+		t.Fatalf("parent = %v, want %v", got, parent.FrameID)
+	}
+}
+
+func TestClassifyAncestor_StaleSameTypeBelowLiveCrossType_ProxyParent(t *testing.T) {
+	// Regression guard mirroring frame_ops_test.go:1470 — a dead same-type
+	// frame must not hard-stop the walk to a live cross-type grandparent.
+	m := newProxyTestModule(t)
+	seedFrame(t, m, "%5", "codex", 150, "t150", 5) // stale: pid not alive
+	grand := seedFrame(t, m, "%5", "cc", 100, "t100", 10)
+	req := EventRequest{TmuxPaneID: "%5", AgentType: "codex", SenderPID: 200, SenderStartTime: "t200"}
+	withProcessTree(t, map[int]int{200: 150, 150: 100})
+	withLivePids(t, map[int]string{100: "t100"}) // 150 absent = dead
+
+	verdict, got, err := m.classifyAncestor(req)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if verdict != VerdictProxyParent || got == nil || got.FrameID != grand.FrameID {
+		t.Fatalf("verdict = %v parent = %v, want ProxyParent/%s", verdict, got, grand.FrameID)
+	}
+}
+
+func TestClassifyAncestor_ProcessReadError_Indeterminate(t *testing.T) {
+	m := newProxyTestModule(t)
+	req := EventRequest{TmuxPaneID: "%5", AgentType: "codex", SenderPID: 200, SenderStartTime: "t200"}
+	withProcessReadError(t, 200)
+
+	verdict, _, err := m.classifyAncestor(req)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if verdict != VerdictIndeterminate {
+		t.Fatalf("verdict = %v, want VerdictIndeterminate", verdict)
+	}
+}
+```
+
+**Note on helpers:** `newProxyTestModule` and `seedFrame` already exist in
+`frame_ops_test.go`. `withProcessTree`, `withLivePids` and
+`withProcessReadError` do not — write them in `ancestor_test.go` as thin
+wrappers that swap `readProcessInfoFn` / `isPidAliveFn` /
+`processStartTimeFn` and restore them via `t.Cleanup`, following the swap
+pattern already used at `frame_ops_test.go:2540-2560`.
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `go test ./internal/module/agent/ -run TestClassifyAncestor -v`
+Expected: FAIL — `m.classifyAncestor undefined`, `VerdictRoot undefined`.
+
+- [ ] **Step 3: Move the walk body into `classifyAncestor`**
+
+Cut the loop body out of `findProxyParent` verbatim into
+`internal/module/agent/ancestor.go`, replacing each `return nil, nil` with the
+verdict that describes why it stopped:
+
+```go
+package agent
+
+import "github.com/wake/purdex/internal/store"
+
+// AncestorVerdict distinguishes the outcomes that findProxyParent used to
+// collapse into (nil, nil). See spec §4.3.
+type AncestorVerdict int
+
+const (
+	VerdictRoot AncestorVerdict = iota
+	VerdictSameTypeAbove
+	VerdictProxyParent
+	VerdictIndeterminate
+)
+
+// classifyAncestor walks the sender's PPID chain (capped at proxyMaxDepth)
+// looking for an alive, identity-verified frame in the same pane. It is the
+// single traversal behind both the proxy decision and the provenance
+// ownership decision; the two results are reported separately so neither
+// shadows the other.
+//
+// The traversal itself is unchanged from the pre-split findProxyParent — only
+// the return value carries more information.
+func (m *Module) classifyAncestor(req EventRequest) (AncestorVerdict, *store.Frame, error) {
+	if m.frames == nil {
+		return VerdictIndeterminate, nil, nil
+	}
+	info, err := readProcessInfoFn(req.SenderPID)
+	if err != nil {
+		return VerdictIndeterminate, nil, nil
+	}
+	ppid := info.PPID
+	for depth := 0; depth < proxyMaxDepth; depth++ {
+		if ppid <= 1 {
+			return VerdictRoot, nil, nil
+		}
+		candidate, err := m.frames.FindByPanePID(req.TmuxPaneID, ppid)
+		if err != nil {
+			return VerdictIndeterminate, nil, err
+		}
+		if candidate != nil {
+			if isPidAliveFn(candidate.PID) {
+				actualStart, serr := processStartTimeFn(candidate.PID)
+				if serr != nil {
+					return VerdictIndeterminate, nil, nil
+				}
+				if actualStart == candidate.ProcessStartTime {
+					if candidate.AgentType == req.AgentType {
+						return VerdictSameTypeAbove, candidate, nil
+					}
+					return VerdictProxyParent, candidate, nil
+				}
+			}
+			// Stale candidate: keep walking (frame_ops_test.go:1470).
+		}
+		next, nerr := readProcessInfoFn(ppid)
+		if nerr != nil {
+			return VerdictIndeterminate, nil, nil
+		}
+		ppid = next.PPID
+	}
+	return VerdictIndeterminate, nil, nil
+}
+```
+
+Then reduce `findProxyParent` to:
+
+```go
+// findProxyParent reports the cross-type ancestor frame a SessionStart should
+// be folded into, or nil when it should not fold. Contract unchanged; the
+// traversal now lives in classifyAncestor.
+func (m *Module) findProxyParent(req EventRequest) (*store.Frame, error) {
+	verdict, parent, err := m.classifyAncestor(req)
+	if err != nil {
+		return nil, err
+	}
+	if verdict == VerdictProxyParent {
+		return parent, nil
+	}
+	return nil, nil
+}
+```
+
+- [ ] **Step 4: Run the new test and the whole existing agent suite**
+
+Run: `go test ./internal/module/agent/ -run TestClassifyAncestor -v`
+Expected: PASS
+
+Run: `go test ./internal/module/agent/`
+Expected: PASS — **every pre-existing test unchanged**. If any existing test
+requires editing, the refactor is not behaviour-preserving: stop and report
+rather than editing the test.
+
+- [ ] **Step 5: Full suite + commit**
+
+```bash
+go test ./...
+git add internal/module/agent/ancestor.go internal/module/agent/ancestor_test.go internal/module/agent/frame_ops.go
+git commit -m "refactor(agent): split the pane-ancestor walk's overloaded return"
+```
+
+---
+
+# Phase 2 — Provenance on the wire (daemon)
+
+### Task 2: `SessionStart` passes `session_id` and `cwd` through `Detail`
+
+**Files:**
+- Modify: `internal/agent/cc/status.go:14-23`
+- Modify: `internal/agent/codex/status.go` (`PdxSessionStart` branch)
+- Modify: `internal/agent/opencode/status.go` (`PdxSessionStart` branch)
+- Test: `internal/agent/cc/status_test.go`, `internal/agent/codex/status_test.go`,
+  `internal/agent/opencode/status_test.go`
+
+**Interfaces:**
+- Consumes: `agent.DeriveResult` (`internal/agent/status.go:15-28`).
+- Produces: `DeriveResult.Detail["session_id"]` and `Detail["cwd"]` on
+  `PdxSessionStart` for all three providers. Task 4 reads them.
+
+**Context:** observed payloads are in spec §3.1 — both cc and codex carry
+`session_id` and `cwd` at the top level of `raw_event`. Keys that are absent
+must stay **absent** from `Detail`, not present with a nil value: downstream
+`strFromDetail` (`frame_ops.go:1136`) treats a non-string as empty, but a nil
+entry would still serialize into the WS payload as `"session_id": null`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```go
+// internal/agent/cc/status_test.go
+func TestDeriveCCStatus_SessionStart_CarriesProvenance(t *testing.T) {
+	raw := []byte(`{"session_id":"441c80d5","cwd":"/w/csp","source":"startup","modelName":"opus"}`)
+	got := deriveCCStatus("PdxSessionStart", raw)
+	if !got.Valid {
+		t.Fatalf("Valid = false")
+	}
+	if got.Detail["session_id"] != "441c80d5" {
+		t.Fatalf("session_id = %v", got.Detail["session_id"])
+	}
+	if got.Detail["cwd"] != "/w/csp" {
+		t.Fatalf("cwd = %v", got.Detail["cwd"])
+	}
+}
+
+func TestDeriveCCStatus_SessionStart_OmitsAbsentKeys(t *testing.T) {
+	got := deriveCCStatus("PdxSessionStart", []byte(`{"source":"startup"}`))
+	if _, ok := got.Detail["session_id"]; ok {
+		t.Fatalf("session_id present for a payload that has none")
+	}
+	if _, ok := got.Detail["cwd"]; ok {
+		t.Fatalf("cwd present for a payload that has none")
+	}
+}
+
+func TestDeriveCCStatus_SessionStart_CompactStillIgnored(t *testing.T) {
+	got := deriveCCStatus("PdxSessionStart", []byte(`{"source":"compact","session_id":"x"}`))
+	if got.Valid {
+		t.Fatalf("compact must stay Valid=false")
+	}
+}
+```
+
+Write the same three tests against `deriveCodexStatus` and
+`deriveOpenCodeStatus` (codex payload per spec §3.1; opencode currently sends
+only `session_id`, so its "omits absent keys" case asserts `cwd` absent).
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `go test ./internal/agent/... -run SessionStart_Carries -v`
+Expected: FAIL — `Detail` is nil.
+
+- [ ] **Step 3: Implement a shared helper and use it in all three providers**
+
+Add to `internal/agent/status.go`:
+
+```go
+// DetailStrings copies only the string-valued keys present in raw into a new
+// map, so an absent key stays absent rather than serializing as null.
+func DetailStrings(raw map[string]any, keys ...string) map[string]any {
+	out := make(map[string]any, len(keys))
+	for _, k := range keys {
+		if v, ok := raw[k].(string); ok && v != "" {
+			out[k] = v
+		}
+	}
+	return out
+}
+```
+
+In each provider's `PdxSessionStart` branch, add
+`Detail: agent.DetailStrings(raw, "session_id", "cwd")` alongside the existing
+fields. For cc, keep the `source == "compact"` early return **above** it.
+
+- [ ] **Step 4: Run tests**
+
+Run: `go test ./internal/agent/...`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/agent/status.go internal/agent/cc/status.go internal/agent/cc/status_test.go internal/agent/codex/status.go internal/agent/codex/status_test.go internal/agent/opencode/status.go internal/agent/opencode/status_test.go
+git commit -m "feat(agent): carry session_id and cwd on SessionStart detail"
+```
+
+---
+
+### Task 3: OpenCode plugin emits `cwd`
+
+**Files:**
+- Modify: `internal/agent/opencode/plugin_template.go` (the `session.created`
+  case, ~line 83-93)
+- Test: `internal/agent/opencode/plugin_template_contract_test.go`
+
+**Interfaces:**
+- Produces: `PdxSessionStart` payload gains `cwd`. Task 2's opencode
+  passthrough then has something to pass.
+
+**Context:** the plugin body is a Go string template rendered by
+`renderManagedPlugin`. It runs inside opencode under Bun. Two sources for the
+directory, in order of preference: the plugin API's `directory` argument, and
+`process.cwd()` as the fallback. The template's exported function currently
+takes no arguments — widen it to `async (ctx = {}) =>` and read
+`ctx.directory`. The template is compared **byte-exactly** by
+`CheckHooks`, so the contract test's expected string must be regenerated in
+the same commit.
+
+- [ ] **Step 1: Write the failing test**
+
+```go
+// internal/agent/opencode/plugin_template_contract_test.go
+func TestPluginTemplate_SessionCreated_EmitsCwd(t *testing.T) {
+	body := renderManagedPlugin("/usr/local/bin/pdx")
+	if !strings.Contains(body, "cwd: pdxCwd()") {
+		t.Fatalf("session.created emit does not include cwd:\n%s", body)
+	}
+	if !strings.Contains(body, "function pdxCwd()") {
+		t.Fatalf("pdxCwd helper missing")
+	}
+}
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `go test ./internal/agent/opencode/ -run EmitsCwd -v`
+Expected: FAIL — substring not found.
+
+- [ ] **Step 3: Implement**
+
+In `renderManagedPlugin`, change the exported signature to
+`export const PurdexOpenCodeHooks = async (ctx = {}) => {`, add the helper
+next to `emit`:
+
+```js
+  function pdxCwd() {
+    try {
+      if (ctx && typeof ctx.directory === 'string' && ctx.directory) return ctx.directory
+      if (ctx && typeof ctx.worktree === 'string' && ctx.worktree) return ctx.worktree
+      return process.cwd()
+    } catch {
+      return ''
+    }
+  }
+```
+
+and change the parent-session emit to
+`await emit(PURDEX_EVENT.PdxSessionStart, { session_id: sid, cwd: pdxCwd() })`.
+
+- [ ] **Step 4: Run tests**
+
+Run: `go test ./internal/agent/opencode/`
+Expected: PASS. The bun integration test
+(`plugin_template_bun_integration_test.go`) must also pass — it executes the
+rendered plugin under Bun, so a syntax error surfaces there.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/agent/opencode/plugin_template.go internal/agent/opencode/plugin_template_contract_test.go
+git commit -m "feat(opencode): plugin reports cwd on session start"
+```
+
+---
+
+### Task 4: Emit the provenance envelope, gated on the mutation outcome
+
+**Files:**
+- Create: `internal/module/agent/provenance.go`
+- Create: `internal/module/agent/provenance_test.go`
+- Modify: `internal/module/agent/frame_ops.go` (`applyFrameEvent`, the return
+  paths at ~542-600, ~828-845 and ~860-880)
+
+**Interfaces:**
+- Consumes: `classifyAncestor` (Task 1), `Detail["session_id"]` /
+  `Detail["cwd"]` (Task 2), `FrameTraceMeta` (`frame_ops.go:54-73`).
+- Produces: `NormalizedEvent.Detail["pdx_provenance"]`, shape:
+  ```go
+  type Provenance struct {
+      OwnerSessionStart bool   `json:"owner_session_start"`
+      AgentType         string `json:"agent_type"`
+      SessionID         string `json:"session_id,omitempty"`
+      Cwd               string `json:"cwd,omitempty"`
+      TmuxPaneID        string `json:"tmux_pane_id"`
+      TmuxInstance      string `json:"tmux_instance"`
+  }
+  ```
+  Task 11 (SPA) reads it.
+
+**Context — the ordering trap:** the pre-Upsert verdict is **not** final.
+`applyFrameEvent` runs a second proxy attempt after the Upsert
+(`reconcileCreatedFrameAsProxy`, `frame_ops.go:828-845`), which folds a frame
+the pre-walk judged root — `TestPhase35_IT3_PreWalkMiss_PostReconcileHit`
+(`frame_ops_test.go:2535`) pins that exact sequence. The envelope must
+therefore be attached on the **outcome**, at the point where
+`FrameTraceMeta` is finalized, not where the verdict is computed.
+
+The four conditions (spec §4.3.1): pre-walk verdict `VerdictRoot`; not taken
+by the pre-Upsert fast path; `canonicalized == false`; resulting frame is the
+sender's own with `ParentFrameID == ""`. Plus `req.SenderUncertain == false`.
+
+- [ ] **Step 1: Write the failing test**
+
+```go
+// internal/module/agent/provenance_test.go
+package agent
+
+import "testing"
+
+func TestProvenance_RootSessionStart_EmitsEnvelope(t *testing.T) {
+	m := newProxyTestModule(t)
+	req := EventRequest{
+		TmuxPaneID: "%5", AgentType: "codex", SenderPID: 200,
+		SenderStartTime: "t200", PurdexName: "PdxSessionStart",
+		RawEvent: []byte(`{"session_id":"S1","cwd":"/w/p"}`),
+	}
+	withProcessTree(t, map[int]int{200: 999})
+	m.tmuxInstance = "4471:1788740000"
+
+	ev := m.buildNormalizedForTest(req)
+	p := ev.Detail["pdx_provenance"].(Provenance)
+	if !p.OwnerSessionStart || p.AgentType != "codex" || p.SessionID != "S1" ||
+		p.Cwd != "/w/p" || p.TmuxPaneID != "%5" || p.TmuxInstance != "4471:1788740000" {
+		t.Fatalf("envelope = %+v", p)
+	}
+}
+
+func TestProvenance_ProxyCollapsed_NoEnvelope_OuterTypeIsOwner(t *testing.T) {
+	// codex started inside a live cc pane: the broadcast must say cc and must
+	// NOT carry codex's session id. Spec §4.3.1.
+	m := newProxyTestModule(t)
+	seedFrame(t, m, "%5", "cc", 100, "t100", 10)
+	withProcessTree(t, map[int]int{200: 100})
+	withLivePids(t, map[int]string{100: "t100"})
+	req := EventRequest{
+		TmuxPaneID: "%5", AgentType: "codex", SenderPID: 200,
+		SenderStartTime: "t200", PurdexName: "PdxSessionStart",
+		RawEvent: []byte(`{"session_id":"S1","cwd":"/w/p"}`),
+	}
+
+	ev := m.buildNormalizedForTest(req)
+	if _, ok := ev.Detail["pdx_provenance"]; ok {
+		t.Fatalf("proxy-collapsed event must not carry provenance")
+	}
+	if ev.AgentType != "cc" {
+		t.Fatalf("outer agent_type = %q, want cc", ev.AgentType)
+	}
+}
+
+func TestProvenance_SameTypeAbove_NoEnvelope(t *testing.T) {
+	m := newProxyTestModule(t)
+	seedFrame(t, m, "%5", "cc", 100, "t100", 10)
+	withProcessTree(t, map[int]int{200: 100})
+	withLivePids(t, map[int]string{100: "t100"})
+	req := EventRequest{
+		TmuxPaneID: "%5", AgentType: "cc", SenderPID: 200,
+		SenderStartTime: "t200", PurdexName: "PdxSessionStart",
+		RawEvent: []byte(`{"session_id":"S2"}`),
+	}
+
+	if _, ok := m.buildNormalizedForTest(req).Detail["pdx_provenance"]; ok {
+		t.Fatalf("cc-inside-cc must not carry provenance")
+	}
+}
+
+func TestProvenance_PostUpsertReconcile_NoEnvelope(t *testing.T) {
+	// Pre-walk says root, reconcileCreatedFrameAsProxy folds it afterwards.
+	// Mirrors TestPhase35_IT3_PreWalkMiss_PostReconcileHit's fixture.
+	m := newProxyTestModule(t)
+	seedFrame(t, m, "%5", "cc", 100, "t100", 10)
+	withProcessTreeSequence(t, 200, []int{999, 999, 100}) // miss, miss, hit
+	req := EventRequest{
+		TmuxPaneID: "%5", AgentType: "codex", SenderPID: 200,
+		SenderStartTime: "t200", PurdexName: "PdxSessionStart",
+		RawEvent: []byte(`{"session_id":"S3"}`),
+	}
+
+	if _, ok := m.buildNormalizedForTest(req).Detail["pdx_provenance"]; ok {
+		t.Fatalf("post-Upsert reconcile must revoke the envelope")
+	}
+}
+
+func TestProvenance_SenderUncertain_NoEnvelope(t *testing.T) {
+	m := newProxyTestModule(t)
+	withProcessTree(t, map[int]int{200: 999})
+	req := EventRequest{
+		TmuxPaneID: "%5", AgentType: "codex", SenderPID: 200,
+		SenderStartTime: "t200", PurdexName: "PdxSessionStart",
+		SenderUncertain: true, RawEvent: []byte(`{"session_id":"S4"}`),
+	}
+
+	if _, ok := m.buildNormalizedForTest(req).Detail["pdx_provenance"]; ok {
+		t.Fatalf("uncertain sender must not carry provenance")
+	}
+}
+```
+
+`buildNormalizedForTest` is a test-only seam added in Step 3 that runs
+`applyFrameEvent` + `buildProjectionNormalized` and returns the resulting
+`agentpkg.NormalizedEvent`. `withProcessTreeSequence` swaps `readProcessInfoFn`
+for one that returns the given PPIDs in call order.
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `go test ./internal/module/agent/ -run TestProvenance -v`
+Expected: FAIL — `Provenance` undefined.
+
+- [ ] **Step 3: Implement**
+
+`internal/module/agent/provenance.go`:
+
+```go
+package agent
+
+import agentpkg "github.com/wake/purdex/internal/agent"
+
+// Provenance is the self-contained rebuild-record envelope. It is deliberately
+// separate from NormalizedEvent.AgentType: on a proxy-collapsed event the
+// outer type names the session projection winner, which may be a different
+// agent in a different tmux pane (frame_ops.go:1129, :1170-1182). Consumers of
+// the rebuild record read ONLY this struct. See spec §4.3.1.
+type Provenance struct {
+	OwnerSessionStart bool   `json:"owner_session_start"`
+	AgentType         string `json:"agent_type"`
+	SessionID         string `json:"session_id,omitempty"`
+	Cwd               string `json:"cwd,omitempty"`
+	TmuxPaneID        string `json:"tmux_pane_id"`
+	TmuxInstance      string `json:"tmux_instance"`
+}
+
+// ownedBySender reports whether the frame mutation left the sender owning its
+// own top-level frame — the only case that may carry provenance.
+func ownedBySender(verdict AncestorVerdict, meta FrameTraceMeta, canonicalized bool) bool {
+	return verdict == VerdictRoot &&
+		!canonicalized &&
+		meta.Decision != "skipped" &&
+		meta.Reason != "proxy_subagent_attached" &&
+		meta.ParentFrameID == ""
+}
+
+func buildProvenance(req EventRequest, result agentpkg.DeriveResult, tmuxInstance string) Provenance {
+	return Provenance{
+		OwnerSessionStart: true,
+		AgentType:         req.AgentType,
+		SessionID:         strFromDetail(result.Detail, "session_id"),
+		Cwd:               strFromDetail(result.Detail, "cwd"),
+		TmuxPaneID:        req.TmuxPaneID,
+		TmuxInstance:      tmuxInstance,
+	}
+}
+```
+
+In `applyFrameEvent`, compute the verdict **once** at the top of the
+`LifecycleSessionStart` handling and thread it plus `canonicalized` into the
+`FrameTraceMeta` the function already returns (add two unexported fields —
+`ownerVerdict AncestorVerdict` and `canonicalized bool` — to `FrameTraceMeta`;
+they are internal and never serialized). Replace the existing
+`findProxyParent` call on that path with the `classifyAncestor` result so the
+walk still runs exactly once.
+
+In the handler, after `buildProjectionNormalized`, attach the envelope:
+
+```go
+if lifecycle == agentpkg.LifecycleSessionStart && !req.SenderUncertain &&
+	ownedBySender(frameMeta.ownerVerdict, frameMeta, frameMeta.canonicalized) {
+	if normalized.Detail == nil {
+		normalized.Detail = map[string]any{}
+	}
+	normalized.Detail["pdx_provenance"] = buildProvenance(req, result, m.currentTmuxInstance())
+}
+```
+
+`m.currentTmuxInstance()` reads the value Task 5 caches.
+
+- [ ] **Step 4: Run tests**
+
+Run: `go test ./internal/module/agent/ -v`
+Expected: PASS — including `TestPhase35_IT3_PreWalkMiss_PostReconcileHit`
+unchanged.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/module/agent/provenance.go internal/module/agent/provenance_test.go internal/module/agent/frame_ops.go internal/module/agent/handler.go
+git commit -m "feat(agent): emit provenance envelope on owner session starts"
+```
+
+---
+
+### Task 5: Stamp the tmux generation on session payloads
+
+**Files:**
+- Modify: `internal/module/session/provider.go:18-33` (`SessionInfo`)
+- Modify: `internal/module/session/service.go` (populate the field)
+- Modify: `internal/module/session/watcher.go:78`, `:213-217`
+- Test: `internal/module/session/watcher_test.go`
+
+**Interfaces:**
+- Produces: `SessionInfo.TmuxInstance` (JSON `tmux_instance`) on every
+  `/api/sessions` response and every `sessions` WS broadcast. Tasks 6, 7 and
+  11 read it.
+
+**Context — why the hash must include it:** `hashSessions`
+(`watcher.go:213-217`) hashes only the marshalled list. A tmux restart between
+two ticks that recreates identical sessions produces an identical hash, so no
+broadcast fires and the SPA keeps the previous generation forever (spec §4.6,
+review R3 finding 1). Reading the instance per tick and hashing it with the
+list makes any restart observable. `config.GetTmuxInstance()` returns `""` on
+error/timeout — hash and broadcast that honestly; the next successful tick
+changes the hash again, so it self-heals.
+
+- [ ] **Step 1: Write the failing test**
+
+```go
+// internal/module/session/watcher_test.go
+func TestWatcher_TmuxRestartWithIdenticalList_Broadcasts(t *testing.T) {
+	m, fake, events := newWatcherTestModule(t)
+	fake.SetSessions([]FakeSession{{ID: "$0", Name: "dev", Cwd: "/w"}})
+
+	m.tmuxInstanceFn = func() string { return "111:1000" }
+	m.tick()
+	first := events.Drain()
+	if len(first) != 1 {
+		t.Fatalf("expected initial broadcast, got %d", len(first))
+	}
+
+	// Same session list, new tmux server.
+	m.tmuxInstanceFn = func() string { return "222:2000" }
+	m.tick()
+	second := events.Drain()
+	if len(second) != 1 {
+		t.Fatalf("restart with identical list must broadcast, got %d", len(second))
+	}
+	if !strings.Contains(second[0].Data, `"tmux_instance":"222:2000"`) {
+		t.Fatalf("broadcast missing new instance: %s", second[0].Data)
+	}
+}
+
+func TestWatcher_UnchangedInstanceAndList_DoesNotBroadcast(t *testing.T) {
+	m, fake, events := newWatcherTestModule(t)
+	fake.SetSessions([]FakeSession{{ID: "$0", Name: "dev", Cwd: "/w"}})
+	m.tmuxInstanceFn = func() string { return "111:1000" }
+	m.tick()
+	events.Drain()
+	m.tick()
+	if got := events.Drain(); len(got) != 0 {
+		t.Fatalf("unchanged state must not broadcast, got %d", len(got))
+	}
+}
+
+func TestWatcher_InstanceProbeFailure_PropagatesEmpty(t *testing.T) {
+	m, fake, _ := newWatcherTestModule(t)
+	fake.SetSessions([]FakeSession{{ID: "$0", Name: "dev", Cwd: "/w"}})
+	m.tmuxInstanceFn = func() string { return "" }
+	m.tick()
+	got := m.listSessionsForTest()
+	if got[0].TmuxInstance != "" {
+		t.Fatalf("probe failure must propagate empty, got %q", got[0].TmuxInstance)
+	}
+}
+```
+
+Follow the existing fixture style in `watcher_test.go` for
+`newWatcherTestModule` / `events.Drain`; if those helpers do not exist under
+those names, use whatever the file already provides and keep the assertions.
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `go test ./internal/module/session/ -run TestWatcher_Tmux -v`
+Expected: FAIL — `tmuxInstanceFn` undefined, `TmuxInstance` undefined.
+
+- [ ] **Step 3: Implement**
+
+Add to `SessionInfo` (live section, next to `CurrentCommand`):
+
+```go
+	// TmuxInstance is the tmux server identity ("<pid>:<start_time>") the
+	// session belongs to. It changes on every tmux server restart, which is
+	// what lets a client tell a genuinely-live session from a reused session
+	// code after a reboot (session codes are a reversible encoding of $N, so
+	// $0 mints the same code every boot). Empty means "unknown" — never treat
+	// two empties as a match.
+	TmuxInstance string `json:"tmux_instance,omitempty"`
+```
+
+Add the seam on the module (`module.go`), defaulting to the real reader:
+
+```go
+	tmuxInstanceFn func() string // swapped in tests
+```
+
+initialised to `config.GetTmuxInstance`. Add
+`func (m *SessionModule) currentTmuxInstance() string` returning the last read
+value, refreshed at the top of `tick()`. Populate `info.TmuxInstance` wherever
+`SessionInfo` is built in `service.go`, and change the hash:
+
+```go
+func hashSessions(tmuxInstance string, sessions []SessionInfo) string {
+	data, _ := json.Marshal(struct {
+		Instance string        `json:"i"`
+		Sessions []SessionInfo `json:"s"`
+	}{tmuxInstance, sessions})
+	h := sha256.Sum256(data)
+	return fmt.Sprintf("%x", h[:8])
+}
+```
+
+updating the caller at `watcher.go:78`.
+
+- [ ] **Step 4: Run tests**
+
+Run: `go test ./internal/module/session/`
+Expected: PASS
+
+- [ ] **Step 5: Full suite + commit**
+
+```bash
+go test ./...
+git add internal/module/session/
+git commit -m "feat(session): stamp the tmux generation on session payloads"
+```
+
+---
+
+# Phase 3 — Generation awareness (SPA)
+
+### Task 6: Record and compare the pane's tmux generation
+
+**Files:**
+- Modify: `spa/src/lib/host-api.ts` (`Session` interface)
+- Modify: `spa/src/stores/useTabStore.ts` (add `markTerminatedForGeneration`)
+- Modify: `spa/src/hooks/useMultiHostEventWs.ts:100-140`
+- Test: `spa/src/stores/useTabStore.generation.test.ts`,
+  `spa/src/hooks/useMultiHostEventWs.generation.test.ts`
+
+**Interfaces:**
+- Consumes: `Session.tmux_instance` (Task 5).
+- Produces:
+  ```ts
+  markTerminatedForGeneration(
+    hostId: string, sessionCode: string,
+    expectedTmuxInstance: string, reason: TerminatedReason,
+  ): void
+  ```
+  Task 16 uses the same field for grouping.
+
+**Context:** today `useMultiHostEventWs.ts:111-124` marks a pane terminated
+only when its code is missing from the live list, and it refreshes
+`cachedName` *before* deciding (line 106). Because codes are reused across tmux
+restarts, a pane can find its code alive and attach to a stranger. The fix
+compares generations, and decides before updating anything. Panes whose
+recorded instance is `''` keep today's behaviour exactly.
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// spa/src/stores/useTabStore.generation.test.ts
+import { describe, it, expect, beforeEach } from 'vitest'
+import { useTabStore } from './useTabStore'
+import { createTab } from '../types/tab'
+
+function seedPane(tmuxInstance: string, sessionCode = 'abc123') {
+  const tab = createTab({
+    kind: 'tmux-session', hostId: 'h1', sessionCode,
+    mode: 'terminal', cachedName: 'dev', tmuxInstance,
+  })
+  useTabStore.setState({ tabs: { [tab.id]: tab }, tabOrder: [tab.id], activeTabId: tab.id })
+  return tab
+}
+
+describe('markTerminatedForGeneration', () => {
+  beforeEach(() => useTabStore.setState({ tabs: {}, tabOrder: [], activeTabId: null }))
+
+  it('marks a pane whose recorded generation differs', () => {
+    const tab = seedPane('111:1000')
+    useTabStore.getState().markTerminatedForGeneration('h1', 'abc123', '111:1000', 'tmux-restarted')
+    const pane = useTabStore.getState().tabs[tab.id].layout
+    expect(pane.type === 'leaf' && pane.pane.content.kind === 'tmux-session'
+      && pane.pane.content.terminated).toBe('tmux-restarted')
+  })
+
+  it('leaves a sibling pane already bound to the new generation alone', () => {
+    const stale = seedPane('111:1000')
+    const fresh = createTab({
+      kind: 'tmux-session', hostId: 'h1', sessionCode: 'abc123',
+      mode: 'terminal', cachedName: 'dev', tmuxInstance: '222:2000',
+    })
+    useTabStore.setState((s) => ({ tabs: { ...s.tabs, [fresh.id]: fresh }, tabOrder: [...s.tabOrder, fresh.id] }))
+
+    useTabStore.getState().markTerminatedForGeneration('h1', 'abc123', '111:1000', 'tmux-restarted')
+
+    const freshLayout = useTabStore.getState().tabs[fresh.id].layout
+    expect(freshLayout.type === 'leaf' && freshLayout.pane.content.kind === 'tmux-session'
+      && freshLayout.pane.content.terminated).toBeUndefined()
+    const staleLayout = useTabStore.getState().tabs[stale.id].layout
+    expect(staleLayout.type === 'leaf' && staleLayout.pane.content.kind === 'tmux-session'
+      && staleLayout.pane.content.terminated).toBe('tmux-restarted')
+  })
+})
+```
+
+```ts
+// spa/src/hooks/useMultiHostEventWs.generation.test.ts — behaviour of the
+// sessions handler, exercised through the extracted pure function.
+import { describe, it, expect } from 'vitest'
+import { reconcileSessionsPayload } from '../lib/rebuild/reconcile'
+
+const pane = (tmuxInstance: string) => ({
+  hostId: 'h1', sessionCode: 'abc123', tmuxInstance,
+})
+
+describe('reconcileSessionsPayload', () => {
+  it('marks tmux-restarted even when the code is present in the live list', () => {
+    const out = reconcileSessionsPayload({
+      hostId: 'h1',
+      sessions: [{ code: 'abc123', name: 'dev', tmux_instance: '222:2000' }],
+      panes: [pane('111:1000')],
+    })
+    expect(out.terminate).toEqual([
+      { hostId: 'h1', sessionCode: 'abc123', expectedTmuxInstance: '111:1000', reason: 'tmux-restarted' },
+    ])
+  })
+
+  it('marks nothing when either side is unknown', () => {
+    for (const [recorded, live] of [['', '222:2000'], ['111:1000', ''], ['', '']]) {
+      const out = reconcileSessionsPayload({
+        hostId: 'h1',
+        sessions: [{ code: 'abc123', name: 'dev', tmux_instance: live }],
+        panes: [pane(recorded)],
+      })
+      expect(out.terminate).toEqual([])
+    }
+  })
+
+  it('still marks a code missing from the live list as session-closed', () => {
+    const out = reconcileSessionsPayload({ hostId: 'h1', sessions: [], panes: [pane('111:1000')] })
+    expect(out.terminate[0].reason).toBe('session-closed')
+  })
+
+  it('adopts the live generation onto panes that have none', () => {
+    const out = reconcileSessionsPayload({
+      hostId: 'h1',
+      sessions: [{ code: 'abc123', name: 'dev', tmux_instance: '222:2000' }],
+      panes: [pane('')],
+    })
+    expect(out.adoptInstance).toEqual([{ sessionCode: 'abc123', tmuxInstance: '222:2000' }])
+  })
+})
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `pnpm --prefix spa exec vitest run generation`
+Expected: FAIL — `markTerminatedForGeneration` and
+`reconcileSessionsPayload` do not exist.
+
+- [ ] **Step 3: Implement**
+
+Add `tmux_instance?: string` to the `Session` interface in
+`spa/src/lib/host-api.ts:6-17`.
+
+Create `spa/src/lib/rebuild/reconcile.ts` with the pure decision function
+returning `{ terminate: [...], adoptInstance: [...] }`, applying exactly the
+rules asserted above. Add `markTerminatedForGeneration` to `useTabStore` next
+to `markTerminated`, reusing the same layout-walk helper but adding the
+instance predicate (an empty recorded instance matches the old rule).
+
+Rewrite the `sessions` branch of `useMultiHostEventWs.ts` to call
+`reconcileSessionsPayload` **before** `updateSessionCache`, then apply its two
+outputs.
+
+- [ ] **Step 4: Run tests**
+
+Run: `pnpm --prefix spa exec vitest run`
+Expected: PASS (full suite)
+
+- [ ] **Step 5: Commit**
+
+```bash
+pnpm --prefix spa run lint
+git add spa/src/lib/host-api.ts spa/src/lib/rebuild/reconcile.ts spa/src/stores/useTabStore.ts spa/src/hooks/useMultiHostEventWs.ts spa/src/stores/useTabStore.generation.test.ts spa/src/hooks/useMultiHostEventWs.generation.test.ts
+git commit -m "feat(spa): detect tmux restarts by generation, not code absence"
+```
+
+---
+
+### Task 7: Gate terminal attach on the current connection epoch
+
+**Files:**
+- Modify: `spa/src/stores/useHostStore.ts` (`HostRuntime` gains
+  `sessionsEpoch`, `attachReady`)
+- Modify: `spa/src/hooks/useMultiHostEventWs.ts` (bump epoch on connect,
+  set `attachReady` on the first payload of that epoch)
+- Modify: `spa/src/hooks/useTerminalWs.ts:51`
+- Test: `spa/src/hooks/useTerminalWs.gate.test.ts`
+
+**Interfaces:**
+- Consumes: nothing new.
+- Produces: `runtime[hostId].attachReady: boolean`.
+
+**Context:** a boot-only gate is insufficient. Health recovery flips the host
+to `connected` (`useMultiHostEventWs.ts:82`) before host-events reconnects, and
+`useTerminalWs.ts:51` attaches on that status — so after an offline tmux
+restart a terminal can attach to a stranger before the fresh list lands (spec
+§4.6, R3 finding 2). The gate closes on every reconnect.
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// spa/src/hooks/useTerminalWs.gate.test.ts
+import { describe, it, expect, beforeEach } from 'vitest'
+import { useHostStore } from '../stores/useHostStore'
+import { canAttachTerminal } from '../lib/rebuild/attach-gate'
+
+describe('canAttachTerminal', () => {
+  beforeEach(() => useHostStore.setState({ runtime: {} }))
+
+  it('blocks before the first sessions payload of this connection', () => {
+    useHostStore.setState({ runtime: { h1: { status: 'connected', attachReady: false } } })
+    expect(canAttachTerminal('h1')).toBe(false)
+  })
+
+  it('allows once the payload for this epoch landed', () => {
+    useHostStore.setState({ runtime: { h1: { status: 'connected', attachReady: true } } })
+    expect(canAttachTerminal('h1')).toBe(true)
+  })
+
+  it('blocks again after a reconnect closes the gate', () => {
+    useHostStore.setState({ runtime: { h1: { status: 'connected', attachReady: true } } })
+    useHostStore.getState().setRuntime('h1', { attachReady: false })
+    expect(canAttachTerminal('h1')).toBe(false)
+  })
+
+  it('does not block a host that is merely offline (no spinner lock)', () => {
+    useHostStore.setState({ runtime: { h1: { status: 'disconnected', attachReady: false } } })
+    expect(canAttachTerminal('h1')).toBe(false)
+  })
+})
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `pnpm --prefix spa exec vitest run gate`
+Expected: FAIL — module not found.
+
+- [ ] **Step 3: Implement**
+
+Add `attachReady?: boolean` and `sessionsEpoch?: number` to `HostRuntime`.
+Create `spa/src/lib/rebuild/attach-gate.ts`:
+
+```ts
+import { useHostStore } from '../../stores/useHostStore'
+
+/**
+ * A terminal may attach only after a sessions payload from the CURRENT host
+ * connection has been reconciled. Session codes are reused across tmux server
+ * restarts, so attaching on connection status alone can bind a pane to an
+ * unrelated session. See spec §4.6.
+ */
+export function canAttachTerminal(hostId: string): boolean {
+  return useHostStore.getState().runtime[hostId]?.attachReady === true
+}
+```
+
+In `useMultiHostEventWs`, on every connection open bump `sessionsEpoch` and set
+`attachReady: false`; in the `sessions` branch, after reconciliation, set
+`attachReady: true` for that host. Drop payloads whose epoch is not current.
+In `useTerminalWs.ts:51`, add `&& canAttachTerminal(hostId)` to the attach
+condition.
+
+- [ ] **Step 4: Run tests**
+
+Run: `pnpm --prefix spa exec vitest run`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+pnpm --prefix spa run lint
+git add spa/src/lib/rebuild/attach-gate.ts spa/src/stores/useHostStore.ts spa/src/hooks/useMultiHostEventWs.ts spa/src/hooks/useTerminalWs.ts spa/src/hooks/useTerminalWs.gate.test.ts
+git commit -m "feat(spa): gate terminal attach on the current connection's session payload"
+```
+
+---
+
+### Task 8: Snapshot restore stamps the current generation
+
+**Files:**
+- Modify: `spa/src/lib/snapshot/restore.ts:130-145`
+- Test: `spa/src/lib/snapshot/restore.generation.test.ts`
+
+**Interfaces:**
+- Consumes: `Session.tmux_instance` (Task 5).
+- Produces: nothing new; fixes existing behaviour.
+
+**Context:** `restore.ts:139` re-points a pane by spreading the old content and
+replacing only code and name, so the pane keeps the **old** `tmuxInstance` and
+Task 6's reconciliation immediately marks the freshly restored pane dead.
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// spa/src/lib/snapshot/restore.generation.test.ts
+import { describe, it, expect } from 'vitest'
+import { remapLayoutSessions } from './restore'
+
+describe('remapLayoutSessions generation stamping', () => {
+  it('stamps the rebuilt session\'s tmux_instance onto the pane', () => {
+    const layout = {
+      type: 'leaf' as const,
+      pane: { id: 'p1', content: {
+        kind: 'tmux-session' as const, hostId: 'h1', sessionCode: 'old111',
+        mode: 'terminal' as const, cachedName: 'dev',
+        tmuxInstance: '111:1000', terminated: 'tmux-restarted' as const,
+      } },
+    }
+    const remap = { h1: { old111: {
+      status: 'rebuilt' as const, newCode: 'new222',
+      session: { code: 'new222', name: 'dev', cwd: '/w', mode: 'terminal',
+        cc_session_id: '', cc_model: '', has_relay: false, tmux_instance: '222:2000' },
+    } } }
+
+    const out = remapLayoutSessions(layout, remap, { onlyTerminated: true })
+    const content = out.type === 'leaf' && out.pane.content
+    expect(content && content.kind === 'tmux-session' && content.tmuxInstance).toBe('222:2000')
+    expect(content && content.kind === 'tmux-session' && content.terminated).toBeUndefined()
+  })
+})
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `pnpm --prefix spa exec vitest run restore.generation`
+Expected: FAIL — `tmuxInstance` is still `'111:1000'`.
+
+- [ ] **Step 3: Implement**
+
+At `restore.ts:130-145`, add `tmuxInstance: entry.session.tmux_instance ?? content.tmuxInstance`
+to the re-point spread.
+
+- [ ] **Step 4: Run tests**
+
+Run: `pnpm --prefix spa exec vitest run snapshot`
+Expected: PASS — all 72 existing snapshot tests plus the new one.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add spa/src/lib/snapshot/restore.ts spa/src/lib/snapshot/restore.generation.test.ts
+git commit -m "fix(snapshot): stamp the new tmux generation when re-pointing panes"
+```
+
+---
+
+# Phase 4 — The record (SPA)
+
+### Task 9: `PaneRebuildRecord` and the store action
+
+**Files:**
+- Modify: `spa/src/types/tab.ts`
+- Modify: `spa/src/stores/useTabStore.ts`
+- Test: `spa/src/stores/useTabStore.rebuild.test.ts`
+
+**Interfaces:**
+- Produces:
+  ```ts
+  export interface PaneRebuildRecord {
+    sessionName: string
+    tmuxInstance: string
+    cwd?: string
+    cwdSource?: 'agent-session-start' | 'pane-probe'
+    agent?: { type: string; sessionId?: string; tmuxPaneId?: string; updatedAt: number }
+    resumeCommand?: string
+    unverified?: boolean
+    capturedAt: number
+  }
+
+  type RebuildPatch =
+    | { kind: 'agent-group'; record: Omit<PaneRebuildRecord, 'sessionName'> }
+    | { kind: 'field'; field: 'cwd' | 'resumeCommand' | 'sessionName'; value: string }
+    | { kind: 'probe-cwd'; cwd: string }
+    | { kind: 'unverified'; unverified: boolean }
+
+  setPaneRebuild(
+    hostId: string, sessionCode: string,
+    expectedTmuxInstance: string, patch: RebuildPatch,
+  ): void
+  ```
+  Task 11 and Tasks 13/15 call it.
+
+**Context — the writer ranking (spec §4.1):** an agent-group write replaces
+`agent`, `cwd`, `cwdSource`, `resumeCommand` and `capturedAt` **as one unit**
+(a payload without `cwd` clears `cwd` rather than leaving the previous agent's
+value beside a new session id); a field edit touches only that field; a
+probe-cwd write applies only when `cwd` is unset.
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// spa/src/stores/useTabStore.rebuild.test.ts
+import { describe, it, expect, beforeEach } from 'vitest'
+import { useTabStore } from './useTabStore'
+import { createTab } from '../types/tab'
+
+function seed(tmuxInstance = '111:1000') {
+  const tab = createTab({
+    kind: 'tmux-session', hostId: 'h1', sessionCode: 'abc123',
+    mode: 'terminal', cachedName: 'dev', tmuxInstance,
+  })
+  useTabStore.setState({ tabs: { [tab.id]: tab }, tabOrder: [tab.id], activeTabId: tab.id })
+  return tab
+}
+const rec = (tabId: string) => {
+  const l = useTabStore.getState().tabs[tabId].layout
+  return l.type === 'leaf' && l.pane.content.kind === 'tmux-session' ? l.pane.content.rebuild : undefined
+}
+
+describe('setPaneRebuild', () => {
+  beforeEach(() => useTabStore.setState({ tabs: {}, tabOrder: [], activeTabId: null }))
+
+  it('writes the agent group as a unit', () => {
+    const tab = seed()
+    useTabStore.getState().setPaneRebuild('h1', 'abc123', '111:1000', {
+      kind: 'agent-group',
+      record: { tmuxInstance: '111:1000', cwd: '/w/p', cwdSource: 'agent-session-start',
+        agent: { type: 'codex', sessionId: 'S1', tmuxPaneId: '%2', updatedAt: 5 },
+        resumeCommand: 'codex resume S1', capturedAt: 5 },
+    })
+    expect(rec(tab.id)?.agent?.sessionId).toBe('S1')
+    expect(rec(tab.id)?.cwd).toBe('/w/p')
+  })
+
+  it('clears cwd when a later agent group has none', () => {
+    const tab = seed()
+    const store = useTabStore.getState()
+    store.setPaneRebuild('h1', 'abc123', '111:1000', {
+      kind: 'agent-group',
+      record: { tmuxInstance: '111:1000', cwd: '/w/p', cwdSource: 'agent-session-start',
+        agent: { type: 'codex', sessionId: 'S1', updatedAt: 5 }, resumeCommand: 'codex resume S1', capturedAt: 5 },
+    })
+    store.setPaneRebuild('h1', 'abc123', '111:1000', {
+      kind: 'agent-group',
+      record: { tmuxInstance: '111:1000', agent: { type: 'codex', sessionId: 'S2', updatedAt: 6 },
+        resumeCommand: 'codex resume S2', capturedAt: 6 },
+    })
+    expect(rec(tab.id)?.agent?.sessionId).toBe('S2')
+    expect(rec(tab.id)?.cwd).toBeUndefined()
+  })
+
+  it('ignores a write for a different generation', () => {
+    const tab = seed('111:1000')
+    useTabStore.getState().setPaneRebuild('h1', 'abc123', '222:2000', {
+      kind: 'field', field: 'cwd', value: '/other',
+    })
+    expect(rec(tab.id)?.cwd).toBeUndefined()
+  })
+
+  it('probe cwd fills only when unset and never overwrites an agent cwd', () => {
+    const tab = seed()
+    const store = useTabStore.getState()
+    store.setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'probe-cwd', cwd: '/probe' })
+    expect(rec(tab.id)?.cwd).toBe('/probe')
+    expect(rec(tab.id)?.cwdSource).toBe('pane-probe')
+
+    store.setPaneRebuild('h1', 'abc123', '111:1000', {
+      kind: 'agent-group',
+      record: { tmuxInstance: '111:1000', cwd: '/agent', cwdSource: 'agent-session-start',
+        agent: { type: 'cc', updatedAt: 7 }, resumeCommand: 'claude -c', capturedAt: 7 },
+    })
+    store.setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'probe-cwd', cwd: '/probe2' })
+    expect(rec(tab.id)?.cwd).toBe('/agent')
+  })
+
+  it('a field edit touches only that field', () => {
+    const tab = seed()
+    const store = useTabStore.getState()
+    store.setPaneRebuild('h1', 'abc123', '111:1000', {
+      kind: 'agent-group',
+      record: { tmuxInstance: '111:1000', cwd: '/w/p', cwdSource: 'agent-session-start',
+        agent: { type: 'cc', sessionId: 'S1', updatedAt: 5 }, resumeCommand: 'claude --resume S1', capturedAt: 5 },
+    })
+    store.setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'field', field: 'cwd', value: '/edited' })
+    expect(rec(tab.id)?.cwd).toBe('/edited')
+    expect(rec(tab.id)?.resumeCommand).toBe('claude --resume S1')
+    expect(rec(tab.id)?.agent?.sessionId).toBe('S1')
+  })
+})
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `pnpm --prefix spa exec vitest run useTabStore.rebuild`
+Expected: FAIL — `setPaneRebuild` is not a function.
+
+- [ ] **Step 3: Implement**
+
+Add `PaneRebuildRecord` and `rebuild?: PaneRebuildRecord` to
+`spa/src/types/tab.ts`. Implement `setPaneRebuild` in `useTabStore` as a
+functional `set` that walks every tab layout, matches
+`(hostId, sessionCode, tmuxInstance)` — treating a pane whose recorded
+instance is `''` as matching any expected instance — and applies the patch by
+kind. `sessionName` defaults to the pane's `cachedName` when the record is
+created.
+
+Also extend the existing `updateSessionCache(hostId, code, name)` action: when
+it refreshes a pane's `cachedName` it must refresh `rebuild.sessionName` to the
+same value (spec §4.4 — "session created or renamed through Purdex →
+`sessionName`"). Without this a session renamed in Purdex would rebuild under
+its old name. Add a test:
+
+```ts
+  it('a rename follows into the rebuild record', () => {
+    const tab = seed()
+    const store = useTabStore.getState()
+    store.setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'field', field: 'cwd', value: '/w' })
+    store.updateSessionCache('h1', 'abc123', 'renamed')
+    expect(rec(tab.id)?.sessionName).toBe('renamed')
+  })
+```
+
+- [ ] **Step 4: Run tests**
+
+Run: `pnpm --prefix spa exec vitest run`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+pnpm --prefix spa run lint
+git add spa/src/types/tab.ts spa/src/stores/useTabStore.ts spa/src/stores/useTabStore.rebuild.test.ts
+git commit -m "feat(spa): add the per-pane rebuild record and its writer ranking"
+```
+
+---
+
+### Task 10: Resume command composer
+
+**Files:**
+- Create: `spa/src/lib/rebuild/composer.ts`
+- Create: `spa/src/lib/rebuild/composer.test.ts`
+
+**Interfaces:**
+- Produces: `composeResumeCommand(agentType: string, sessionId?: string): string`
+  — returns `''` when no command can be composed. Task 11 calls it.
+
+**Context:** spec §3.2 verified all six forms locally. A pane with no agent
+gets **no** command — not a fallback — because nothing tells it which agent to
+run (spec §4.7, §9.1).
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// spa/src/lib/rebuild/composer.test.ts
+import { describe, it, expect } from 'vitest'
+import { composeResumeCommand } from './composer'
+
+describe('composeResumeCommand', () => {
+  it.each([
+    ['cc', 'S1', 'claude --resume S1'],
+    ['cc', undefined, 'claude -c'],
+    ['codex', 'S1', 'codex resume S1'],
+    ['codex', undefined, 'codex resume --last'],
+    ['opencode', 'S1', 'opencode -s S1'],
+    ['opencode', undefined, 'opencode -c'],
+  ])('%s / %s → %s', (agent, id, want) => {
+    expect(composeResumeCommand(agent, id)).toBe(want)
+  })
+
+  it('returns empty for an unknown agent rather than guessing', () => {
+    expect(composeResumeCommand('aider', 'S1')).toBe('')
+    expect(composeResumeCommand('', undefined)).toBe('')
+  })
+
+  it('rejects a session id that could break out of the command', () => {
+    expect(composeResumeCommand('cc', 'S1; rm -rf /')).toBe('claude -c')
+  })
+})
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `pnpm --prefix spa exec vitest run composer`
+Expected: FAIL — module not found.
+
+- [ ] **Step 3: Implement**
+
+```ts
+// spa/src/lib/rebuild/composer.ts
+
+/** Session ids are UUIDs / ULIDs across all three agents; anything else is
+ *  refused rather than interpolated into a shell command sent via send-keys. */
+const SAFE_SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/
+
+const EXACT: Record<string, (id: string) => string> = {
+  cc: (id) => `claude --resume ${id}`,
+  codex: (id) => `codex resume ${id}`,
+  opencode: (id) => `opencode -s ${id}`,
+}
+
+const CWD_SCOPED: Record<string, string> = {
+  cc: 'claude -c',
+  codex: 'codex resume --last',
+  opencode: 'opencode -c',
+}
+
+/**
+ * Compose the command that resumes `agentType`'s conversation. Returns '' when
+ * the agent is unknown — a pane with no recorded agent rebuilds as a plain
+ * shell rather than guessing (spec §4.7).
+ */
+export function composeResumeCommand(agentType: string, sessionId?: string): string {
+  const fallback = CWD_SCOPED[agentType]
+  if (!fallback) return ''
+  if (sessionId && SAFE_SESSION_ID.test(sessionId)) return EXACT[agentType](sessionId)
+  return fallback
+}
+```
+
+- [ ] **Step 4: Run tests**
+
+Run: `pnpm --prefix spa exec vitest run composer`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add spa/src/lib/rebuild/composer.ts spa/src/lib/rebuild/composer.test.ts
+git commit -m "feat(spa): compose per-agent resume commands"
+```
+
+---
+
+### Task 11: Write the record from the provenance envelope
+
+**Files:**
+- Create: `spa/src/lib/rebuild/provenance.ts`
+- Create: `spa/src/lib/rebuild/provenance.test.ts`
+- Modify: `spa/src/stores/useAgentStore.ts` (`handleNormalizedEvent`, ~line 130)
+- Modify: `spa/src/hooks/useMultiHostEventWs.ts` (probe cwd for panes with none)
+
+**Interfaces:**
+- Consumes: `Provenance` (Task 4), `composeResumeCommand` (Task 10),
+  `setPaneRebuild` (Task 9), `fetchSessionCwd` (`host-api.ts:157`).
+- Produces:
+  ```ts
+  parseProvenance(detail: Record<string, unknown> | undefined): ParsedProvenance | null
+  ```
+
+**Context:** the SPA reads **only** `detail.pdx_provenance`. On a
+proxy-collapsed event the outer `agent_type` names the session projection
+winner while the rest of the detail describes the sender — reading the outer
+field is exactly the mis-attribution the envelope exists to prevent
+(spec §4.3.1).
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// spa/src/lib/rebuild/provenance.test.ts
+import { describe, it, expect } from 'vitest'
+import { parseProvenance } from './provenance'
+
+const envelope = {
+  owner_session_start: true, agent_type: 'codex', session_id: 'S1',
+  cwd: '/w/p', tmux_pane_id: '%2', tmux_instance: '222:2000',
+}
+
+describe('parseProvenance', () => {
+  it('parses a well-formed envelope', () => {
+    expect(parseProvenance({ pdx_provenance: envelope })).toEqual({
+      agentType: 'codex', sessionId: 'S1', cwd: '/w/p',
+      tmuxPaneId: '%2', tmuxInstance: '222:2000',
+    })
+  })
+
+  it('returns null when the flag is absent or false', () => {
+    expect(parseProvenance({ pdx_provenance: { ...envelope, owner_session_start: false } })).toBeNull()
+    expect(parseProvenance({ agent_type: 'cc', session_id: 'S1' })).toBeNull()
+    expect(parseProvenance(undefined)).toBeNull()
+  })
+
+  it('returns null when the generation is unknown', () => {
+    expect(parseProvenance({ pdx_provenance: { ...envelope, tmux_instance: '' } })).toBeNull()
+  })
+
+  it('ignores a non-object envelope', () => {
+    expect(parseProvenance({ pdx_provenance: 'yes' })).toBeNull()
+  })
+})
+```
+
+Add a store-level test asserting the write path. It needs two local helpers,
+written at the top of the new test file:
+
+```ts
+// spa/src/stores/useAgentStore.provenance.test.ts
+import { useTabStore } from './useTabStore'
+import { createTab } from '../types/tab'
+
+/** Seed a single-pane tab bound to (h1, abc123) at the given generation. */
+function seedTerminalPane(tmuxInstance: string) {
+  const tab = createTab({
+    kind: 'tmux-session', hostId: 'h1', sessionCode: 'abc123',
+    mode: 'terminal', cachedName: 'dev', tmuxInstance,
+  })
+  useTabStore.setState({ tabs: { [tab.id]: tab }, tabOrder: [tab.id], activeTabId: tab.id })
+  return tab
+}
+
+/** Read the rebuild record off that tab's single leaf pane. */
+function recordOf(tabId: string) {
+  const l = useTabStore.getState().tabs[tabId].layout
+  return l.type === 'leaf' && l.pane.content.kind === 'tmux-session' ? l.pane.content.rebuild : undefined
+}
+
+it('writes the pane record on an owner session start', () => {
+  const tab = seedTerminalPane('222:2000')
+  useAgentStore.getState().handleNormalizedEvent('h1', 'abc123', {
+    agent_type: 'codex', status: 'idle', raw_event_name: 'PdxSessionStart',
+    broadcast_ts: 1, subagents: [],
+    detail: { pdx_provenance: {
+      owner_session_start: true, agent_type: 'codex', session_id: 'S1',
+      cwd: '/w/p', tmux_pane_id: '%2', tmux_instance: '222:2000' } },
+  })
+  expect(recordOf(tab.id)?.resumeCommand).toBe('codex resume S1')
+  expect(recordOf(tab.id)?.agent?.type).toBe('codex')
+})
+
+it('writes nothing for a proxy-collapsed event', () => {
+  const tab = seedTerminalPane('222:2000')
+  useAgentStore.getState().handleNormalizedEvent('h1', 'abc123', {
+    agent_type: 'cc', status: 'idle', raw_event_name: 'PdxSessionStart',
+    broadcast_ts: 1, subagents: [], detail: {},
+  })
+  expect(recordOf(tab.id)).toBeUndefined()
+})
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `pnpm --prefix spa exec vitest run provenance`
+Expected: FAIL — module not found.
+
+- [ ] **Step 3: Implement**
+
+Write `parseProvenance` with strict shape validation (object, flag strictly
+`true`, non-empty `agent_type` and `tmux_instance`). In
+`handleNormalizedEvent`, after the existing `agentTypes` write, add:
+
+```ts
+      const prov = parseProvenance(event.detail)
+      if (prov) {
+        const now = Date.now()
+        useTabStore.getState().setPaneRebuild(hostId, sessionCode, prov.tmuxInstance, {
+          kind: 'agent-group',
+          record: {
+            tmuxInstance: prov.tmuxInstance,
+            cwd: prov.cwd || undefined,
+            cwdSource: prov.cwd ? 'agent-session-start' : undefined,
+            agent: { type: prov.agentType, sessionId: prov.sessionId || undefined,
+                     tmuxPaneId: prov.tmuxPaneId, updatedAt: now },
+            resumeCommand: composeResumeCommand(prov.agentType, prov.sessionId) || undefined,
+            capturedAt: now,
+          },
+        })
+      }
+```
+
+In `useMultiHostEventWs`'s sessions branch, for each live terminal pane whose
+record has no `cwd`, call `fetchSessionCwd` and write a `probe-cwd` patch —
+re-reading the pane and aborting if its binding changed while the request was
+in flight.
+
+Also flag `unverified`: when the reconnect projection reports an
+`agentTypes[key]` that disagrees with `record.agent.type`, write
+`{ kind: 'unverified', unverified: true }`.
+
+- [ ] **Step 4: Run tests**
+
+Run: `pnpm --prefix spa exec vitest run`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+pnpm --prefix spa run lint
+git add spa/src/lib/rebuild/provenance.ts spa/src/lib/rebuild/provenance.test.ts spa/src/stores/useAgentStore.ts spa/src/stores/useAgentStore.provenance.test.ts spa/src/hooks/useMultiHostEventWs.ts
+git commit -m "feat(spa): populate the rebuild record from the provenance envelope"
+```
+
+---
+
+# Phase 5 — Rebuild engine and its pane UI
+
+### Task 12: Host-pinned transport and the rebuild engine
+
+**Files:**
+- Create: `spa/src/lib/rebuild/transport.ts`
+- Create: `spa/src/lib/rebuild/engine.ts`
+- Create: `spa/src/stores/useRebuildStore.ts`
+- Create: `spa/src/lib/rebuild/engine.test.ts`
+- Modify: `spa/src/lib/host-api.ts` (typed error carrying the HTTP status)
+
+**Interfaces:**
+- Consumes: `createSession`, `executeCommand`, `useTabStore.setPaneContent`,
+  `useSessionStore`.
+- Produces:
+  ```ts
+  interface RebuildPlan { createSession: boolean; applyCwd: boolean; runResume: boolean }
+  interface StepResult { status: 'ok' | 'skipped' | 'failed'; error?: string }
+  interface RebuildReport {
+    hostId: string
+    created?: { code: string; name: string; tmuxInstance: string }
+    steps: { create: StepResult; resume: StepResult; repoint: StepResult }
+  }
+  interface RebuildDeps {
+    createSession?: (hostId: string, name: string, cwd: string, mode: string) => Promise<Session>
+    sendKeys?: (hostId: string, code: string, command: string) => Promise<void>
+    repoint?: (tabId: string, paneId: string, session: Session) => void
+  }
+  rebuildPane(
+    hostId: string, tabId: string, paneId: string,
+    plan: RebuildPlan, deps?: RebuildDeps,
+  ): Promise<RebuildReport>
+  retryResume(paneId: string): Promise<RebuildReport>
+  attachAnyway(paneId: string): Promise<RebuildReport>
+  ```
+
+**Context — three hard rules from review:**
+1. **Never use `hostFetch`.** `getDaemonBase` falls back to the *active host*
+   for an unknown `hostId` (`useHostStore.ts:143`), so a host removed during
+   the operation would send the resume command to another machine.
+2. **Resume before re-point.** `SessionPaneContent.tsx:70` unmounts
+   `TerminatedPane` the moment `terminated` clears, so clearing it first would
+   unmount the panel that reports the resume result.
+3. **Retry only on HTTP 409.** The daemon returns 409 specifically for a
+   duplicate name (`internal/module/session/handler.go:101-104`); 400 is
+   validation and 500 is a create failure, and neither should trigger a rename
+   retry.
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// spa/src/lib/rebuild/engine.test.ts
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { rebuildPane } from './engine'
+import { useRebuildStore } from '../../stores/useRebuildStore'
+
+const plan = { createSession: true, applyCwd: true, runResume: true }
+
+describe('rebuildPane', () => {
+  beforeEach(() => useRebuildStore.setState({ operations: {}, lockedBy: null }))
+
+  it('retries the name only on 409 and uses the returned name', async () => {
+    const create = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error('conflict'), { status: 409 }))
+      .mockResolvedValueOnce({ code: 'new1', name: 'dev-2', tmux_instance: '222:2000' })
+    const report = await rebuildPane('h1', 't1', 'p1', plan, { createSession: create, sendKeys: vi.fn() })
+    expect(create).toHaveBeenCalledTimes(2)
+    expect(create.mock.calls[1][1]).toBe('dev-2')
+    expect(report.created).toEqual({ code: 'new1', name: 'dev-2', tmuxInstance: '222:2000' })
+  })
+
+  it('does not retry on 400 or 500', async () => {
+    for (const status of [400, 500]) {
+      const create = vi.fn().mockRejectedValue(Object.assign(new Error('nope'), { status }))
+      const report = await rebuildPane('h1', 't1', 'p1', plan, { createSession: create, sendKeys: vi.fn() })
+      expect(create).toHaveBeenCalledTimes(1)
+      expect(report.steps.create.status).toBe('failed')
+    }
+  })
+
+  it('sends the resume before re-pointing the pane', async () => {
+    const order: string[] = []
+    const create = vi.fn(async () => { order.push('create'); return { code: 'new1', name: 'dev', tmux_instance: '222:2000' } })
+    const sendKeys = vi.fn(async () => { order.push('resume') })
+    const repoint = vi.fn(() => { order.push('repoint') })
+    await rebuildPane('h1', 't1', 'p1', plan, { createSession: create, sendKeys, repoint })
+    expect(order).toEqual(['create', 'resume', 'repoint'])
+  })
+
+  it('keeps the created session in the report and skips re-point when resume fails', async () => {
+    const repoint = vi.fn()
+    const report = await rebuildPane('h1', 't1', 'p1', plan, {
+      createSession: vi.fn(async () => ({ code: 'new1', name: 'dev', tmux_instance: '222:2000' })),
+      sendKeys: vi.fn(async () => { throw new Error('send-keys failed: 500') }),
+      repoint,
+    })
+    expect(report.created?.code).toBe('new1')
+    expect(report.steps.resume.status).toBe('failed')
+    expect(repoint).not.toHaveBeenCalled()
+    expect(useRebuildStore.getState().operations['p1'].report.created?.code).toBe('new1')
+  })
+
+  it('refuses to run against a host that is gone', async () => {
+    const create = vi.fn()
+    const report = await rebuildPane('gone', 't1', 'p1', plan, { createSession: create, sendKeys: vi.fn() })
+    expect(create).not.toHaveBeenCalled()
+    expect(report.steps.create.status).toBe('failed')
+  })
+
+  it('aborts before the resume when the host disappears mid-operation', async () => {
+    const sendKeys = vi.fn()
+    const report = await rebuildPane('h1', 't1', 'p1', plan, {
+      createSession: vi.fn(async () => { removeHostFromStore('h1'); return { code: 'new1', name: 'dev', tmux_instance: '222:2000' } }),
+      sendKeys,
+    })
+    expect(sendKeys).not.toHaveBeenCalled()
+    expect(report.created?.code).toBe('new1')
+  })
+
+  it('skips re-point when the pane binding changed mid-flight', async () => {
+    const repoint = vi.fn()
+    const report = await rebuildPane('h1', 't1', 'p1', plan, {
+      createSession: vi.fn(async () => ({ code: 'new1', name: 'dev', tmux_instance: '222:2000' })),
+      sendKeys: vi.fn(async () => { rebindPane('t1', 'p1', 'someone-else') }),
+      repoint,
+    })
+    expect(repoint).not.toHaveBeenCalled()
+    expect(report.steps.repoint.status).toBe('skipped')
+  })
+})
+```
+
+(`removeHostFromStore` and `rebindPane` are local helpers in the test file that
+mutate `useHostStore` / `useTabStore` directly.)
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `pnpm --prefix spa exec vitest run engine`
+Expected: FAIL — module not found.
+
+- [ ] **Step 3: Implement**
+
+Add to `host-api.ts`:
+
+```ts
+export class HostApiError extends Error {
+  readonly status: number
+  constructor(status: number, statusText: string) {
+    super(`${status} ${statusText}`)
+    this.status = status
+  }
+}
+```
+
+and throw it from `createSession` instead of the plain `Error`.
+
+`transport.ts` resolves `{ base, token }` once from `useHostStore.hosts[hostId]`
+(throwing when absent — **no fallback**) and exposes
+`assertUnchanged(hostId)` comparing ip/port/token against the snapshot.
+
+`engine.ts` implements the four steps with the injectable deps used above
+(defaults wired to the real API), writing progress into `useRebuildStore`
+throughout. `useRebuildStore` holds `operations: Record<paneId, {...}>` and a
+single `lockedBy: string | null` used by Task 14.
+
+- [ ] **Step 4: Run tests**
+
+Run: `pnpm --prefix spa exec vitest run`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+pnpm --prefix spa run lint
+git add spa/src/lib/rebuild/transport.ts spa/src/lib/rebuild/engine.ts spa/src/lib/rebuild/engine.test.ts spa/src/stores/useRebuildStore.ts spa/src/lib/host-api.ts
+git commit -m "feat(spa): rebuild engine with a host-pinned transport"
+```
+
+---
+
+### Task 13: The action set UI
+
+**Files:**
+- Create: `spa/src/components/RebuildActionSet.tsx`
+- Create: `spa/src/components/RebuildActionSet.test.tsx`
+- Modify: `spa/src/components/TerminatedPane.tsx`
+- Modify: `spa/src/locales/en.json`, `spa/src/locales/zh-TW.json`
+
+**Interfaces:**
+- Consumes: `PaneRebuildRecord`, `rebuildPane`, `useRebuildStore`.
+- Produces: `<RebuildActionSet tabId paneId record onRebuild />`, reused by
+  Task 15's popover.
+
+**Context — inline editing must reuse `EditableCwdCell`'s hard-won guards
+(alpha.324):** a `committedRef` against double submit, `disabled` while busy,
+and `compositionRef` + `e.nativeEvent.isComposing` so an IME Enter does not
+commit. Read `spa/src/components/settings/snapshot/EditableCwdCell.tsx` before
+writing this.
+
+- [ ] **Step 1: Write the failing test**
+
+```tsx
+// spa/src/components/RebuildActionSet.test.tsx
+import { describe, it, expect, vi } from 'vitest'
+import { render, screen, fireEvent } from '@testing-library/react'
+import { RebuildActionSet } from './RebuildActionSet'
+
+const record = {
+  sessionName: 'dev', tmuxInstance: '111:1000', cwd: '/w/p',
+  agent: { type: 'cc', sessionId: 'S1', updatedAt: 1 },
+  resumeCommand: 'claude --resume S1', capturedAt: 1,
+}
+
+describe('RebuildActionSet', () => {
+  it('checks all three rows by default', () => {
+    render(<RebuildActionSet tabId="t1" paneId="p1" record={record} onRebuild={vi.fn()} />)
+    screen.getAllByRole('checkbox').forEach((cb) => expect(cb).toBeChecked())
+  })
+
+  it('disables and unchecks the resume row when there is no command', () => {
+    render(<RebuildActionSet tabId="t1" paneId="p1" record={{ ...record, resumeCommand: undefined, agent: undefined }} onRebuild={vi.fn()} />)
+    const resume = screen.getByRole('checkbox', { name: /resume/i })
+    expect(resume).toBeDisabled()
+    expect(resume).not.toBeChecked()
+  })
+
+  it('passes the unchecked rows through to the plan', () => {
+    const onRebuild = vi.fn()
+    render(<RebuildActionSet tabId="t1" paneId="p1" record={record} onRebuild={onRebuild} />)
+    fireEvent.click(screen.getByRole('checkbox', { name: /resume/i }))
+    fireEvent.click(screen.getByRole('button', { name: /rebuild/i }))
+    expect(onRebuild).toHaveBeenCalledWith({ createSession: true, applyCwd: true, runResume: false })
+  })
+
+  it('does not commit an edit on an IME Enter', () => {
+    const onEdit = vi.fn()
+    render(<RebuildActionSet tabId="t1" paneId="p1" record={record} onRebuild={vi.fn()} onEdit={onEdit} />)
+    fireEvent.doubleClick(screen.getByText('/w/p'))
+    const input = screen.getByDisplayValue('/w/p')
+    fireEvent.change(input, { target: { value: '/w/other' } })
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
+    expect(onEdit).not.toHaveBeenCalled()
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(onEdit).toHaveBeenCalledWith('cwd', '/w/other')
+  })
+
+  it('shows retry actions after a failed resume instead of a fresh rebuild', () => {
+    render(<RebuildActionSet tabId="t1" paneId="p1" record={record} onRebuild={vi.fn()}
+      operation={{ report: { hostId: 'h1', created: { code: 'new1', name: 'dev', tmuxInstance: '222:2000' },
+        steps: { create: { status: 'ok' }, resume: { status: 'failed', error: 'send-keys failed: 500' }, repoint: { status: 'skipped' } } } }} />)
+    expect(screen.getByRole('button', { name: /retry resume/i })).toBeEnabled()
+    expect(screen.getByRole('button', { name: /attach anyway/i })).toBeEnabled()
+    expect(screen.getByText(/dev/)).toBeInTheDocument()
+  })
+})
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `pnpm --prefix spa exec vitest run RebuildActionSet`
+Expected: FAIL — module not found.
+
+- [ ] **Step 3: Implement**
+
+Build `RebuildActionSet` with the three rows, the checkbox state, the inline
+editors (copying `EditableCwdCell`'s guards), and the operation-aware footer
+(Rebuild / Retry resume + Attach anyway). Render it in `TerminatedPane` above
+the existing `SessionPickerList`, hiding the Rebuild button and showing an
+explanatory line when `content.terminated === 'host-removed'`.
+
+New i18n keys (both locales):
+`rebuild.create_session`, `rebuild.working_directory`, `rebuild.run_resume`,
+`rebuild.button`, `rebuild.retry_resume`, `rebuild.attach_anyway`,
+`rebuild.host_removed_hint`, `rebuild.no_agent_hint`, `rebuild.unverified_hint`.
+
+- [ ] **Step 4: Run tests**
+
+Run: `pnpm --prefix spa exec vitest run`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+pnpm --prefix spa run lint && pnpm --prefix spa run build
+git add spa/src/components/RebuildActionSet.tsx spa/src/components/RebuildActionSet.test.tsx spa/src/components/TerminatedPane.tsx spa/src/locales/en.json spa/src/locales/zh-TW.json
+git commit -m "feat(spa): rebuild action set on terminated panes"
+```
+
+---
+
+### Task 14: Shared operation lock across the legacy snapshot actions
+
+**Files:**
+- Modify: `spa/src/stores/useRebuildStore.ts` (expose `acquire` / `release`)
+- Modify: `spa/src/components/settings/SnapshotSettingsSection.tsx:249,279`
+- Test: `spa/src/stores/useRebuildStore.lock.test.ts`
+
+**Interfaces:**
+- Produces: `acquireOperationLock(owner: string): boolean`,
+  `releaseOperationLock(owner: string): void`.
+
+**Context:** Snapshot today has only a component-local `busyRef`
+(`SnapshotSettingsSection.tsx:249`), and `restoreAll` replaces the entire tab
+snapshot (`restore.ts:448`) — which would overwrite an in-flight rebuild's
+re-point. The lock must ship with the engine, not with the Phase 7 UI.
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// spa/src/stores/useRebuildStore.lock.test.ts
+import { describe, it, expect, beforeEach } from 'vitest'
+import { useRebuildStore } from './useRebuildStore'
+
+describe('operation lock', () => {
+  beforeEach(() => useRebuildStore.setState({ operations: {}, lockedBy: null }))
+
+  it('grants to the first caller and refuses the second', () => {
+    expect(useRebuildStore.getState().acquireOperationLock('rebuild:p1')).toBe(true)
+    expect(useRebuildStore.getState().acquireOperationLock('snapshot:restoreAll')).toBe(false)
+  })
+
+  it('is re-entrant for the same owner (undo → restoreAll)', () => {
+    expect(useRebuildStore.getState().acquireOperationLock('snapshot:undo')).toBe(true)
+    expect(useRebuildStore.getState().acquireOperationLock('snapshot:undo')).toBe(true)
+  })
+
+  it('releases only for the holder', () => {
+    useRebuildStore.getState().acquireOperationLock('rebuild:p1')
+    useRebuildStore.getState().releaseOperationLock('snapshot:restoreAll')
+    expect(useRebuildStore.getState().lockedBy).toBe('rebuild:p1')
+    useRebuildStore.getState().releaseOperationLock('rebuild:p1')
+    expect(useRebuildStore.getState().lockedBy).toBeNull()
+  })
+})
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `pnpm --prefix spa exec vitest run useRebuildStore.lock`
+Expected: FAIL — `acquireOperationLock` is not a function.
+
+- [ ] **Step 3: Implement**
+
+Add the lock to `useRebuildStore` (re-entrant on an identical owner string).
+Wrap `rebuildPane` in acquire/release, and wrap each of the four legacy
+snapshot actions (`rebuildAllSessions`, `restoreTabLayout`, `restoreAll`,
+`undoLastRestore`) at their `SnapshotSettingsSection` call sites with the owner
+strings `snapshot:<action>`; the undo path passes `snapshot:undo` down so the
+nested `restoreAll` re-acquires the same owner. Disable the buttons while
+`lockedBy` is set by someone else.
+
+- [ ] **Step 4: Run tests**
+
+Run: `pnpm --prefix spa exec vitest run`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+pnpm --prefix spa run lint
+git add spa/src/stores/useRebuildStore.ts spa/src/stores/useRebuildStore.lock.test.ts spa/src/components/settings/SnapshotSettingsSection.tsx spa/src/lib/rebuild/engine.ts
+git commit -m "feat(spa): serialize rebuild against the legacy snapshot actions"
+```
+
+---
+
+# Phase 6 — Tab-name popover
+
+### Task 15: Per-pane detail blocks and the new entry point
+
+**Files:**
+- Modify: `spa/src/features/workspace/hooks.ts:97,173`
+- Modify: `spa/src/components/RenamePopover.tsx`
+- Modify: `spa/src/App.tsx:317-326`
+- Test: `spa/src/components/RenamePopover.rebuild.test.tsx`
+
+**Interfaces:**
+- Consumes: `RebuildActionSet` (Task 13), `collectLeaves`
+  (`spa/src/lib/pane-tree.ts:136`).
+
+**Context:** the popover's entry point looks only at the tab's **primary** pane
+(`hooks.ts:97`) — it does not open when that pane is an editor or a terminated
+session even if another pane is a live terminal — and `hooks.ts:173` renames a
+single target. This task changes the entry point, not just the content.
+
+- [ ] **Step 1: Write the failing test**
+
+```tsx
+// spa/src/components/RenamePopover.rebuild.test.tsx
+it('opens for a tab whose primary pane is an editor but which has a terminal pane', () => {
+  const tab = seedSplitTab([
+    { kind: 'editor', source: 'local', filePath: '/a.md' },
+    { kind: 'tmux-session', hostId: 'h1', sessionCode: 'abc123', mode: 'terminal',
+      cachedName: 'dev', tmuxInstance: '111:1000' },
+  ])
+  expect(collectRenameTargets(tab)).toHaveLength(1)
+  expect(collectRenameTargets(tab)[0].sessionCode).toBe('abc123')
+})
+
+it('renders one block per terminal pane with independent targets', () => {
+  const tab = seedSplitTab([
+    { kind: 'tmux-session', hostId: 'h1', sessionCode: 'aaa', mode: 'terminal', cachedName: 'one', tmuxInstance: '111:1000' },
+    { kind: 'tmux-session', hostId: 'h1', sessionCode: 'bbb', mode: 'terminal', cachedName: 'two', tmuxInstance: '111:1000' },
+  ])
+  render(<RenamePopover {...props} tab={tab} />)
+  expect(screen.getByDisplayValue('one')).toBeInTheDocument()
+  expect(screen.getByDisplayValue('two')).toBeInTheDocument()
+})
+
+it('editing cwd does not submit the rename', () => {
+  const onConfirm = vi.fn()
+  render(<RenamePopover {...props} onConfirm={onConfirm} />)
+  const cwd = screen.getByDisplayValue('/w/p')
+  fireEvent.keyDown(cwd, { key: 'Enter' })
+  expect(onConfirm).not.toHaveBeenCalled()
+})
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `pnpm --prefix spa exec vitest run RenamePopover.rebuild`
+Expected: FAIL — `collectRenameTargets` does not exist.
+
+- [ ] **Step 3: Implement**
+
+Export `collectRenameTargets(tab)` from `hooks.ts` using `collectLeaves` +
+a `mode === 'terminal'` filter, and open the popover whenever it returns at
+least one target. Render one `RebuildActionSet`-derived block per target inside
+`RenamePopover`, keyed by `paneId`. A live pane's name row calls the existing
+daemon rename; a dead pane's name row writes `rebuild.sessionName`. Stop
+propagation of `Enter` inside the cwd / resume inputs.
+
+- [ ] **Step 4: Run tests**
+
+Run: `pnpm --prefix spa exec vitest run`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+pnpm --prefix spa run lint && pnpm --prefix spa run build
+git add spa/src/features/workspace/hooks.ts spa/src/components/RenamePopover.tsx spa/src/components/RenamePopover.rebuild.test.tsx spa/src/App.tsx
+git commit -m "feat(spa): show and edit rebuild details from the tab popover"
+```
+
+---
+
+# Phase 7 — Snapshot batch view
+
+### Task 16: Records table and "Rebuild all"
+
+**Files:**
+- Create: `spa/src/lib/rebuild/batch.ts`
+- Create: `spa/src/lib/rebuild/batch.test.ts`
+- Modify: `spa/src/components/settings/SnapshotSettingsSection.tsx`
+- Modify: `spa/src/locales/en.json`, `spa/src/locales/zh-TW.json`
+
+**Interfaces:**
+- Produces:
+  ```ts
+  interface PaneRef { paneId: string; tabId: string; hostId: string; sessionCode: string; tmuxInstance: string }
+  interface BatchGroup extends PaneRef {
+    paneIds: string[]          // every pane re-pointed to this group's result
+    sourcePaneId: string       // whose record won the conflict resolution
+    record: PaneRebuildRecord
+    plan: RebuildPlan
+  }
+  groupForBatch(panes: (PaneRef & { record: PaneRebuildRecord })[]):
+    { groups: BatchGroup[]; excluded: PaneRef[] }
+  ```
+
+**Context:** grouping key is `(hostId, tmuxInstance, sessionCode)` — the
+instance stays in the key because the same code under two different non-empty
+instances is genuinely two different historical sessions. Panes with an
+unknown (`''`) instance are excluded from the automatic batch. Conflicting
+hand-edits inside one group resolve to the latest `capturedAt`. Unverified
+records are skipped.
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// spa/src/lib/rebuild/batch.test.ts
+import { describe, it, expect } from 'vitest'
+import { groupForBatch } from './batch'
+
+const pane = (paneId: string, over: Record<string, unknown> = {}) => ({
+  paneId, tabId: 't1', hostId: 'h1', sessionCode: 'abc', tmuxInstance: '111:1000',
+  record: { sessionName: 'dev', tmuxInstance: '111:1000', cwd: '/w', capturedAt: 1,
+    agent: { type: 'cc', sessionId: 'S1', updatedAt: 1 }, resumeCommand: 'claude --resume S1' },
+  ...over,
+})
+
+describe('groupForBatch', () => {
+  it('merges two panes on the same dead session into one group', () => {
+    const { groups } = groupForBatch([pane('p1'), pane('p2')])
+    expect(groups).toHaveLength(1)
+    expect(groups[0].paneIds).toEqual(['p1', 'p2'])
+  })
+
+  it('keeps the same code under different generations apart', () => {
+    const { groups } = groupForBatch([pane('p1'), pane('p2', { tmuxInstance: '222:2000' })])
+    expect(groups).toHaveLength(2)
+  })
+
+  it('excludes panes with an unknown generation', () => {
+    const { groups, excluded } = groupForBatch([pane('p1'), pane('p2', { tmuxInstance: '' })])
+    expect(groups).toHaveLength(1)
+    expect(excluded.map((p) => p.paneId)).toEqual(['p2'])
+  })
+
+  it('resolves conflicting hand-edits to the latest capturedAt', () => {
+    const older = pane('p1')
+    const newer = pane('p2', { record: { ...pane('p2').record, cwd: '/w/newer', capturedAt: 9 } })
+    const { groups } = groupForBatch([older, newer])
+    expect(groups[0].record.cwd).toBe('/w/newer')
+    expect(groups[0].sourcePaneId).toBe('p2')
+  })
+
+  it('skips the exact resume for unverified records', () => {
+    const { groups } = groupForBatch([pane('p1', { record: { ...pane('p1').record, unverified: true } })])
+    expect(groups[0].plan.runResume).toBe(false)
+  })
+})
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `pnpm --prefix spa exec vitest run batch`
+Expected: FAIL — module not found.
+
+- [ ] **Step 3: Implement**
+
+Write `groupForBatch`, then rebuild the Snapshot section's table to read the
+per-tab records: one row per terminal pane with the existing four-state health
+indicator, a "Rebuild all" button running each group through `rebuildPane` and
+re-pointing every pane in the group, and a separate "needs attention" list for
+the excluded panes with a single-pane Rebuild each. Label the legacy actions
+shell-only. All actions go through the Task 14 lock.
+
+New i18n keys: `rebuild.batch_title`, `rebuild.batch_run`,
+`rebuild.batch_needs_attention`, `rebuild.legacy_shell_only`.
+
+- [ ] **Step 4: Run tests**
+
+Run: `pnpm --prefix spa exec vitest run`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+pnpm --prefix spa run lint && pnpm --prefix spa run build
+git add spa/src/lib/rebuild/batch.ts spa/src/lib/rebuild/batch.test.ts spa/src/components/settings/SnapshotSettingsSection.tsx spa/src/locales/en.json spa/src/locales/zh-TW.json
+git commit -m "feat(spa): batch rebuild view over the per-tab records"
+```
+
+---
+
+## Manual verification (after Phase 5, on the Air)
+
+The reboot path cannot be unit-tested. After Phase 5 ships:
+
+1. Open a tab on a session running Claude Code; confirm the popover shows the
+   agent, cwd and `claude --resume <id>`.
+2. `tmux kill-server` on the host.
+3. Confirm the pane flips to "tmux restarted" **rather than** silently
+   attaching to a reused code, and that no other pane is wrongly marked.
+4. Press Rebuild; confirm the session is recreated with the original name, in
+   the original directory, with the agent resumed into its previous
+   conversation.
+5. Repeat with codex and opencode.
+6. Repeat with the resume row unchecked (expect a plain shell).
