@@ -59,6 +59,16 @@ export interface PaneRebuildRecord {
   }
   resumeCommand?: string
   /**
+   * User override for this pane only. Absent means "compose from the agent's
+   * templates" (spec §4.2). Never written automatically; cleared when the
+   * agent identity it was written against changes (spec §4.3).
+   *
+   * Added here beside `resumeCommand`, which Task 13 removes — the resolver's
+   * signature names this key, so the field has to exist a commit before the
+   * old one goes.
+   */
+  resumeCommandOverride?: string
+  /**
    * The record's agent disagrees with what the daemon currently reports for
    * the session (spec §9.1): still shown, but unchecked by default and skipped
    * by "Rebuild all".
