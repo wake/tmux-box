@@ -50,6 +50,109 @@ describe('RebuildActionSet — the resume row is resolved live', () => {
   })
 })
 
+// Spec §4.3 — the panel pins the command an operation is carrying only while
+// that operation is still actionable. "Retry resume" acts on a session that
+// already exists, so it must show the string the engine pinned at operation
+// start; but an operation that failed before creating anything is not
+// actionable, and the next Rebuild recomputes from scratch — so the panel goes
+// back to the live resolution and a template edited meanwhile is visible
+// BEFORE the button is pressed.
+describe('RebuildActionSet — the displayed command is pinned only while actionable', () => {
+  // The real operation shape: `resumeCommand` at the top level, `created`
+  // nested under `report`. A fixture that invented a top-level `created` would
+  // let an implementation reading the wrong field pass.
+  const runningOp = {
+    status: 'running' as const,
+    resumeCommand: 'claude --resume PINNED',
+    report: { steps: { create: { status: 'ok' as const } } },
+  }
+
+  it('shows the live resolution when there is no operation at all', () => {
+    render(<RebuildActionSet tabId="t1" paneId="p1" record={record} onRebuild={vi.fn()} />)
+    expect(screen.getByTestId('rebuild-resume-command-cell')).toHaveTextContent('claude --resume S1')
+  })
+
+  it('pins the operation string while the operation is running, through a template change', () => {
+    render(<RebuildActionSet tabId="t1" paneId="p1" record={record} onRebuild={vi.fn()} operation={runningOp} />)
+    expect(screen.getByTestId('rebuild-resume-command-cell')).toHaveTextContent('claude --resume PINNED')
+    // Another window edits the template mid-flight. What is in flight does not change.
+    act(() => { useResumeTemplateStore.getState().setTemplate('cc', 'exact', 'cld-yolo --resume {id}') })
+    expect(screen.getByTestId('rebuild-resume-command-cell')).toHaveTextContent('claude --resume PINNED')
+    expect(screen.getByTestId('rebuild-resume-command-cell')).not.toHaveTextContent('cld-yolo')
+  })
+
+  it('pins the operation string once a session exists, even after the operation finished', () => {
+    useRebuildStore.setState({
+      operations: {
+        p1: {
+          paneId: 'p1', tabId: 't1', hostId: 'h1',
+          plan: { createSession: true, applyCwd: true, runResume: true },
+          binding: { hostId: 'h1', sessionCode: 'old1', tmuxInstance: '111:1000' },
+          resumeCommand: 'claude --resume PINNED',
+          createdSession: {
+            code: 'new1', name: 'dev', cwd: '/w/p', mode: 'terminal',
+            cc_session_id: '', cc_model: '', has_relay: false, tmux_instance: '222:2000',
+          },
+          status: 'done',
+          report: {
+            hostId: 'h1',
+            created: { code: 'new1', name: 'dev', tmuxInstance: '222:2000' },
+            steps: { create: { status: 'ok' }, resume: { status: 'failed', error: 'send-keys failed: 500' }, repoint: { status: 'skipped' } },
+            repointed: false,
+          },
+          startedAt: 1,
+        },
+      },
+    })
+    render(<RebuildActionSet tabId="t1" paneId="p1" record={record} onRebuild={vi.fn()} />)
+    // Retry resume re-sends against the created session: it must show what it will send.
+    expect(screen.getByRole('button', { name: /retry resume/i })).toBeEnabled()
+    expect(screen.getByTestId('rebuild-resume-command-cell')).toHaveTextContent('claude --resume PINNED')
+    act(() => { useResumeTemplateStore.getState().setTemplate('cc', 'exact', 'cld-yolo --resume {id}') })
+    expect(screen.getByTestId('rebuild-resume-command-cell')).toHaveTextContent('claude --resume PINNED')
+  })
+
+  it('returns to the live resolution when the operation finished without creating anything', () => {
+    render(<RebuildActionSet tabId="t1" paneId="p1" record={record} onRebuild={vi.fn()}
+      operation={{
+        status: 'done',
+        resumeCommand: 'claude --resume PINNED',
+        report: {
+          hostId: 'h1', repointed: false,
+          steps: {
+            create: { status: 'failed', error: 'host h1 is not configured' },
+            resume: { status: 'skipped' }, repoint: { status: 'skipped' },
+          },
+        },
+      }} />)
+    expect(screen.getByTestId('rebuild-resume-command-cell')).toHaveTextContent('claude --resume S1')
+    expect(screen.getByTestId('rebuild-resume-command-cell')).not.toHaveTextContent('PINNED')
+  })
+
+  it('shows a template edited after a failed create, and rebuilds with the resume row on', () => {
+    const onRebuild = vi.fn()
+    render(<RebuildActionSet tabId="t1" paneId="p1" record={record} onRebuild={onRebuild}
+      operation={{
+        status: 'done',
+        resumeCommand: 'claude --resume PINNED',
+        report: {
+          hostId: 'h1', repointed: false,
+          steps: {
+            create: { status: 'failed', error: 'host h1 is not configured' },
+            resume: { status: 'skipped' }, repoint: { status: 'skipped' },
+          },
+        },
+      }} />)
+    act(() => { useResumeTemplateStore.getState().setTemplate('cc', 'exact', 'cld-yolo --resume {id}') })
+    expect(screen.getByTestId('rebuild-resume-command-cell')).toHaveTextContent('cld-yolo --resume S1')
+    // And the button the user presses next is the one that would send it.
+    const button = screen.getByRole('button', { name: /^rebuild$/i })
+    expect(button).toBeEnabled()
+    fireEvent.click(button)
+    expect(onRebuild).toHaveBeenCalledWith(expect.objectContaining({ runResume: true }))
+  })
+})
+
 describe('RebuildActionSet', () => {
   it('checks all three rows by default', () => {
     render(<RebuildActionSet tabId="t1" paneId="p1" record={record} onRebuild={vi.fn()} />)

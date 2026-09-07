@@ -26,6 +26,13 @@ export type RebuildEditableField = 'sessionName' | 'cwd' | 'resumeCommandOverrid
  */
 export interface RebuildOperationView {
   status?: 'running' | 'done'
+  /**
+   * The string the engine resolved and pinned when the operation started
+   * (`RebuildOperation.resumeCommand`). The panel renders it instead of the
+   * live resolution while the operation is still actionable — see the `pinned`
+   * computation below.
+   */
+  resumeCommand?: string
   report?: {
     hostId?: string
     created?: { code: string; name: string; tmuxInstance?: string }
@@ -211,7 +218,6 @@ export function RebuildActionSet({
   // send, so a template edited in Settings (or in another window) has to
   // repaint this row without anything remounting.
   const templates = useResumeTemplateLookup()
-  const resumeCommand = resolveResumeCommand(record, templates)
 
   // Per-row overrides on top of the derived defaults, so a value that arrives
   // later (a cwd the user just typed in) turns its row back on by itself.
@@ -231,6 +237,18 @@ export function RebuildActionSet({
   // Once a session exists the rows describe something already done; editing
   // them would only pretend to change it.
   const frozen = busy || !!created || hostRemoved
+
+  // Spec §4.3. An operation that is in flight, or that has already created a
+  // session, is the thing the next button press acts on — "Retry resume"
+  // re-sends against THAT session, so the row has to show the string the engine
+  // pinned at operation start, not whatever the templates resolve to now.
+  //
+  // An operation that failed before creating anything is not actionable: the
+  // next Rebuild recomputes from scratch. So the panel goes back to the live
+  // resolution, and a template the user edits in between is visible before they
+  // press the button rather than after.
+  const pinned = busy || !!created
+  const resumeCommand = pinned ? (op?.resumeCommand ?? '') : resolveResumeCommand(record, templates)
 
   const hasCwd = !!record.cwd
   const hasResume = !!resumeCommand
