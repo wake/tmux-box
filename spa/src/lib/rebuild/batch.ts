@@ -20,7 +20,7 @@ import { useRebuildStore, type OperationLockGrant, type RebuildBinding } from '.
 import { rebuildPane, repointMember, type RebuildDeps, type RebuildPlan, type RebuildReport } from './engine'
 import { batchCandidates, collectRecordRows, type BatchCandidate, type PaneRef } from './eligibility'
 import { pinHost } from './transport'
-import type { PaneRebuildRecord, Tab } from '../../types/tab'
+import type { PaneRebuildRecord } from '../../types/tab'
 
 /** The batch's lock owner. One name for the whole run, per rule 3 above. */
 export const BATCH_LOCK_OWNER = 'rebuild:batch'
@@ -124,11 +124,6 @@ export function groupForBatch(panes: BatchCandidate[]): { groups: BatchGroup[]; 
   }
 
   return { groups: Array.from(byKey.values()), excluded }
-}
-
-/** The groups and the leftovers, straight from the live tab tree. */
-export function planBatch(tabs: Record<string, Tab>): { groups: BatchGroup[]; excluded: BatchCandidate[] } {
-  return groupForBatch(batchCandidates(collectRecordRows(tabs)))
 }
 
 /**
