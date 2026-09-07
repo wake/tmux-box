@@ -58,6 +58,7 @@ const COOLDOWN_MS = 30_000
  */
 interface Cooldown {
   nextAllowedAt: number
+  /** A trigger still owed a run: set by any suppressed one, consumed ONLY by `startRequest`. */
   pending: boolean
   timer: ReturnType<typeof setTimeout> | null
 }
@@ -166,6 +167,14 @@ export function probeSessionProvenance(
  * The timer handle is cleared whether or not a request follows. A handle left
  * behind would make the scheduler believe a timer is still armed, and every
  * later deferred run would be silently swallowed.
+ *
+ * `pending` is NOT cleared here: a request STARTING is what consumes it, and
+ * `startRequest` is where that happens. Splitting the consumer between the two
+ * paths that can start a request is what let a trigger go missing — a
+ * `setTimeout` fires no earlier than its deadline and often a shade later, so
+ * a trigger landing in that gap starts the request itself and leaves this
+ * callback running beside someone else's request, with a `pending` it did not
+ * arm and must not spend.
  */
 function runDeferred(
   cd: Cooldown,
@@ -175,7 +184,6 @@ function runDeferred(
   key: string,
 ): void {
   cd.timer = null
-  cd.pending = false
   if (inFlight.has(key) || disowned.has(key)) return
   if (Date.now() < cd.nextAllowedAt) return
   if (!canAttachTerminal(hostId)) return
@@ -200,6 +208,16 @@ function startRequest(
   tmuxInstance: string,
   key: string,
 ): void {
+  // A request starting is what consumes `pending`, and it supersedes whatever
+  // timer was armed to make this same request later. Doing both HERE — in the
+  // one place a request begins — is what keeps the two paths that can start
+  // one (an immediate trigger, a deferred run) from disagreeing about who owes
+  // whom a run.
+  if (cd.timer !== null) {
+    clearTimeout(cd.timer)
+    cd.timer = null
+  }
+  cd.pending = false
   inFlight.add(key)
   fetchSessionProvenance(hostId, sessionCode)
     .then((ans) => {

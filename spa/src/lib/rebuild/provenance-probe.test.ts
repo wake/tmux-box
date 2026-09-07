@@ -398,6 +398,77 @@ describe('the defer-never-drop scheduler (§5.4.1)', () => {
     expect(calls()).toBe(2)
   })
 
+  // --- A timer that is DUE but has not run yet (§5.4.1) ---
+  //
+  // `setTimeout` fires no earlier than its deadline and routinely a shade
+  // later, so a hook can land after the deadline and start the request itself
+  // while the callback armed for that same deadline is still queued. Every
+  // other case in this file advances the clock, which dispatches the callback
+  // at the instant it comes due and can never produce that overlap.
+  //
+  // `vi.setSystemTime` is what produces it: it moves `Date.now()` past the
+  // deadline WITHOUT dispatching, and shifts the armed timer by the same
+  // amount — a timer 1 s late, exactly the shape of the race.
+
+  it('still owes a run for the hook that arrived during the superseding request', async () => {
+    seed()
+    await primeCooldown()           // request 1 done at t=0, deadline t=30 s
+
+    await advance(29_000)
+    trigger()                       // arms a timer for t=30 s
+
+    const d = deferred()
+    vi.mocked(fetchSessionProvenance).mockReturnValue(d.promise)
+    vi.setSystemTime(30_000)        // t=30 s, and the timer is now 1 s late
+    trigger()                       // the deadline has passed: request 2 starts
+    expect(calls()).toBe(2)
+    trigger()                       // a hook arrives while request 2 is out
+
+    await advance(1_000)            // t=31 s: whatever is still armed runs here
+    expect(calls()).toBe(2)         // and must not spend a request of its own
+
+    d.resolve(notFound())
+    await settle()                  // request 2 completes: deadline t=61 s
+
+    // The hook that arrived during request 2 is still owed a run. A callback
+    // that cleared `pending` on its way past would have thrown it away, and
+    // the completion handler — the only thing that schedules the follow-up —
+    // would have found nothing owed.
+    await advance(29_999)           // t = 60.999 s
+    expect(calls()).toBe(2)
+    await advance(1)                // t = 61.000 s
+    expect(calls()).toBe(3)
+  })
+
+  it('arms the follow-up even when the superseded timer has not run yet', async () => {
+    // The same race with the answer arriving first: the completion handler
+    // arms a follow-up only when no timer is armed, so a superseded handle
+    // left in place makes it arm none — and the run that handle then declines
+    // is owed to nobody.
+    seed()
+    await primeCooldown()
+
+    await advance(29_000)
+    trigger()                       // arms a timer for t=30 s
+
+    const d = deferred()
+    vi.mocked(fetchSessionProvenance).mockReturnValue(d.promise)
+    vi.setSystemTime(30_000)        // t=30 s, and the timer is now 1 s late
+    trigger()                       // request 2 starts
+    expect(calls()).toBe(2)
+    trigger()                       // a hook arrives while request 2 is out
+
+    d.resolve(notFound())
+    await settle()                  // request 2 answers first: deadline t=60 s
+
+    await advance(1_000)            // t=31 s: the superseded timer's slot
+    expect(calls()).toBe(2)
+    await advance(28_999)           // t = 59.999 s
+    expect(calls()).toBe(2)
+    await advance(1)                // t = 60.000 s
+    expect(calls()).toBe(3)
+  })
+
   it('puts a rejected request into the cooldown exactly like a resolved one', async () => {
     seed()
     const d = deferred()
