@@ -124,6 +124,52 @@ describe('setPaneRebuild', () => {
     expect(rec(tab.id)?.cwdSource).toBe('agent-session-start')
   })
 
+  it('marks a hand-typed cwd as user-sourced', () => {
+    const tab = seed()
+    useTabStore.getState().setPaneRebuild('h1', 'abc123', '111:1000', {
+      kind: 'field', field: 'cwd', value: '/typed',
+    })
+    expect(rec(tab.id)?.cwd).toBe('/typed')
+    expect(rec(tab.id)?.cwdSource).toBe('user')
+  })
+
+  it('retyping the cwd a probe already found is a confirmation, not a no-op', () => {
+    // The value does not change, but the PROVENANCE does: the user has now
+    // approved this directory, and the agent backfill's fill mode must not
+    // overwrite it afterwards. So the same-value early return must not fire.
+    const tab = seed()
+    const paneId = getPrimaryPane(tab.layout).id
+    const store = useTabStore.getState()
+    store.setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'probe-cwd', cwd: '/probe' })
+    expect(rec(tab.id)?.cwdSource).toBe('pane-probe')
+
+    const before = paneContentOf(tab.id, paneId)
+    store.setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'field', field: 'cwd', value: '/probe' })
+    expect(rec(tab.id)?.cwd).toBe('/probe')
+    expect(rec(tab.id)?.cwdSource).toBe('user')
+    expect(paneContentOf(tab.id, paneId)).not.toBe(before)
+  })
+
+  it('retyping a cwd that is already user-sourced is still a no-op', () => {
+    const tab = seed()
+    const paneId = getPrimaryPane(tab.layout).id
+    const store = useTabStore.getState()
+    store.setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'field', field: 'cwd', value: '/typed' })
+
+    const before = paneContentOf(tab.id, paneId)
+    store.setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'field', field: 'cwd', value: '/typed' })
+    expect(paneContentOf(tab.id, paneId)).toBe(before)
+  })
+
+  it('a probe does not overwrite a user-typed cwd', () => {
+    const tab = seed()
+    const store = useTabStore.getState()
+    store.setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'field', field: 'cwd', value: '/typed' })
+    store.setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'probe-cwd', cwd: '/probe' })
+    expect(rec(tab.id)?.cwd).toBe('/typed')
+    expect(rec(tab.id)?.cwdSource).toBe('user')
+  })
+
   it('a per-pane edit does not touch a split sibling on the same session', () => {
     const tab = createTab({
       kind: 'tmux-session', hostId: 'h1', sessionCode: 'abc123',

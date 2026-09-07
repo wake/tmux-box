@@ -48,7 +48,7 @@ export interface PaneRebuildRecord {
   tmuxInstance: string
   /** cwd the agent was launched in — the cwd its resume is scoped to. */
   cwd?: string
-  cwdSource?: 'agent-session-start' | 'pane-probe'
+  cwdSource?: 'agent-session-start' | 'agent-backfill' | 'pane-probe' | 'user'
   agent?: {
     /** 'cc' | 'codex' | 'opencode' — open string, mirrors AGENT_NAMES. */
     type: string

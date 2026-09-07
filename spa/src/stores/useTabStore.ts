@@ -203,9 +203,16 @@ function applyRebuildPatch(c: TmuxSessionContent, patch: RebuildPatch): TmuxSess
       break
     }
     case 'field': {
-      if (prev[patch.field] === patch.value) return c
+      // A cwd edit also stamps `cwdSource: 'user'`, so retyping the directory a
+      // probe already found is a CONFIRMATION, not a no-op: the value is
+      // unchanged but the provenance is not, and the agent backfill's fill mode
+      // reads that provenance to decide whether it may overwrite. Once the
+      // source is already 'user' there is nothing left to change, and the early
+      // return still covers `resumeCommand` and `sessionName` unconditionally.
+      const promotesCwdSource = patch.field === 'cwd' && prev.cwdSource !== 'user'
+      if (prev[patch.field] === patch.value && !promotesCwdSource) return c
       // Spelled out per field so the record keeps its exact shape.
-      next = patch.field === 'cwd' ? { ...prev, cwd: patch.value, capturedAt: now }
+      next = patch.field === 'cwd' ? { ...prev, cwd: patch.value, cwdSource: 'user', capturedAt: now }
         : patch.field === 'resumeCommand' ? { ...prev, resumeCommand: patch.value, capturedAt: now }
           : { ...prev, sessionName: patch.value, capturedAt: now }
       break
