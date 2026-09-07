@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -386,4 +387,68 @@ func TestShellResolve_Integration_LongLivedDescendantDoesNotHang(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// An rc that prints far more than the output bound must not turn a perfectly
+// good answer into a timeout, and must not become the answer either.
+//
+// Both halves come from the same mistake: stopping the read at the bound. Once
+// the reader stops, the read end stays open with nobody draining it, the rc
+// fills the pipe, and the shell blocks in write() until the deadline kills it —
+// so a command that resolves fine is reported as `timeout`. And what was kept
+// is the FIRST bound-worth of output, i.e. the rc's noise, when the contract
+// (displayDetail) is "the LAST non-empty line" — the answer is at the end.
+//
+// ~200 KiB of chatter is well past both the 8 KiB bound and any pipe buffer.
+func TestShellResolve_Integration_ChattyRcIsDrainedAndTheAnswerSurvives(t *testing.T) {
+	zsh := requireZsh(t)
+	mod, _, _ := newTestModule(t)
+	mod.tmux.(interface {
+		SetGlobalOptionValue(option, value string)
+	}).SetGlobalOptionValue("default-shell", zsh)
+	noise := "rc chatter on stdout " + strings.Repeat("x", 80)
+	t.Setenv("ZDOTDIR", writeZshrc(t, "repeat 2000 print -r -- '"+noise+"'\n"))
+	mux := http.NewServeMux()
+	mod.RegisterRoutes(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	start := time.Now()
+	v := resolveCommand(t, srv, "cd")
+	elapsed := time.Since(start)
+
+	// (a) the shell was never wedged, so this is an answer and not a deadline.
+	assert.NotEqual(t, "timeout", v.Reason, "a chatty rc wedged the shell: the pipe stopped being drained")
+	assert.True(t, v.Resolved, "reason=%q detail=%q", v.Reason, v.Detail)
+	assert.Less(t, elapsed, 4*time.Second, "the request waited out the deadline")
+	// (b) the answer survived the noise that preceded it.
+	assert.Equal(t, "cd", v.Detail)
+	assert.NotContains(t, v.Detail, "rc chatter")
+}
+
+// TestCappedPipe_DrainsToEOFAndKeepsTheTail is the same contract without a
+// shell in the way: the writer must never block on the bound, and what is kept
+// is the END of the stream.
+func TestCappedPipe_DrainsToEOFAndKeepsTheTail(t *testing.T) {
+	const limit = 64
+	p, err := newCappedPipe(limit)
+	require.NoError(t, err)
+	defer p.close()
+
+	payload := strings.Repeat("a", 256<<10) + "TAIL"
+	written := make(chan error, 1)
+	go func() {
+		_, werr := io.WriteString(p.w, payload)
+		p.closeWriter()
+		written <- werr
+	}()
+
+	select {
+	case werr := <-written:
+		require.NoError(t, werr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the writer blocked: the reader stopped at the bound instead of draining to EOF")
+	}
+
+	assert.Equal(t, payload[len(payload)-limit:], p.finish(time.Second))
 }

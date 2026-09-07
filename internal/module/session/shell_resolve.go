@@ -19,7 +19,6 @@
 package session
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -206,16 +205,19 @@ func runShellProbe(ctx context.Context, shell, token string) shellProbeOutcome {
 
 	// Our own pipes rather than exec's byte buffers: `cmd.Stdout = io.Writer`
 	// makes Wait block on a copier goroutine that a stray descendant can hold
-	// open, and there would be no way to cap the read at 8 KiB.
+	// open, and there would be no way to bound what is kept.
+	//
+	// Both pipes are drained to EOF; only stdout keeps anything, and only its
+	// last 8 KiB, which is where displayDetail's answer lives.
 	stdout, err := newCappedPipe(shellProbeMaxOutput)
 	if err != nil {
 		return shellProbeOutcome{Err: err}
 	}
 	defer stdout.close()
-	// stderr is bounded and discarded. It is drained rather than left unread
-	// so a chatty rc cannot fill the pipe and wedge the shell, and kept out of
-	// `detail` so an interactive shell's prompt noise cannot become the answer.
-	stderr, err := newCappedPipe(shellProbeMaxOutput)
+	// stderr is drained and discarded (a limit of 0). Drained so a chatty rc
+	// cannot fill the pipe and wedge the shell; discarded so an interactive
+	// shell's prompt noise cannot become the answer.
+	stderr, err := newCappedPipe(0)
 	if err != nil {
 		return shellProbeOutcome{Err: err}
 	}
@@ -261,16 +263,31 @@ func runShellProbe(ctx context.Context, shell, token string) shellProbeOutcome {
 	return out
 }
 
-// cappedPipe reads one fd through an io.LimitReader on its own goroutine, so
-// the buffer is bounded before anything looks at it.
+// cappedPipe reads one fd on its own goroutine, all the way to EOF, keeping at
+// most `limit` bytes — the LAST `limit` bytes.
+//
+// Draining to the end matters as much as the bound. A reader that stops once it
+// has its bound leaves the read end open with nobody emptying it, so an rc that
+// keeps printing fills the pipe and the shell blocks in write() until the
+// deadline kills it — reporting `timeout` for a command that resolved perfectly
+// well.
+//
+// The TAIL rather than the head, because the contract is displayDetail's "last
+// non-empty line": an interactive login shell prints whatever the user's rc
+// prints before it ever reaches our command, so keeping the FIRST `limit` bytes
+// keeps the noise and throws away the answer.
+//
+// A limit of 0 means drained and discarded, which is all stderr needs.
 type cappedPipe struct {
-	r    *os.File
-	w    *os.File
-	buf  bytes.Buffer
+	r *os.File
+	w *os.File
+	// tail is written by the reader goroutine and read only after done is
+	// closed.
+	tail []byte
 	done chan struct{}
 }
 
-func newCappedPipe(limit int64) (*cappedPipe, error) {
+func newCappedPipe(limit int) (*cappedPipe, error) {
 	r, w, err := os.Pipe()
 	if err != nil {
 		return nil, err
@@ -278,9 +295,43 @@ func newCappedPipe(limit int64) (*cappedPipe, error) {
 	p := &cappedPipe{r: r, w: w, done: make(chan struct{})}
 	go func() {
 		defer close(p.done)
-		_, _ = io.Copy(&p.buf, io.LimitReader(p.r, limit))
+		p.tail = drainTail(p.r, limit)
 	}()
 	return p, nil
+}
+
+// drainTail reads r until it stops yielding, keeping at most `limit` bytes of
+// what it saw last. Any read error ends the drain — EOF, a closed descriptor,
+// or the read deadline finish() sets — and what has been kept by then is the
+// answer.
+func drainTail(r io.Reader, limit int) []byte {
+	if limit < 0 {
+		limit = 0
+	}
+	chunk := make([]byte, 32<<10)
+	tail := make([]byte, 0, limit)
+	for {
+		n, err := r.Read(chunk)
+		if n > 0 {
+			tail = appendTail(tail, chunk[:n], limit)
+		}
+		if err != nil {
+			return tail
+		}
+	}
+}
+
+// appendTail keeps the last `limit` bytes of tail+chunk, reusing tail's
+// storage so a megabyte of rc output costs one buffer rather than a megabyte.
+func appendTail(tail, chunk []byte, limit int) []byte {
+	if len(chunk) >= limit {
+		return append(tail[:0], chunk[len(chunk)-limit:]...)
+	}
+	if overflow := len(tail) + len(chunk) - limit; overflow > 0 {
+		// Overlapping, and safe: append copies, and copy is a memmove.
+		tail = append(tail[:0], tail[overflow:]...)
+	}
+	return append(tail, chunk...)
 }
 
 func (p *cappedPipe) closeWriter() { _ = p.w.Close() }
@@ -295,7 +346,7 @@ func (p *cappedPipe) finish(grace time.Duration) string {
 		_ = p.r.SetReadDeadline(time.Now())
 		<-p.done
 	}
-	return p.buf.String()
+	return string(p.tail)
 }
 
 func (p *cappedPipe) close() {
