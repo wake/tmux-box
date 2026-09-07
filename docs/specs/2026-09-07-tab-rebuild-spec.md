@@ -1,7 +1,7 @@
 # Spec — Per-tab session provenance & one-click rebuild ("Tab Rebuild")
 
-Status: draft v3 (revised after codex spec reviews R1 `task-mtqxjans-cf1ai3`
-and R2 `task-mtqxyow8-285jje`)
+Status: draft v4 (revised after codex spec reviews R1 `task-mtqxjans-cf1ai3`,
+R2 `task-mtqxyow8-285jje`, R3 `task-mtqyhkkh-pdsbag` — R3 returned no Blockers)
 Date: 2026-09-07
 Branch: `worktree-tab-rebuild`
 
@@ -350,8 +350,29 @@ zero new `ps` calls per event.
 
 #### 4.3.1 Provenance envelope
 
-The verdict is computed **once**, before the frame mutation, and travels as a
-self-contained envelope inside `Detail`:
+The verdict is computed **once**, before the frame mutation — but it is a
+*candidacy*, not the final authority. `applyFrameEvent` runs a **second**
+proxy attempt after the Upsert (`frame_ops.go:828-845`
+`reconcileCreatedFrameAsProxy`), which folds a frame the pre-walk had judged
+root; `TestPhase35_IT3_PreWalkMiss_PostReconcileHit`
+(`frame_ops_test.go:2535`) pins exactly that sequence. Emitting on the
+pre-verdict alone would therefore attach an envelope to an event that ended up
+collapsed into a parent (review R3 finding 3).
+
+So the envelope is emitted only when the **mutation outcome** confirms the
+sender kept its own frame:
+
+- the pre-walk verdict was `VerdictRoot`, **and**
+- the event was not taken by the pre-Upsert proxy fast-path
+  (`frame_ops.go:542`), **and**
+- `reconcileCreatedFrameAsProxy` did not canonicalize it
+  (`canonicalized == false`), **and**
+- the resulting frame is the sender's own with `ParentFrameID == ""`.
+
+The pre-walk verdict is a cheap early rejection; the post-Upsert walk is
+**not** replaced or short-circuited by it.
+
+The envelope travels inside `Detail`:
 
 ```json
 "pdx_provenance": {
@@ -453,12 +474,24 @@ So the daemon supplies it, on the payloads themselves:
    so every `/api/sessions` response and every `sessions` WS event
    self-describes its generation. Additive field; existing consumers ignore it.
 2. **The provenance envelope carries it** (§4.3.1).
-3. The daemon computes it from `config.GetTmuxInstance()`, cached and
-   recomputed whenever the session list changes, so it costs one `tmux
-   display-message` per changed broadcast rather than one per tick.
-   `GetTmuxInstance()` returns `""` on error/timeout
-   (`internal/config/hostid.go:22-30`); `""` is propagated honestly as
-   "unknown", never as a value.
+3. **The instance is an input to the watcher's change detection, not a value
+   cached beside it.** `hashSessions` currently hashes only the marshalled
+   session list (`internal/module/session/watcher.go:213-217`), so a tmux
+   restart that happens between two ticks and recreates identical
+   sessions produces an identical hash and **never broadcasts** — the SPA would
+   keep the old generation forever (review R3 finding 1). The instance is
+   therefore read on every tick and hashed together with the list:
+   `hash = sha256(tmuxInstance, sessions)`. A restart changes the hash even
+   when the list is byte-identical, and the broadcast that follows carries the
+   new instance.
+   Cost is one `tmux display-message` per tick alongside the `list-sessions`
+   the tick already runs. `GetTmuxInstance()` returns `""` on error/timeout
+   (`internal/config/hostid.go:22-30`); `""` is hashed like any other value, so
+   a transient timeout broadcasts "unknown" and the next successful tick
+   broadcasts the real value — self-healing without a separate retry rule.
+   Edge case: with **zero** sessions before and after a restart there is
+   nothing to distinguish and nothing to protect — every pane is already
+   marked dead by the code-absence rule.
 
 Death detection then reads only fields that arrived together:
 
@@ -468,16 +501,20 @@ Death detection then reads only fields that arrived together:
   nothing — covering first load, offline hosts, `GetTmuxInstance()` timeouts,
   host re-add / undo, and daemon-only restarts (instance unchanged → nothing
   marked, correctly).
-- **Bootstrap gate.** A `tmux-session` pane does not open its terminal WS until
-  the first `sessions` payload for that host has been processed
-  (`SessionPaneContent.tsx:70` currently attaches by code with no such gate).
-  Without the gate a pane can attach to a stranger that reused its code in the
-  window before the first payload. The gate is per host and lifts permanently
-  once any payload lands; an offline host shows its existing offline state, not
-  a spinner.
-- Responses from a superseded connection are discarded: each host connection
-  carries an epoch, and a payload whose epoch is not the current one is
-  dropped.
+- **Attach gate, per connection epoch — not just at boot.** A `tmux-session`
+  pane does not open its terminal WS until a `sessions` payload from the
+  **current** host-connection epoch has been processed. A boot-only gate is not
+  enough (review R3 finding 2): health recovery flips the host to `connected`
+  before host-events reconnects (`useMultiHostEventWs.ts:82`) and
+  `useTerminalWs.ts:51` attaches on that status, so a tmux restart that
+  happened while the SPA was offline could still let a terminal attach to a
+  stranger that reused the code before the fresh list arrives. Each host
+  connection carries an epoch; the gate closes on every reconnect and reopens
+  when that epoch's first payload lands, and payloads from a superseded epoch
+  are dropped.
+  An offline host keeps showing its existing offline state — the gate blocks
+  attaching, not rendering, and health/event connections are independent of the
+  terminal WS, so there is no deadlock.
 
 `'tmux-restarted'` already exists as a `TerminatedReason` with copy
 (`TerminatedPane.tsx:16`).
@@ -655,13 +692,20 @@ exclusivity:
 |---|---|---|---|
 | Snapshot: restore layout | no | — | no |
 | Snapshot: rebuild all sessions (legacy) | yes | snapshot `sessionMeta` — **name + cwd only, shell** | **no** |
+| Snapshot: restore everything | yes | snapshot `sessionMeta` — name + cwd only, shell | no |
 | Snapshot: undo last restore | yes, via the above | snapshot `sessionMeta` | no |
 | **Tab Rebuild (new)** | yes | per-tab records | **yes** |
 
+"Restore everything" is the entry the UI calls directly
+(`SnapshotSettingsSection.tsx:279` → `restoreAll`, `restore.ts:424`): rebuild
+plus layout restore in one action.
+
 Only the new engine ever runs an agent command; the legacy actions remain
-shell-only and are labelled as such in the UI. All four take the same
-operation lock, so a legacy rebuild and a Tab Rebuild cannot interleave, and
-all four stamp the current generation when they re-point (§4.6.1).
+shell-only and are labelled as such in the UI. All five take the same
+operation lock — shipped in Phase 5, not Phase 7 — so a legacy restore and a
+Tab Rebuild cannot interleave, and all five stamp the current generation when
+they re-point (§4.6.1). The lock is re-entrant along the undo → restoreAll
+path, or acquired only at the outermost entry; the plan picks one.
 
 **Rebuild all** groups panes by `(hostId, tmuxInstance, sessionCode)` — the
 instance stays in the key, because the same code under two different non-empty
@@ -686,9 +730,9 @@ Batch and single-pane rebuild are mutually exclusive while either is running.
 | **2** | Provenance envelope: `session_id` / `cwd` / `tmux_pane_id` / `tmux_instance` / `owner_session_start` in `Detail` for cc, codex, opencode (incl. plugin-template `cwd`); `tmux_instance` on `Session` (§4.3.1, §4.6) | daemon | Additive payload fields; nothing consumes them yet |
 | **3** | Generation guard: pane `tmuxInstance` populate from payloads, `markTerminatedForGeneration`, bootstrap attach gate, connection epoch, snapshot re-point stamping (§4.5, §4.6, §4.6.1) | spa | Self-contained correctness fix — wrong reattachments become visible terminated panes; no record exists yet, nothing depends on one |
 | **4** | `PaneRebuildRecord`, `setPaneRebuild`, envelope write path, cwd probe, **and the resume composer** (R1 finding 12: the composer ships with the capture that stores its output) | spa | Records accumulate and are visible in the popover-less state; no UI depends on them yet |
-| **5** | Rebuild engine + operation store + `TerminatedPane` action set (§4.8, §4.9) | spa | The user-facing feature; everything it reads exists |
+| **5** | Rebuild engine + operation store + `TerminatedPane` action set, **and the shared operation lock wired into the legacy snapshot actions** (§4.8, §4.9, §4.11) | spa | The user-facing feature; the lock ships here because Snapshot today only has a component-local `busyRef` (`SnapshotSettingsSection.tsx:249`), so without it a legacy restore could replace the whole tab snapshot (`restore.ts:448`) underneath an in-flight rebuild |
 | **6** | Popover entry-point rework + per-pane blocks (§4.10) | spa | Pure UI over existing data |
-| **7** | Snapshot batch view, Rebuild all with grouping, legacy-action labelling and shared lock (§4.11) | spa | Pure UI plus a lock over the engine from Phase 5 |
+| **7** | Snapshot batch view, Rebuild all with grouping, legacy-action labelling (§4.11) | spa | Pure UI over the records, on top of the engine and lock from Phase 5 |
 
 Phase 1 is deliberately alone: it touches `frame_ops.go`, the most
 heavily-reviewed file in the daemon, and its risk profile is nothing like the
@@ -797,6 +841,19 @@ Codex's sandbox has no network, so the main session runs these itself
 - Stream-mode panes are out of scope.
 
 ## 8. Review disposition
+
+### 8.0 Review R3 (`task-mtqyhkkh-pdsbag`) — 0 Blocker, 4 Important, 1 Minor
+
+R3 confirmed the frame-ownership reversal and closed 9 of R2's 11 findings.
+The five remaining items are all fixed in v4:
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | Generation cache cannot be invalidated by session-list change alone — an identical list after a restart never broadcasts (`watcher.go:213-217`) | §4.6: the instance is hashed **with** the list, so a restart always changes the hash; `""` self-heals on the next tick |
+| 2 | Attach gate only covered first load; reconnect still races (`useMultiHostEventWs.ts:82`, `useTerminalWs.ts:51`) | §4.6: the gate is per connection epoch and closes on every reconnect |
+| 3 | Pre-mutation verdict is not final — `reconcileCreatedFrameAsProxy` folds post-Upsert (`frame_ops.go:828-845`, pinned by `frame_ops_test.go:2535`) | §4.3.1: the envelope is gated on the **mutation outcome**; the pre-walk verdict is only an early rejection and never replaces the post-Upsert walk |
+| 4 | Shared lock scheduled for Phase 7 leaves Phase 5-6 racing the legacy restore (`SnapshotSettingsSection.tsx:249`, `restore.ts:448`) | §5: the lock ships **with Phase 5** |
+| 5 | Capability table missed "restore everything" (`SnapshotSettingsSection.tsx:279`) | §4.11: added |
 
 ### 8.1 Review R2 (`task-mtqxyow8-285jje`) — 5 Blocker, 6 Important
 
