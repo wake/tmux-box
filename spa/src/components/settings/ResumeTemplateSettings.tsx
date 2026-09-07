@@ -94,8 +94,10 @@ export function ResumeTemplateSettings({ busy = false }: { busy?: boolean }) {
   // host that no longer exists.
   const hostId = hosts[pickedHostId] ? pickedHostId : hostOrder[0] ?? ''
 
-  // Uncommitted edits. Absent means "whatever the store answers", so a reset —
-  // or an edit from another window — repaints without any effect syncing state.
+  // Uncommitted edits, and only those: a row is entered here by an edit and
+  // leaves on the commit or the revert that ends it. Absent means "whatever the
+  // store answers", so a reset — or an edit from another window — repaints
+  // without any effect syncing state.
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [results, setResults] = useState<Record<string, RowResult>>({})
 
@@ -119,6 +121,10 @@ export function ResumeTemplateSettings({ busy = false }: { busy?: boolean }) {
   const dropResult = (key: string) =>
     setResults(({ [key]: _dropped, ...rest }) => rest)
 
+  /** Hand the row back to the store, whether it was committed or discarded. */
+  const dropDraft = (key: string) =>
+    setDrafts(({ [key]: _dropped, ...rest }) => rest)
+
   const handleChange = (agentType: string, field: Field, value: string) => {
     setDrafts((d) => ({ ...d, [rowKey(agentType, field)]: value }))
     // Editing the row invalidates its verdict — including one still in flight.
@@ -127,11 +133,17 @@ export function ResumeTemplateSettings({ busy = false }: { busy?: boolean }) {
 
   const handleCommit = (agentType: string, field: Field, value: string) => {
     setTemplate(agentType, field, value)
+    // The store now holds this value, so the draft has nothing left to
+    // protect — and a draft that outlives its commit PINS the row: a template
+    // changed in another window, or reset from anywhere, would repaint every
+    // panel except the one being edited here, and Test would go on judging the
+    // stale word. A draft is uncommitted state only.
+    dropDraft(rowKey(agentType, field))
   }
 
   const handleRevert = (agentType: string, field: Field) => {
     const key = rowKey(agentType, field)
-    setDrafts(({ [key]: _dropped, ...rest }) => rest)
+    dropDraft(key)
     dropResult(key)
   }
 

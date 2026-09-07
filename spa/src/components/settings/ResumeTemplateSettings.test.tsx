@@ -320,6 +320,52 @@ describe('ResumeTemplateSettings — the host picker', () => {
   })
 })
 
+describe('ResumeTemplateSettings — a draft is uncommitted state only', () => {
+  it('a committed row follows a later store change instead of pinning the saved value', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ resolved: true, detail: 'x' }))
+    render(<ResumeTemplateSettings />)
+    const el = input('cc', 'exact')
+    fireEvent.change(el, { target: { value: 'cld-yolo --resume {id}' } })
+    fireEvent.keyDown(el, { key: 'Enter' })
+    expect(input('cc', 'exact').value).toBe('cld-yolo --resume {id}')
+
+    // Another window writes the same row, and `syncManager` lands it here.
+    act(() => {
+      useResumeTemplateStore.getState().setTemplate('cc', 'exact', 'other-wrapper --resume {id}')
+    })
+
+    // A committed row has nothing left to protect: the store is the value.
+    expect(input('cc', 'exact').value).toBe('other-wrapper --resume {id}')
+    // And Test judges what a rebuild would actually run, not what this window
+    // last typed.
+    await act(async () => { fireEvent.click(testButton('cc', 'exact')) })
+    expect(lastFetchBody()).toEqual({ command: 'other-wrapper' })
+  })
+
+  it('a committed row follows a reset performed elsewhere', () => {
+    render(<ResumeTemplateSettings />)
+    const el = input('cc', 'fallback')
+    fireEvent.change(el, { target: { value: 'cld-yolo -c' } })
+    fireEvent.blur(el)
+    expect(input('cc', 'fallback').value).toBe('cld-yolo -c')
+
+    act(() => { useResumeTemplateStore.getState().resetAgent('cc') })
+    expect(input('cc', 'fallback').value).toBe(DEFAULT_RESUME_TEMPLATES.cc.fallback)
+  })
+
+  it('an edit that has NOT been committed still wins over a store change', () => {
+    // The other side of the same rule: a draft exists to protect what the user
+    // is still typing, and only that.
+    render(<ResumeTemplateSettings />)
+    fireEvent.change(input('cc', 'exact'), { target: { value: 'half-typed' } })
+
+    act(() => {
+      useResumeTemplateStore.getState().setTemplate('cc', 'exact', 'from-elsewhere {id}')
+    })
+    expect(input('cc', 'exact').value).toBe('half-typed')
+  })
+})
+
 describe('ResumeTemplateSettings — i18n and the limits copy', () => {
   const originalT = useI18nStore.getState().t
   afterEach(() => { useI18nStore.setState({ t: originalT }) })
