@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/google/uuid"
 	agentpkg "github.com/wake/purdex/internal/agent"
@@ -23,6 +24,12 @@ type Frame struct {
 	StartedAt        int64
 	LastSeenAt       int64
 	Verified         bool
+	// SessionID and Cwd are the agent's *own* identity, as reported by its
+	// hook payloads. They are written by the INSERT half of Upsert and after
+	// that only ever by UpdateSessionIdentity — never inside a whole-row
+	// round-trip write, so no optimistic-retry loop can clobber them.
+	SessionID string
+	Cwd       string
 }
 
 type FramesStore struct {
@@ -44,6 +51,8 @@ func migrateFramesDB(db *sql.DB) error {
 			started_at          INTEGER NOT NULL,
 			last_seen_at        INTEGER NOT NULL,
 			verified            INTEGER NOT NULL DEFAULT 1,
+			session_id          TEXT NOT NULL DEFAULT '',
+			cwd                 TEXT NOT NULL DEFAULT '',
 			FOREIGN KEY (parent_frame_id) REFERENCES agent_frames(frame_id) ON DELETE SET NULL
 		)
 	`)
@@ -59,7 +68,49 @@ func migrateFramesDB(db *sql.DB) error {
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_frames_agent_type ON agent_frames(agent_type)`); err != nil {
 		return err
 	}
+	if err := addFrameIdentityColumns(db); err != nil {
+		return err
+	}
 	return clearStaleSubagentsJSON(db)
+}
+
+// addFrameIdentityColumns brings a table created before the session_id / cwd
+// columns existed up to the current schema. Purely additive: existing rows get
+// the empty string, which is exactly right — that frame has not told us its
+// identity yet.
+// Guarded by a column-existence check so re-running the migration (every
+// daemon start) is a no-op rather than a duplicate-column error.
+func addFrameIdentityColumns(db *sql.DB) error {
+	existing, err := frameColumnNames(db)
+	if err != nil {
+		return err
+	}
+	for _, column := range []string{"session_id", "cwd"} {
+		if existing[column] {
+			continue
+		}
+		if _, err := db.Exec(`ALTER TABLE agent_frames ADD COLUMN ` + column + ` TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add agent_frames.%s: %w", column, err)
+		}
+	}
+	return nil
+}
+
+func frameColumnNames(db *sql.DB) (map[string]bool, error) {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info('agent_frames')`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	names := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names[name] = true
+	}
+	return names, rows.Err()
 }
 
 // clearStaleSubagentsJSON scans every `agent_frames.subagents_json` and
@@ -157,11 +208,17 @@ func (s *FramesStore) Upsert(frame Frame) (Frame, error) {
 	if err != nil {
 		return Frame{}, fmt.Errorf("marshal subagents: %w", err)
 	}
+	// session_id / cwd are in the INSERT column list but deliberately NOT in
+	// the DO UPDATE SET list: an existing row keeps the identity it already
+	// learnt, and only UpdateSessionIdentity may change it afterwards. The
+	// method re-SELECTs below, so the returned struct carries the *stored*
+	// values by construction — no zero-value merge is needed above.
 	_, err = s.db.Exec(`
 		INSERT INTO agent_frames (
 			frame_id, pane_id, agent_type, pid, ppid, process_start_time,
-			parent_frame_id, subagents_json, status, started_at, last_seen_at, verified
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			parent_frame_id, subagents_json, status, started_at, last_seen_at, verified,
+			session_id, cwd
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(pane_id, pid, process_start_time) DO UPDATE SET
 			agent_type = excluded.agent_type,
 			ppid = excluded.ppid,
@@ -172,7 +229,8 @@ func (s *FramesStore) Upsert(frame Frame) (Frame, error) {
 			last_seen_at = excluded.last_seen_at,
 			verified = excluded.verified
 	`, frame.FrameID, frame.PaneID, frame.AgentType, frame.PID, frame.PPID, frame.ProcessStartTime,
-		nullString(frame.ParentFrameID), string(subagentsJSON), string(frame.Status), frame.StartedAt, frame.LastSeenAt, boolToInt(frame.Verified))
+		nullString(frame.ParentFrameID), string(subagentsJSON), string(frame.Status), frame.StartedAt, frame.LastSeenAt, boolToInt(frame.Verified),
+		frame.SessionID, frame.Cwd)
 	if err != nil {
 		return Frame{}, err
 	}
@@ -189,7 +247,8 @@ func (s *FramesStore) Upsert(frame Frame) (Frame, error) {
 func (s *FramesStore) GetByIdentity(paneID string, pid int, startTime string) (*Frame, error) {
 	row := s.db.QueryRow(`
 		SELECT frame_id, pane_id, agent_type, pid, ppid, process_start_time,
-		       parent_frame_id, subagents_json, status, started_at, last_seen_at, verified
+		       parent_frame_id, subagents_json, status, started_at, last_seen_at, verified,
+		       session_id, cwd
 		FROM agent_frames
 		WHERE pane_id = ? AND pid = ? AND process_start_time = ?
 	`, paneID, pid, startTime)
@@ -206,7 +265,8 @@ func (s *FramesStore) GetByIdentity(paneID string, pid int, startTime string) (*
 func (s *FramesStore) FindByPanePID(paneID string, pid int) (*Frame, error) {
 	row := s.db.QueryRow(`
 		SELECT frame_id, pane_id, agent_type, pid, ppid, process_start_time,
-		       parent_frame_id, subagents_json, status, started_at, last_seen_at, verified
+		       parent_frame_id, subagents_json, status, started_at, last_seen_at, verified,
+		       session_id, cwd
 		FROM agent_frames
 		WHERE pane_id = ? AND pid = ?
 		ORDER BY started_at DESC
@@ -225,7 +285,8 @@ func (s *FramesStore) FindByPanePID(paneID string, pid int) (*Frame, error) {
 func (s *FramesStore) ListByPane(paneID string) ([]Frame, error) {
 	rows, err := s.db.Query(`
 		SELECT frame_id, pane_id, agent_type, pid, ppid, process_start_time,
-		       parent_frame_id, subagents_json, status, started_at, last_seen_at, verified
+		       parent_frame_id, subagents_json, status, started_at, last_seen_at, verified,
+		       session_id, cwd
 		FROM agent_frames
 		WHERE pane_id = ?
 		ORDER BY started_at ASC
@@ -240,7 +301,8 @@ func (s *FramesStore) ListByPane(paneID string) ([]Frame, error) {
 func (s *FramesStore) ListAll() ([]Frame, error) {
 	rows, err := s.db.Query(`
 		SELECT frame_id, pane_id, agent_type, pid, ppid, process_start_time,
-		       parent_frame_id, subagents_json, status, started_at, last_seen_at, verified
+		       parent_frame_id, subagents_json, status, started_at, last_seen_at, verified,
+		       session_id, cwd
 		FROM agent_frames
 		ORDER BY pane_id ASC, started_at ASC
 	`)
@@ -282,6 +344,46 @@ func (s *FramesStore) UpdateStatusAndLastSeen(frameID string, status agentpkg.St
 		UPDATE agent_frames SET status = ?, last_seen_at = ?
 		WHERE frame_id = ?
 	`, string(status), lastSeenAt, frameID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// UpdateSessionIdentity is the only post-insert writer of session_id / cwd.
+// A dedicated narrow UPDATE keyed by frame_id, so the identity never rides a
+// read-modify-write and no CAS retry loop has to re-apply it.
+//
+// Each column is written only when its argument is non-empty: an event that
+// carries a session_id but no cwd must not blank the cwd an earlier event
+// recorded. Two empty arguments run no SQL at all and return nil.
+//
+// Returns sql.ErrNoRows if the frame does not exist — a frame deleted between
+// the mutation and this call is normal, and callers may swallow it.
+func (s *FramesStore) UpdateSessionIdentity(frameID, sessionID, cwd string) error {
+	if sessionID == "" && cwd == "" {
+		return nil
+	}
+	setClauses := make([]string, 0, 2)
+	args := make([]any, 0, 3)
+	if sessionID != "" {
+		setClauses = append(setClauses, "session_id = ?")
+		args = append(args, sessionID)
+	}
+	if cwd != "" {
+		setClauses = append(setClauses, "cwd = ?")
+		args = append(args, cwd)
+	}
+	args = append(args, frameID)
+
+	res, err := s.db.Exec(`UPDATE agent_frames SET `+strings.Join(setClauses, ", ")+` WHERE frame_id = ?`, args...)
 	if err != nil {
 		return err
 	}
@@ -449,6 +551,8 @@ func scanFrame(scanner frameScanner) (Frame, error) {
 		&frame.StartedAt,
 		&frame.LastSeenAt,
 		&verified,
+		&frame.SessionID,
+		&frame.Cwd,
 	)
 	if err != nil {
 		return Frame{}, err

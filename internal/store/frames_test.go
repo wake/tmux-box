@@ -701,3 +701,320 @@ func TestMigrateFramesDB_PreservesNewSubagentsJSON(t *testing.T) {
 		t.Fatalf("agent_frames count = %d after migrate, want 1 (new-format row should survive)", count)
 	}
 }
+
+// --- Task 1: the frame's own session identity -----------------------------
+
+func seedIdentityFrame(t *testing.T, s *FramesStore, sessionID, cwd string) Frame {
+	t.Helper()
+	frame, err := s.Upsert(Frame{
+		PaneID:           "%9",
+		AgentType:        "cc",
+		PID:              900,
+		PPID:             800,
+		ProcessStartTime: "S",
+		SessionID:        sessionID,
+		Cwd:              cwd,
+		Status:           agentpkg.StatusIdle,
+		StartedAt:        10,
+		LastSeenAt:       10,
+		Verified:         true,
+	})
+	if err != nil {
+		t.Fatalf("seed Upsert: %v", err)
+	}
+	return frame
+}
+
+func assertStoredIdentity(t *testing.T, s *FramesStore, frameID, wantSession, wantCwd string) {
+	t.Helper()
+	var gotSession, gotCwd string
+	if err := s.db.QueryRow(`SELECT session_id, cwd FROM agent_frames WHERE frame_id = ?`, frameID).
+		Scan(&gotSession, &gotCwd); err != nil {
+		t.Fatalf("read identity columns: %v", err)
+	}
+	if gotSession != wantSession || gotCwd != wantCwd {
+		t.Fatalf("stored identity = (%q, %q), want (%q, %q)", gotSession, gotCwd, wantSession, wantCwd)
+	}
+}
+
+func TestFrames_UpsertPersistsSessionIdentity(t *testing.T) {
+	s := openTestFramesStore(t)
+
+	frame := seedIdentityFrame(t, s, "sess-1", "/tmp/work")
+	if frame.SessionID != "sess-1" || frame.Cwd != "/tmp/work" {
+		t.Fatalf("returned frame identity = (%q, %q), want (sess-1, /tmp/work)", frame.SessionID, frame.Cwd)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-1", "/tmp/work")
+
+	got, err := s.GetByIdentity("%9", 900, "S")
+	if err != nil {
+		t.Fatalf("GetByIdentity: %v", err)
+	}
+	if got == nil {
+		t.Fatal("frame not found")
+	}
+	if got.SessionID != "sess-1" || got.Cwd != "/tmp/work" {
+		t.Fatalf("read identity = (%q, %q), want (sess-1, /tmp/work)", got.SessionID, got.Cwd)
+	}
+}
+
+func TestFrames_UpsertWithEmptyIdentityKeepsStored(t *testing.T) {
+	s := openTestFramesStore(t)
+	seedIdentityFrame(t, s, "sess-1", "/tmp/work")
+
+	again, err := s.Upsert(Frame{
+		PaneID:           "%9",
+		AgentType:        "cc",
+		PID:              900,
+		PPID:             800,
+		ProcessStartTime: "S",
+		Status:           agentpkg.StatusRunning,
+		LastSeenAt:       20,
+		Verified:         true,
+	})
+	if err != nil {
+		t.Fatalf("second Upsert: %v", err)
+	}
+	if again.SessionID != "sess-1" || again.Cwd != "/tmp/work" {
+		t.Fatalf("returned frame identity = (%q, %q), want (sess-1, /tmp/work)", again.SessionID, again.Cwd)
+	}
+	assertStoredIdentity(t, s, again.FrameID, "sess-1", "/tmp/work")
+}
+
+func TestFrames_UpsertWithNonEmptyIdentityDoesNotOverwrite(t *testing.T) {
+	s := openTestFramesStore(t)
+	seedIdentityFrame(t, s, "sess-1", "/tmp/work")
+
+	again, err := s.Upsert(Frame{
+		PaneID:           "%9",
+		AgentType:        "cc",
+		PID:              900,
+		PPID:             800,
+		ProcessStartTime: "S",
+		SessionID:        "sess-STALE",
+		Cwd:              "/tmp/STALE",
+		Status:           agentpkg.StatusRunning,
+		LastSeenAt:       20,
+		Verified:         true,
+	})
+	if err != nil {
+		t.Fatalf("second Upsert: %v", err)
+	}
+	// The DO UPDATE SET list omits both columns, and the method returns the
+	// re-selected row — so the caller sees the *stored* values, not its own.
+	if again.SessionID != "sess-1" || again.Cwd != "/tmp/work" {
+		t.Fatalf("returned frame identity = (%q, %q), want stored (sess-1, /tmp/work)", again.SessionID, again.Cwd)
+	}
+	assertStoredIdentity(t, s, again.FrameID, "sess-1", "/tmp/work")
+}
+
+func TestFrames_UpdateSessionIdentity_SetsBoth(t *testing.T) {
+	s := openTestFramesStore(t)
+	frame := seedIdentityFrame(t, s, "", "")
+
+	if err := s.UpdateSessionIdentity(frame.FrameID, "sess-2", "/srv/app"); err != nil {
+		t.Fatalf("UpdateSessionIdentity: %v", err)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-2", "/srv/app")
+}
+
+func TestFrames_UpdateSessionIdentity_WritesOnlyNonEmpty(t *testing.T) {
+	s := openTestFramesStore(t)
+	frame := seedIdentityFrame(t, s, "sess-1", "/tmp/work")
+
+	if err := s.UpdateSessionIdentity(frame.FrameID, "sess-2", ""); err != nil {
+		t.Fatalf("UpdateSessionIdentity session-only: %v", err)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-2", "/tmp/work")
+
+	if err := s.UpdateSessionIdentity(frame.FrameID, "", "/srv/app"); err != nil {
+		t.Fatalf("UpdateSessionIdentity cwd-only: %v", err)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-2", "/srv/app")
+}
+
+func TestFrames_UpdateSessionIdentity_NoOpForTwoEmptyArgs(t *testing.T) {
+	s := openTestFramesStore(t)
+	frame := seedIdentityFrame(t, s, "sess-1", "/tmp/work")
+
+	if err := s.UpdateSessionIdentity(frame.FrameID, "", ""); err != nil {
+		t.Fatalf("UpdateSessionIdentity empty: %v", err)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-1", "/tmp/work")
+
+	// No SQL runs at all, so even an unknown frame id is not an error here —
+	// the call is a pure no-op.
+	if err := s.UpdateSessionIdentity("no-such-frame", "", ""); err != nil {
+		t.Fatalf("UpdateSessionIdentity empty on unknown frame = %v, want nil (no SQL runs)", err)
+	}
+}
+
+func TestFrames_UpdateSessionIdentity_UnknownFrame(t *testing.T) {
+	s := openTestFramesStore(t)
+	seedIdentityFrame(t, s, "sess-1", "/tmp/work")
+
+	err := s.UpdateSessionIdentity("no-such-frame", "sess-2", "/srv/app")
+	if err != sql.ErrNoRows {
+		t.Fatalf("UpdateSessionIdentity unknown frame = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestFrames_UpsertIfUnchanged_LeavesSessionIdentity(t *testing.T) {
+	s := openTestFramesStore(t)
+	frame := seedIdentityFrame(t, s, "sess-1", "/tmp/work")
+
+	frame.SessionID = "sess-STALE"
+	frame.Cwd = "/tmp/STALE"
+	frame.Status = agentpkg.StatusRunning
+	frame.LastSeenAt = 20
+	ok, stored, err := s.UpsertIfUnchanged(frame, 10)
+	if err != nil {
+		t.Fatalf("UpsertIfUnchanged: %v", err)
+	}
+	if !ok {
+		t.Fatal("UpsertIfUnchanged reported a stale baseline, want applied")
+	}
+	if stored.SessionID != "sess-1" || stored.Cwd != "/tmp/work" {
+		t.Fatalf("returned identity = (%q, %q), want stored (sess-1, /tmp/work)", stored.SessionID, stored.Cwd)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-1", "/tmp/work")
+}
+
+func TestFrames_UpdateHookPath_LeavesSessionIdentity(t *testing.T) {
+	s := openTestFramesStore(t)
+	frame := seedIdentityFrame(t, s, "sess-1", "/tmp/work")
+
+	frame.SessionID = "sess-STALE"
+	frame.Cwd = "/tmp/STALE"
+	frame.Status = agentpkg.StatusRunning
+	frame.LastSeenAt = 20
+	if err := s.UpdateHookPath(frame); err != nil {
+		t.Fatalf("UpdateHookPath: %v", err)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-1", "/tmp/work")
+}
+
+func TestFrames_UpdateHookPathAndResetSubagents_LeavesSessionIdentity(t *testing.T) {
+	s := openTestFramesStore(t)
+	frame := seedIdentityFrame(t, s, "sess-1", "/tmp/work")
+
+	frame.SessionID = "sess-STALE"
+	frame.Cwd = "/tmp/STALE"
+	frame.Status = agentpkg.StatusRunning
+	frame.LastSeenAt = 20
+	if err := s.UpdateHookPathAndResetSubagents(frame); err != nil {
+		t.Fatalf("UpdateHookPathAndResetSubagents: %v", err)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-1", "/tmp/work")
+}
+
+func TestFrames_UpdateStatusAndLastSeen_LeavesSessionIdentity(t *testing.T) {
+	s := openTestFramesStore(t)
+	frame := seedIdentityFrame(t, s, "sess-1", "/tmp/work")
+
+	if err := s.UpdateStatusAndLastSeen(frame.FrameID, agentpkg.StatusRunning, 20); err != nil {
+		t.Fatalf("UpdateStatusAndLastSeen: %v", err)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-1", "/tmp/work")
+}
+
+func TestFrames_AllReadersReturnSessionIdentity(t *testing.T) {
+	s := openTestFramesStore(t)
+	frame := seedIdentityFrame(t, s, "sess-1", "/tmp/work")
+
+	byIdentity, err := s.GetByIdentity("%9", 900, "S")
+	if err != nil || byIdentity == nil {
+		t.Fatalf("GetByIdentity: %v (frame=%v)", err, byIdentity)
+	}
+	if byIdentity.SessionID != "sess-1" || byIdentity.Cwd != "/tmp/work" {
+		t.Fatalf("GetByIdentity identity = (%q, %q), want (sess-1, /tmp/work)", byIdentity.SessionID, byIdentity.Cwd)
+	}
+
+	byPanePID, err := s.FindByPanePID("%9", 900)
+	if err != nil || byPanePID == nil {
+		t.Fatalf("FindByPanePID: %v (frame=%v)", err, byPanePID)
+	}
+	if byPanePID.SessionID != "sess-1" || byPanePID.Cwd != "/tmp/work" {
+		t.Fatalf("FindByPanePID identity = (%q, %q), want (sess-1, /tmp/work)", byPanePID.SessionID, byPanePID.Cwd)
+	}
+
+	byPane, err := s.ListByPane("%9")
+	if err != nil {
+		t.Fatalf("ListByPane: %v", err)
+	}
+	if len(byPane) != 1 || byPane[0].SessionID != "sess-1" || byPane[0].Cwd != "/tmp/work" {
+		t.Fatalf("ListByPane = %+v, want one frame with (sess-1, /tmp/work)", byPane)
+	}
+
+	all, err := s.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	if len(all) != 1 || all[0].SessionID != "sess-1" || all[0].Cwd != "/tmp/work" {
+		t.Fatalf("ListAll = %+v, want one frame with (sess-1, /tmp/work)", all)
+	}
+	if all[0].FrameID != frame.FrameID {
+		t.Fatalf("ListAll frame_id = %q, want %q", all[0].FrameID, frame.FrameID)
+	}
+}
+
+// seedPreIdentitySchema creates agent_frames exactly as it looked before the
+// session_id / cwd columns existed, plus one row, so migrateFramesDB has to
+// take the additive ALTER path.
+func seedPreIdentitySchema(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.Exec(`
+		CREATE TABLE agent_frames (
+			frame_id            TEXT PRIMARY KEY,
+			pane_id             TEXT NOT NULL,
+			agent_type          TEXT NOT NULL,
+			pid                 INTEGER NOT NULL,
+			ppid                INTEGER NOT NULL,
+			process_start_time  TEXT NOT NULL,
+			parent_frame_id     TEXT,
+			subagents_json      TEXT NOT NULL DEFAULT '[]',
+			status              TEXT NOT NULL,
+			started_at          INTEGER NOT NULL,
+			last_seen_at        INTEGER NOT NULL,
+			verified            INTEGER NOT NULL DEFAULT 1,
+			FOREIGN KEY (parent_frame_id) REFERENCES agent_frames(frame_id) ON DELETE SET NULL
+		)
+	`); err != nil {
+		t.Fatalf("create pre-identity schema: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO agent_frames (
+		frame_id, pane_id, agent_type, pid, ppid, process_start_time,
+		parent_frame_id, subagents_json, status, started_at, last_seen_at, verified
+	) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
+		"old-frame", "%9", "cc", 900, 800, "S", `[]`, "idle", 10, 10, 1); err != nil {
+		t.Fatalf("seed pre-identity row: %v", err)
+	}
+}
+
+func TestMigrateFramesDB_AddsIdentityColumnsToOldSchema(t *testing.T) {
+	events := openTestAgentEventStore(t)
+	seedPreIdentitySchema(t, events.db)
+
+	frames, err := events.Frames()
+	if err != nil {
+		t.Fatalf("Frames (migrate): %v", err)
+	}
+	// Idempotent: a second migration must not fail on already-added columns.
+	if err := migrateFramesDB(events.db); err != nil {
+		t.Fatalf("migrateFramesDB second run: %v", err)
+	}
+
+	all, err := frames.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("ListAll returned %d frames, want the pre-existing row preserved", len(all))
+	}
+	if all[0].FrameID != "old-frame" {
+		t.Fatalf("frame_id = %q, want old-frame", all[0].FrameID)
+	}
+	if all[0].SessionID != "" || all[0].Cwd != "" {
+		t.Fatalf("migrated identity = (%q, %q), want two empty strings", all[0].SessionID, all[0].Cwd)
+	}
+}
