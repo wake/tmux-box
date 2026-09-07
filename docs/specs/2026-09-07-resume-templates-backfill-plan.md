@@ -940,8 +940,10 @@ A pane wants a probe when it is live, terminal-mode, generation-eligible, and
 either `rebuild.agent` is absent or `rebuild.unverified` is true.
 
 This task ships the request path with a plain `inFlight` guard only. The
-scheduler is Task 11, so keep the trigger surface to a single exported
-`probeSessionProvenance(hostId, sessionCode, tmuxInstance)` that Task 11 wraps.
+scheduler is Task 11a, and it turns **this same exported function** into the
+scheduling entry point rather than wrapping it — `probeSessionProvenance(hostId,
+sessionCode, tmuxInstance)` is what every trigger calls, before and after. There
+is no second exported name to look for.
 
 Export a `resetProvenanceProbes()` test seam like `resetCwdProbes`.
 
@@ -954,8 +956,14 @@ Export a `resetProvenanceProbes()` test seam like `resetCwdProbes`.
   `found: true` answer with a matching generation maps every field onto the
   `agent-backfill` patch and the record actually changes.
 - [ ] **Step 2: Run — fail** · [ ] **Step 3: Implement** · [ ] **Step 4: Run — pass**
-- [ ] **Step 5:** vitest + lint
+- [ ] **Step 5:** vitest + lint + build
 - [ ] **Step 6: Commit** — `feat(rebuild): ask the daemon which agent owns a pane`
+
+**Note for Task 11a:** three of these tests prove retryability by asking again
+immediately. Task 11a's 30 s cooldown makes that impossible, so it will have to
+advance the clock in them. That is the same "a later task of this plan replaces
+an earlier one's invariant" case as Task 4 → 4b: adjust them and say so in the
+commit message.
 
 ---
 
