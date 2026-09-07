@@ -43,15 +43,51 @@ export function migrateTabStore(state: any, version: number): any {
 
 // --- Terminated marking helpers ---
 
-function markPanesInLayout(layout: PaneLayout, hostId: string, sessionCode: string, reason: TerminatedReason): PaneLayout {
+/**
+ * Mark panes bound to (hostId, sessionCode) as terminated.
+ *
+ * `expectedTmuxInstance` narrows the match to one tmux generation (spec §4.5):
+ * a pane that has already re-bound to a newer generation of the same reused
+ * session code is left alone. A pane whose recorded instance is `''` (legacy
+ * pane, or a host whose generation is unknown) is matched by the old
+ * host+code rule so nothing regresses. `undefined` = no generation predicate.
+ */
+function markPanesInLayout(
+  layout: PaneLayout,
+  hostId: string,
+  sessionCode: string,
+  reason: TerminatedReason,
+  expectedTmuxInstance?: string,
+): PaneLayout {
   if (layout.type === 'leaf') {
     const c = layout.pane.content
-    if (c.kind === 'tmux-session' && c.hostId === hostId && c.sessionCode === sessionCode && !c.terminated) {
+    const generationMatches = expectedTmuxInstance === undefined
+      || c.kind !== 'tmux-session'
+      || c.tmuxInstance === ''
+      || c.tmuxInstance === expectedTmuxInstance
+    if (c.kind === 'tmux-session' && c.hostId === hostId && c.sessionCode === sessionCode && generationMatches && !c.terminated) {
       return { ...layout, pane: { ...layout.pane, content: { ...c, terminated: reason } } }
     }
     return layout
   }
-  const children = layout.children.map((child) => markPanesInLayout(child, hostId, sessionCode, reason))
+  const children = layout.children.map((child) => markPanesInLayout(child, hostId, sessionCode, reason, expectedTmuxInstance))
+  return children.some((c, i) => c !== layout.children[i]) ? { ...layout, children } : layout
+}
+
+/**
+ * Stamp the tmux generation onto panes bound to (hostId, sessionCode) that
+ * carry none. Never overwrites a generation a pane already has — that would be
+ * assuming a binding rather than observing it.
+ */
+function adoptInstanceInLayout(layout: PaneLayout, hostId: string, sessionCode: string, tmuxInstance: string): PaneLayout {
+  if (layout.type === 'leaf') {
+    const c = layout.pane.content
+    if (c.kind === 'tmux-session' && c.hostId === hostId && c.sessionCode === sessionCode && c.tmuxInstance === '') {
+      return { ...layout, pane: { ...layout.pane, content: { ...c, tmuxInstance } } }
+    }
+    return layout
+  }
+  const children = layout.children.map((child) => adoptInstanceInLayout(child, hostId, sessionCode, tmuxInstance))
   return children.some((c, i) => c !== layout.children[i]) ? { ...layout, children } : layout
 }
 
@@ -150,6 +186,8 @@ interface TabState {
   toggleLock: (id: string) => void
   updateSessionCache: (hostId: string, sessionCode: string, cachedName: string) => void
   markTerminated: (hostId: string, sessionCode: string, reason: TerminatedReason) => void
+  markTerminatedForGeneration: (hostId: string, sessionCode: string, expectedTmuxInstance: string, reason: TerminatedReason) => void
+  adoptTmuxInstance: (hostId: string, sessionCode: string, tmuxInstance: string) => void
   markHostTerminated: (hostId: string, reason: TerminatedReason) => void
 }
 
@@ -429,6 +467,37 @@ export const useTabStore = create<TabState>()(
           const tabs = { ...state.tabs }
           for (const [id, tab] of Object.entries(tabs)) {
             const newLayout = markPanesInLayout(tab.layout, hostId, sessionCode, reason)
+            if (newLayout !== tab.layout) {
+              tabs[id] = { ...tab, layout: newLayout }
+              changed = true
+            }
+          }
+          return changed ? { tabs } : state
+        }),
+
+      // Generation-scoped sibling of markTerminated (spec §4.5). markTerminated
+      // stays for its existing session-closed / host-removed callers.
+      markTerminatedForGeneration: (hostId, sessionCode, expectedTmuxInstance, reason) =>
+        set((state) => {
+          let changed = false
+          const tabs = { ...state.tabs }
+          for (const [id, tab] of Object.entries(tabs)) {
+            const newLayout = markPanesInLayout(tab.layout, hostId, sessionCode, reason, expectedTmuxInstance)
+            if (newLayout !== tab.layout) {
+              tabs[id] = { ...tab, layout: newLayout }
+              changed = true
+            }
+          }
+          return changed ? { tabs } : state
+        }),
+
+      adoptTmuxInstance: (hostId, sessionCode, tmuxInstance) =>
+        set((state) => {
+          if (!tmuxInstance) return state // "" means unknown — never stamp it
+          let changed = false
+          const tabs = { ...state.tabs }
+          for (const [id, tab] of Object.entries(tabs)) {
+            const newLayout = adoptInstanceInLayout(tab.layout, hostId, sessionCode, tmuxInstance)
             if (newLayout !== tab.layout) {
               tabs[id] = { ...tab, layout: newLayout }
               changed = true

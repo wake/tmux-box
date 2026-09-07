@@ -15,6 +15,11 @@ export interface Session {
   current_command?: string
   pane_title?: string
   window_name?: string
+  // tmux server generation ("<server pid>:<start_time>") the daemon stamped on
+  // the payload that carried this session. Changes on every tmux server
+  // restart; "" means unknown (probe failure/timeout, or an older daemon) and
+  // never counts as a match. Optional so older daemons stay consumable.
+  tmux_instance?: string
 }
 
 export interface ConfigData {

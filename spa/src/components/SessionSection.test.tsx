@@ -184,6 +184,19 @@ describe('SessionSection', () => {
     })
   })
 
+  it('opens a pane carrying the selected session\'s generation', () => {
+    useSessionStore.setState({
+      sessions: {
+        [HOST_ID]: [
+          { code: 'abc001', name: 'dev', cwd: '/tmp', mode: 'terminal', cc_session_id: '', cc_model: '', has_relay: false, tmux_instance: '222:2000' },
+        ],
+      },
+    })
+    render(<SessionSection onSelect={mockOnSelect} />)
+    fireEvent.click(screen.getByText('dev'))
+    expect(mockOnSelect).toHaveBeenCalledWith(expect.objectContaining({ tmuxInstance: '222:2000' }))
+  })
+
   it('does not show host header for single host', () => {
     useSessionStore.setState({
       sessions: {
@@ -360,6 +373,17 @@ describe('SessionSection', () => {
     fireEvent.click(screen.getByText('Create'))
     await waitFor(() => expect(hostApi.createSession).toHaveBeenCalledWith(HOST_ID, 'built', '~', 'terminal'))
     await waitFor(() => expect(mockOnSelect).toHaveBeenCalledWith({ kind: 'tmux-session', hostId: HOST_ID, sessionCode: 'new001', mode: 'terminal', cachedName: 'built', tmuxInstance: '' }))
+  })
+
+  it('attaches a created session with the generation the daemon reported', async () => {
+    useSessionStore.setState({ sessions: { [HOST_ID]: [] } })
+    useHostStore.setState({ runtime: { [HOST_ID]: LIVE } })
+    vi.mocked(hostApi.createSession).mockResolvedValue({ ...made(), tmux_instance: '222:2000' })
+    render(<SessionSection onSelect={mockOnSelect} />)
+    fireEvent.click(screen.getByTestId(`new-session-${HOST_ID}`))
+    fireEvent.change(screen.getByPlaceholderText('Session Name'), { target: { value: 'built' } })
+    fireEvent.click(screen.getByText('Create'))
+    await waitFor(() => expect(mockOnSelect).toHaveBeenCalledWith(expect.objectContaining({ tmuxInstance: '222:2000' })))
   })
 
   it('does not attach when the created session has a blank code', async () => {

@@ -149,7 +149,9 @@ export function SessionsSection({ hostId }: Props) {
       sessionCode: session.code,
       mode: mode as 'terminal' | 'stream',
       cachedName: session.name,
-      tmuxInstance: '',
+      // Generation from the session payload we are opening, never from
+      // ambient host state (spec §4.5).
+      tmuxInstance: session.tmux_instance ?? '',
     })
     useWorkspaceStore.getState().insertTab(tabId)
     useTabStore.getState().setActiveTab(tabId)
@@ -193,6 +195,9 @@ export function SessionsSection({ hostId }: Props) {
             sessionCode,
             mode: 'terminal',
             cachedName: sessionCode,
+            // No Session payload in hand here (the slot executor hands back a
+            // bare code), so the generation stays unknown; the next sessions
+            // payload adopts it.
             tmuxInstance: '',
           })
           // Explicit null when host page was standalone at click time —

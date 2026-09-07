@@ -11,6 +11,7 @@ import { dispatchBackupWsEvent } from '../lib/storage-backup/backup-ws-dispatch'
 import { usePathCacheStore } from '../stores/path-cache/usePathCacheStore'
 import { debugStatuslineTest } from '../lib/statusline-test-debug'
 import { scanPaneTree } from '../lib/pane-tree'
+import { reconcileSessionsPayload, type ReconcilePane } from '../lib/rebuild/reconcile'
 import { hostWsUrl, fetchWsTicket, fetchHistory, type Session } from '../lib/host-api'
 import { checkHealth, type HealthResult } from '../lib/host-connection'
 import { ConnectionStateMachine } from '../lib/connection-state-machine'
@@ -103,34 +104,46 @@ export function useMultiHostEventWs() {
           if (event.type === 'sessions') {
             try {
               const data: Session[] = JSON.parse(event.value)
+
+              // Decide BEFORE mutating anything (spec §4.5): the verdict must
+              // read the panes as they were when the payload arrived, not
+              // after a name refresh has already touched them.
+              const panes: ReconcilePane[] = []
+              for (const tab of Object.values(useTabStore.getState().tabs)) {
+                scanPaneTree(tab.layout, (pane) => {
+                  const c = pane.content
+                  if (c.kind === 'tmux-session' && c.hostId === hostId && !c.terminated) {
+                    panes.push({ hostId: c.hostId, sessionCode: c.sessionCode, tmuxInstance: c.tmuxInstance })
+                  }
+                })
+              }
+              const outcome = reconcileSessionsPayload({ hostId, sessions: data, panes })
+
               useSessionStore.getState().replaceHost(hostId, data)
+
+              // Adoption first — a pane that takes the live generation here is
+              // no longer matched by a sibling's tmux-restarted decision.
+              for (const { sessionCode, tmuxInstance } of outcome.adoptInstance) {
+                useTabStore.getState().adoptTmuxInstance(hostId, sessionCode, tmuxInstance)
+              }
               for (const s of data) {
                 useTabStore.getState().updateSessionCache(hostId, s.code, s.name)
               }
 
-              // session-closed detection: collect unique closed codes, then mark once each
-              const newCodes = new Set(data.map((s: Session) => s.code))
-              const closedCodes = new Set<string>()
-              const { tabs } = useTabStore.getState()
-              for (const tab of Object.values(tabs)) {
-                scanPaneTree(tab.layout, (pane) => {
-                  const c = pane.content
-                  if (c.kind === 'tmux-session' && c.hostId === hostId && !c.terminated && !newCodes.has(c.sessionCode)) {
-                    closedCodes.add(c.sessionCode)
-                  }
-                })
-              }
-              for (const code of closedCodes) {
-                useTabStore.getState().markTerminated(hostId, code, 'session-closed')
+              const clearedCodes = new Set<string>()
+              for (const { sessionCode, expectedTmuxInstance, reason } of outcome.terminate) {
+                useTabStore.getState().markTerminatedForGeneration(hostId, sessionCode, expectedTmuxInstance, reason)
+                if (reason !== 'session-closed' || clearedCodes.has(sessionCode)) continue
+                clearedCodes.add(sessionCode)
                 // Clear agent state (subagents, status, etc.) so indicators
                 // don't linger after the tmux session disappears.
-                useAgentStore.getState().clearSession(hostId, code)
+                useAgentStore.getState().clearSession(hostId, sessionCode)
                 // Path-cache entries tagged with this sessionCode are now
                 // dead (their owning agent session is gone); other sessions
                 // sharing the same cwd keep their entries. SessionCode is
                 // host-local so we must scope the clear by hostId — sibling
                 // hosts can mint identical codes (R3 P2).
-                usePathCacheStore.getState().clearBySession(hostId, code)
+                usePathCacheStore.getState().clearBySession(hostId, sessionCode)
               }
             } catch { /* ignore */ }
             return

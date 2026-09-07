@@ -361,8 +361,11 @@ export function handleNotificationClick(action: NotificationAction): void {
         }
         handled = true
       } else if (agentSettings.reopenTabOnClick) {
-        const sessionName = useSessionStore.getState().sessions[hostId]?.find(s => s.code === sessionCode)?.name ?? ''
-        const newTab = createTab({ kind: 'tmux-session', hostId, sessionCode, mode: 'stream', cachedName: sessionName, tmuxInstance: '' })
+        const session = useSessionStore.getState().sessions[hostId]?.find(s => s.code === sessionCode)
+        const sessionName = session?.name ?? ''
+        // Generation from the session payload we are reopening (spec §4.5);
+        // '' when the session is not in the cache = unknown, never a match.
+        const newTab = createTab({ kind: 'tmux-session', hostId, sessionCode, mode: 'stream', cachedName: sessionName, tmuxInstance: session?.tmux_instance ?? '' })
         useTabStore.getState().addTab(newTab)
         useTabStore.getState().setActiveTab(newTab.id)
         useWorkspaceStore.getState().insertTab(newTab.id)

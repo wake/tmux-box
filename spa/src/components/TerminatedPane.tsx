@@ -2,7 +2,7 @@ import { SmileySad } from '@phosphor-icons/react'
 import { useTabStore } from '../stores/useTabStore'
 import { useI18nStore } from '../stores/useI18nStore'
 import { closeTab } from '../lib/tab-lifecycle'
-import { SessionPickerList } from './SessionPickerList'
+import { SessionPickerList, type SessionSelection } from './SessionPickerList'
 import type { PaneContent, TerminatedReason } from '../types/tab'
 
 interface Props {
@@ -23,7 +23,10 @@ export function TerminatedPane({ content, tabId, paneId }: Props) {
   const reason = content.terminated!
   const keys = REASON_KEYS[reason]
 
-  const handleSelect = (sel: { hostId: string; sessionCode: string; cachedName: string; tmuxInstance: string }) => {
+  // Re-pointing drops `terminated` and takes the generation the picker read off
+  // the selected session's own payload (spec §4.5) — so the freshly attached
+  // pane is not immediately marked dead by the next reconciliation.
+  const handleSelect = (sel: SessionSelection) => {
     setPaneContent(tabId, paneId, {
       kind: 'tmux-session',
       hostId: sel.hostId,

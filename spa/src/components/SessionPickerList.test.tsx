@@ -101,16 +101,13 @@ describe('SessionPickerList', () => {
       },
       hostOrder: [HOST_A],
       runtime: {
-        [HOST_A]: {
-          status: 'connected',
-          info: { host_id: HOST_A, tmux_instance: '12345:67890', purdex_version: '1.0', tmux_version: '3.6', os: 'darwin', arch: 'arm64' },
-        },
+        [HOST_A]: { status: 'connected' },
       },
     })
     useSessionStore.setState({
       sessions: {
         [HOST_A]: [
-          { code: 'dev001', name: 'dev-session', cwd: '/tmp', mode: 'terminal', cc_session_id: '', cc_model: '', has_relay: false },
+          { code: 'dev001', name: 'dev-session', cwd: '/tmp', mode: 'terminal', cc_session_id: '', cc_model: '', has_relay: false, tmux_instance: '12345:67890' },
         ],
       },
     })
@@ -129,14 +126,19 @@ describe('SessionPickerList', () => {
     })
   })
 
-  it('uses empty string for tmuxInstance when info is missing', () => {
+  it('uses empty string for tmuxInstance when the session carries none', () => {
     useHostStore.setState({
       hosts: {
         [HOST_A]: { id: HOST_A, name: 'Host A', ip: '1.2.3.4', port: 7860, order: 0 },
       },
       hostOrder: [HOST_A],
       runtime: {
-        [HOST_A]: { status: 'connected' },
+        // A populated runtime.info must NOT be used as the pane's generation:
+        // it is ambient state, not the payload that carried the session.
+        [HOST_A]: {
+          status: 'connected',
+          info: { host_id: HOST_A, tmux_instance: '99999:99999', purdex_version: '1.0', tmux_version: '3.6', os: 'darwin', arch: 'arm64' },
+        },
       },
     })
     useSessionStore.setState({
