@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.0.0-alpha.331] - 2026-09-07
+
+### Refactor(store): trace store 依職責拆分（#968）
+
+純重構、無行為變更。清掉 #962 的 file-health review 留下的三項體質債（#963 / #964 / #965）。
+
+**原始碼**：`internal/store/trace.go` 1,195 行同時承載型別、schema DDL、migration、legacy rebuild、CRUD、保留期清理、去重規劃、cursor 編解碼與 JSON helper，拆成四檔——`trace.go`（89，型別與介面）、`trace_migration.go`（550）、`trace_write.go`（358）、`trace_read.go`（247）。pruning 放 write 而非 migration，因為它在 `SaveChain` 的同一交易內；`rawJSONText` 放 write，因為只有寫入路徑用它。同 package，不新增 service 層或 interface。順帶刪除 `firstNonEmpty`——整個 repo 沒有任何呼叫者。
+
+**測試**：兩檔重整成五檔，**fixture 依實際呼叫者分配而非名稱前綴**。單一主題專用的跟著主題走（`seedLegacy*` / `seedIntermediate*` 全部只服務 migration），只有真正跨檔共用的才進 helpers，因此 helpers 收斂到 144 行。restart 測試歸 migration，理由是它釘的正是「重跑 migration 不得破壞已去重資料」。
+
+**`planTraceRootDedup`**：回傳型別從 `(string, []bool)` 改為 `tracePayloadPlan{RootPayload, Steps []storedTracePayload}`。這消除重複的 `rawJSONText` 轉換並把 payload 與旗標綁在一起，但**沒有消除位置耦合**（codex 指正我原本的宣稱）——`SaveChain` 仍以 `steps[i]` 配 `plan.Steps[i]`，該契約改為明訂：等長同順序、不得單獨重排、`RootPayload` 不可留 struct 零值、candidate 需在清空任何項目前捕獲。
+
+**怎麼證明是純搬移**：行數持平證明不了什麼——SQL、斷言或條件都可能在總行數不變下被改掉。改用逐宣告內容比對：從 `origin/main` 與工作樹各自抽出所有頂層宣告依名稱配對，**101 個宣告位元組完全相同**，差異只有五項預期變更。測試名稱清單前後一致，75 個無遺失。
+
+Codex 兩輪 review 皆無阻擋性發現。對抗性額外抓到一個歸屬瑕疵並已修：`assertRawShape` 在共用 helpers 卻依賴被我放進 dedup 檔的 `readRawTraceRoot`（成因是我 grep 時排除了 helpers 檔本身，漏看這個呼叫者）。
+
 ## [1.0.0-alpha.330] - 2026-09-07
 
 ### Perf(store): agent trace 的 root payload 每條 chain 只存一次（#962）
