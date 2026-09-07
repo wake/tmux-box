@@ -679,16 +679,6 @@ type Provenance struct {
 	TmuxInstance      string `json:"tmux_instance"`
 }
 
-// ownedBySender reports whether the frame mutation left the sender owning its
-// own top-level frame — the only case that may carry provenance.
-func ownedBySender(verdict AncestorVerdict, meta FrameTraceMeta, canonicalized bool) bool {
-	return verdict == VerdictRoot &&
-		!canonicalized &&
-		meta.Decision != "skipped" &&
-		meta.Reason != "proxy_subagent_attached" &&
-		meta.ParentFrameID == ""
-}
-
 func buildProvenance(req EventRequest, result agentpkg.DeriveResult, tmuxInstance string) Provenance {
 	return Provenance{
 		OwnerSessionStart: true,
@@ -701,27 +691,65 @@ func buildProvenance(req EventRequest, result agentpkg.DeriveResult, tmuxInstanc
 }
 ```
 
-In `applyFrameEvent`, compute the verdict **once** at the top of the
-`LifecycleSessionStart` handling and thread it plus `canonicalized` into the
-`FrameTraceMeta` the function already returns (add two unexported fields —
-`ownerVerdict AncestorVerdict` and `canonicalized bool` — to `FrameTraceMeta`;
-they are internal and never serialized). Replace the existing
-`findProxyParent` call on that path with the `classifyAncestor` result so the
-walk still runs exactly once.
-
-In the handler, after `buildProjectionNormalized`, attach the envelope:
+**Do not thread two booleans through `applyFrameEvent`.** That function has
+20+ `return nil, FrameTraceMeta{}, err` sites and 10+ populated
+`return projection, FrameTraceMeta{...}` sites; touching every literal is both
+a large diff and easy to get wrong. Instead add **one nullable field**:
 
 ```go
-if lifecycle == agentpkg.LifecycleSessionStart && !req.SenderUncertain &&
-	ownedBySender(frameMeta.ownerVerdict, frameMeta, frameMeta.canonicalized) {
-	if normalized.Detail == nil {
-		normalized.Detail = map[string]any{}
-	}
-	normalized.Detail["pdx_provenance"] = buildProvenance(req, result, m.currentTmuxInstance())
-}
+// FrameTraceMeta (frame_ops.go:54-73) gains:
+
+	// Provenance is non-nil only when this event was a SessionStart that
+	// ended up owning its own top-level frame — i.e. it survived both the
+	// pre-Upsert proxy fast-path and the post-Upsert reconcile. Every other
+	// return path leaves it nil by zero value, which is the fail-safe: no
+	// field set, no envelope emitted.
+	Provenance *agentpkg.Provenance
 ```
 
-`m.currentTmuxInstance()` reads the value Task 5 caches.
+Every existing construction site keeps compiling untouched and yields `nil`.
+Set it in exactly one place — the `created_frame` / `updated_frame` return at
+`frame_ops.go:860-880`, after `reason` and `decision` are computed:
+
+```go
+	var prov *agentpkg.Provenance
+	if lifecycle == agentpkg.LifecycleSessionStart && !req.SenderUncertain &&
+		verdict == VerdictRoot && stored.ParentFrameID == "" {
+		p := buildProvenance(req, result, m.currentTmuxInstance())
+		prov = &p
+	}
+```
+
+where `verdict` is the `classifyAncestor` result computed once at the top of
+the `LifecycleSessionStart` handling — replace the existing `findProxyParent`
+call on that path with it so the walk still runs exactly once.
+
+The two proxy paths return **before** reaching this site: the pre-Upsert
+fast-path returns at `frame_ops.go:572-600` and the post-Upsert reconcile
+returns at `:838-850`. Neither sets `Provenance`, which is precisely how a
+post-Upsert canonicalization revokes the envelope — no explicit `canonicalized`
+flag is needed.
+
+In the handler (`handler.go:415-460`), after `buildProjectionNormalized`:
+
+```go
+	if frameMeta.Provenance != nil {
+		if normalized.Detail == nil {
+			normalized.Detail = map[string]any{}
+		}
+		normalized.Detail["pdx_provenance"] = *frameMeta.Provenance
+	}
+```
+
+`m.currentTmuxInstance()` reads the value Task 5 caches. Because Task 5 lands
+*after* this task, stub it in this commit as a method returning `""` on the
+agent module and wire it to the session provider in Task 5 — the envelope's
+`tmux_instance` is then empty until Task 5, and `parseProvenance` (Task 11)
+rejects an empty instance, so no half-wired record can be written in between.
+
+`ownedBySender` from the snippet above is therefore not needed as a separate
+function; delete it from `provenance.go` and keep only `Provenance` and
+`buildProvenance`.
 
 - [ ] **Step 4: Run tests**
 
@@ -877,6 +905,14 @@ func hashSessions(tmuxInstance string, sessions []SessionInfo) string {
 ```
 
 updating the caller at `watcher.go:78`.
+
+⚠️ `hashSessions` has a second caller in the tests:
+`TestHashSessionsChangesWhenPaneTitleChanges` (`watcher_test.go:300`) calls it
+with one argument. **Update that call to pass an instance** (any constant, e.g.
+`"i"`, for both sides — the test is about pane titles). This is the one place
+in the plan where editing an existing test is correct and expected; the
+"never edit an existing test" rule in Global Constraints is scoped to Phase 1's
+pure refactor.
 
 - [ ] **Step 4: Run tests**
 
