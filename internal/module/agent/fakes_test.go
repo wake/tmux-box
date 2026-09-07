@@ -17,6 +17,9 @@ import (
 // `sessions: []session.SessionInfo{}` explicitly.
 type fakeSessionProvider struct {
 	sessions []session.SessionInfo
+	// tmuxInstance is what TmuxInstance() reports; settable so tests can
+	// assert the generation stamped onto outgoing payloads.
+	tmuxInstance string
 }
 
 func (f *fakeSessionProvider) ListSessions() ([]session.SessionInfo, error) {
@@ -41,6 +44,8 @@ func (f *fakeSessionProvider) GetSession(code string) (*session.SessionInfo, err
 func (f *fakeSessionProvider) UpdateMeta(string, session.MetaUpdate) error { return nil }
 func (f *fakeSessionProvider) HandleTerminalWS(http.ResponseWriter, *http.Request, string) {
 }
+
+func (f *fakeSessionProvider) TmuxInstance() string { return f.tmuxInstance }
 
 // fakeAgentProvider is a configurable AgentProvider for tests. The events
 // slice is optional: tests exercising the metadata-driven lifecycle dispatch

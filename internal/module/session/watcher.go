@@ -75,7 +75,7 @@ func (m *SessionModule) tickNormal() {
 		}
 	}
 
-	hash := hashSessions(sessions)
+	hash := hashSessions(payloadInstance(sessions), sessions)
 	if m.wstate.updateHash(hash) {
 		// Hash changed = session list mutated (possibly by external tmux
 		// commands that bypass the HTTP handlers' invalidation). Bust the
@@ -211,8 +211,29 @@ func (m *SessionModule) notifyWaitFor(active bool) {
 	}
 }
 
-func hashSessions(sessions []SessionInfo) string {
-	data, _ := json.Marshal(sessions)
+// payloadInstance returns the generation already stamped on the payload that is
+// about to be hashed and broadcast. Taking it from the payload rather than
+// re-probing keeps hash and broadcast in lockstep (a fresh probe could return a
+// third value that matches neither) and costs no extra tmux subprocess. With
+// zero sessions there is no generation to report and nothing to protect — every
+// pane is already marked dead by the code-absence rule (spec §4.6).
+func payloadInstance(sessions []SessionInfo) string {
+	if len(sessions) == 0 {
+		return ""
+	}
+	return sessions[0].TmuxInstance
+}
+
+// hashSessions folds the tmux server identity into the change signal. Hashing
+// the list alone would miss a tmux restart that recreates a byte-identical
+// session list between two ticks, and no broadcast would ever tell the SPA the
+// generation moved (spec §4.6). "" (probe failure) is hashed like any other
+// value: the next successful tick changes the hash again, so it self-heals.
+func hashSessions(tmuxInstance string, sessions []SessionInfo) string {
+	data, _ := json.Marshal(struct {
+		Instance string        `json:"i"`
+		Sessions []SessionInfo `json:"s"`
+	}{tmuxInstance, sessions})
 	h := sha256.Sum256(data)
 	return fmt.Sprintf("%x", h[:8])
 }

@@ -41,6 +41,8 @@ func (f *fakeSessionProvider) UpdateMeta(_ string, _ session.MetaUpdate) error {
 func (f *fakeSessionProvider) HandleTerminalWS(_ http.ResponseWriter, _ *http.Request, _ string) {
 }
 
+func (f *fakeSessionProvider) TmuxInstance() string { return "" }
+
 func (f *fakeSessionProvider) setCwd(code, cwd string) {
 	f.sessions[code] = &session.SessionInfo{Code: code, Cwd: cwd, Exists: true}
 }

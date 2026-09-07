@@ -19,11 +19,12 @@ var _ sessionCodeLookuper = (*session.SessionModule)(nil)
 // branch must call LookupCodeByName and skip ListSessions; only a fast-path
 // miss is allowed to fall through to ListSessions.
 type fakeFastSessionProvider struct {
-	sessions       []session.SessionInfo
-	lookup         map[string]string
-	listCalls      int
-	lookupCalls    int
-	lookupHits     int
+	sessions     []session.SessionInfo
+	lookup       map[string]string
+	listCalls    int
+	lookupCalls  int
+	lookupHits   int
+	tmuxInstance string
 }
 
 func (f *fakeFastSessionProvider) ListSessions() ([]session.SessionInfo, error) {
@@ -43,6 +44,8 @@ func (f *fakeFastSessionProvider) GetSession(code string) (*session.SessionInfo,
 func (f *fakeFastSessionProvider) UpdateMeta(string, session.MetaUpdate) error { return nil }
 func (f *fakeFastSessionProvider) HandleTerminalWS(http.ResponseWriter, *http.Request, string) {
 }
+
+func (f *fakeFastSessionProvider) TmuxInstance() string { return f.tmuxInstance }
 
 // LookupCodeByName satisfies the unexported sessionCodeLookuper interface in
 // the agent package. Counts every call so tests can assert hit / miss.

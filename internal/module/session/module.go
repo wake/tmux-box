@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wake/purdex/internal/config"
 	"github.com/wake/purdex/internal/core"
 	"github.com/wake/purdex/internal/store"
 	"github.com/wake/purdex/internal/tmux"
@@ -21,9 +22,11 @@ type SessionModule struct {
 	tmux            tmux.Executor
 	core            *core.Core
 	shellHomeReader func(pid string) (string, error)
-	cancelWatch     context.CancelFunc
-	wstate          watcherState
-	waitForGate     chan bool
+	// tmuxInstanceFn reads the tmux server identity; swapped in tests.
+	tmuxInstanceFn func() string
+	cancelWatch    context.CancelFunc
+	wstate         watcherState
+	waitForGate    chan bool
 	// createMu serializes handleCreate's HasSession→NewSession→SetMeta
 	// critical section so two concurrent POSTs with the same name can't
 	// both slip past the duplicate check. See #61.
@@ -48,6 +51,7 @@ func NewSessionModule(meta *store.MetaStore) *SessionModule {
 	return &SessionModule{
 		meta:            meta,
 		shellHomeReader: readShellHomeFromProc,
+		tmuxInstanceFn:  config.GetTmuxInstance,
 	}
 }
 

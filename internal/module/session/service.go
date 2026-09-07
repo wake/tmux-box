@@ -11,12 +11,29 @@ import (
 
 // --- SessionProvider implementation ---
 
+// TmuxInstance re-reads the tmux server identity. Every payload that carries a
+// generation samples it here rather than reusing a tick-scoped value, so a
+// restart between ticks cannot be labelled with the previous generation.
+// Returns "" when the probe fails; "" is a legitimate, transmitted value
+// meaning "unknown" — never a match for another "".
+func (m *SessionModule) TmuxInstance() string {
+	if m.tmuxInstanceFn == nil {
+		return ""
+	}
+	return m.tmuxInstanceFn()
+}
+
 // ListSessions returns all live tmux sessions merged with cached meta.
 func (m *SessionModule) ListSessions() ([]SessionInfo, error) {
 	sessions, err := m.tmux.ListSessions()
 	if err != nil {
 		return nil, err
 	}
+
+	// Sampled once per list so every entry in one payload reports the same
+	// generation, and sampled here rather than on the watcher tick so a
+	// restart between two ticks is never labelled with the old generation.
+	instance := m.TmuxInstance()
 
 	// Build live ID set for orphan cleanup
 	liveIDs := make([]string, len(sessions))
@@ -34,12 +51,13 @@ func (m *SessionModule) ListSessions() ([]SessionInfo, error) {
 			continue // skip sessions with invalid IDs
 		}
 		info := SessionInfo{
-			Code:   code,
-			TmuxID: s.ID,
-			Name:   s.Name,
-			Exists: true,
-			Mode:   "terminal", // default
-			Cwd:    s.Cwd,
+			Code:         code,
+			TmuxID:       s.ID,
+			Name:         s.Name,
+			Exists:       true,
+			Mode:         "terminal", // default
+			Cwd:          s.Cwd,
+			TmuxInstance: instance,
 		}
 		m.applyActivePaneMetadata(&info)
 
@@ -75,12 +93,13 @@ func (m *SessionModule) GetSession(code string) (*SessionInfo, error) {
 	for _, s := range sessions {
 		if s.ID == tmuxID {
 			info := &SessionInfo{
-				Code:   code,
-				TmuxID: s.ID,
-				Name:   s.Name,
-				Exists: true,
-				Mode:   "terminal",
-				Cwd:    s.Cwd,
+				Code:         code,
+				TmuxID:       s.ID,
+				Name:         s.Name,
+				Exists:       true,
+				Mode:         "terminal",
+				Cwd:          s.Cwd,
+				TmuxInstance: m.TmuxInstance(),
 			}
 			m.applyActivePaneMetadata(info)
 
