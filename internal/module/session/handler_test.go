@@ -742,7 +742,11 @@ func sendKeysTo(t *testing.T, mux *http.ServeMux, code, body string) *httptest.R
 // belief checked. Matching generation → the keys go through as before.
 func TestHandlerSendKeys_ExpectedInstanceMatches_Sends(t *testing.T) {
 	mod, _, fake := newTestModule(t)
-	mod.tmuxInstanceFn = func() string { return "111:1000" }
+	// The generation lives on the server that would receive the keys — that is
+	// the only place a check about it can be authoritative — so the fake holds
+	// it and the daemon reads the same value.
+	mod.tmuxInstanceFn = fake.Instance
+	fake.SetInstance("111:1000")
 	mux := http.NewServeMux()
 	mod.RegisterRoutes(mux)
 
@@ -755,6 +759,8 @@ func TestHandlerSendKeys_ExpectedInstanceMatches_Sends(t *testing.T) {
 
 	assert.Equal(t, http.StatusNoContent, w.Code)
 	require.Len(t, fake.RawKeysSent(), 1)
+	// Targeted by session id: the conditional send resolves nothing by name.
+	assert.Equal(t, "$0:", fake.RawKeysSent()[0].Target)
 }
 
 // The whole point: a session code is a reversible encoding of `$N`, so after a
@@ -762,7 +768,8 @@ func TestHandlerSendKeys_ExpectedInstanceMatches_Sends(t *testing.T) {
 // daemon refuses and sends NOTHING.
 func TestHandlerSendKeys_ExpectedInstanceMismatch_Refuses409(t *testing.T) {
 	mod, _, fake := newTestModule(t)
-	mod.tmuxInstanceFn = func() string { return "222:2000" }
+	mod.tmuxInstanceFn = fake.Instance
+	fake.SetInstance("222:2000")
 	mux := http.NewServeMux()
 	mod.RegisterRoutes(mux)
 
@@ -781,7 +788,8 @@ func TestHandlerSendKeys_ExpectedInstanceMismatch_Refuses409(t *testing.T) {
 // read its own generation cannot confirm the caller's expectation either.
 func TestHandlerSendKeys_ExpectedInstanceAgainstUnknown_Refuses409(t *testing.T) {
 	mod, _, fake := newTestModule(t)
-	mod.tmuxInstanceFn = func() string { return "" }
+	mod.tmuxInstanceFn = fake.Instance
+	fake.SetInstance("")
 	mux := http.NewServeMux()
 	mod.RegisterRoutes(mux)
 

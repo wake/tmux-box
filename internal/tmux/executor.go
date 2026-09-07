@@ -47,6 +47,14 @@ type Executor interface {
 	HasPane(paneID string) (exists bool, err error)
 	SendKeys(target, keys string) error
 	SendKeysRaw(target string, keys ...string) error
+	// SendKeysIfInstance sends keys to the session id's active pane only when
+	// the tmux server's generation ("<pid>:<start_time>") equals
+	// expectedInstance, evaluated by the SAME server connection that performs
+	// the send. See send_keys_conditional.go for why nothing weaker works.
+	//
+	// (true, nil) sent; (false, nil) the server declined; (false, err) the
+	// invocation could not be completed and nothing was sent.
+	SendKeysIfInstance(sessionID, expectedInstance string, keys ...string) (sent bool, err error)
 	PasteText(target, text string) error
 	PaneCurrentPath(target string) (string, error)
 	PaneSessionName(target string) (string, error)
