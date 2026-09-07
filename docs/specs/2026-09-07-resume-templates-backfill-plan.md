@@ -1,6 +1,6 @@
 # Resume Templates & Provenance Backfill — Implementation Plan
 
-**Status:** v4 — revised after codex plan reviews `task-mtrhhdht-bl382f` (1 Blocker, 11 Important, 1 Minor) and `task-mtrhv4kc-507pse` (2 Blocker, 2 Important) and `task-mtri4jku-kvcoe5` (1 Blocker, 1 Important, 1 Minor); dispositions at the end.
+**Status:** v5 — approved to start by codex plan review `task-mtriamoh-lqcjyb` (0 Blocker, 0 Important, 2 Minor, both folded in). Revised after codex plan reviews `task-mtrhhdht-bl382f` (1 Blocker, 11 Important, 1 Minor) and `task-mtrhv4kc-507pse` (2 Blocker, 2 Important) and `task-mtri4jku-kvcoe5` (1 Blocker, 1 Important, 1 Minor); dispositions at the end.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -545,13 +545,23 @@ created per request in Task 7, never package-level.
   - **the deepest walk that still completes → kept.** Mind where the root check
     lives: `ancestor.go:56` tests `ppid <= 1` at the **top of an iteration**, and
     a loop that runs out of iterations falls through to `Indeterminate`
-    (`ancestor.go:112`). So the last *useful* read is the one taken in iteration
-    `proxyMaxDepth-1`; if it yields PPID 1, no further iteration exists to
-    observe it. Write the fixture as an exact PID sequence over `depth = 0…4`
-    where the read in the **second-to-last** iteration returns PPID 1, so the
-    final iteration's entry check returns `Root`. **Do not move or add a root
-    check outside the loop to make a deeper fixture pass** — that would change
-    `classifyAncestor`'s behaviour, which Task 5 froze;
+    (`ancestor.go:112`). The last read that can still be *observed* is therefore
+    the one taken at `depth = proxyMaxDepth-2`; a PPID 1 produced by the read at
+    `proxyMaxDepth-1` has no further iteration to see it. With `proxyMaxDepth`
+    5, `panePID` 200, and no framed ancestors:
+
+    | Stage | Read → result |
+    |---|---|
+    | before the loop | sender `100 → PPID 200` |
+    | depth 0 | `200 → 300` (and `SawPanePID` is set here, at the entry check) |
+    | depth 1 | `300 → 400` |
+    | depth 2 | `400 → 500` |
+    | depth 3 | `500 → 1` |
+    | depth 4 | entry check sees `ppid == 1` → `Root`; PID 1 is never read |
+
+    Assert the read sequence is exactly `[100, 200, 300, 400, 500]`. **Do not
+    move or add a root check outside the loop to make a deeper fixture pass** —
+    that would change `classifyAncestor`'s behaviour, which Task 5 froze;
   - **`ppid == 0` appears on the chain while `CheckPane: false`** → no pane
     match is recorded and the verdict is unchanged from today, pinning that the
     options struct replaced a `0` sentinel that would have been unsound;
@@ -651,11 +661,15 @@ treats "no answer" uniformly and a dead code is a normal race.
   session is not considered; **the rename-swap case** — the fake reports session
   ids that encode to the right codes while the *names* have been swapped between
   two live sessions, so an implementation routed through `PaneSessionName` fails
-  here and only here. The fixture must be complete or a name-based
-  implementation passes by accident: perform the swap through a temporary name
-  (A→tmp, B→A, tmp→B), then `SetPaneSessionName` both panes to their new names
-  while leaving the id mapping untouched, and prime the name cache with the
-  pre-swap mapping. A swap with no stale cache entry proves nothing; unknown code → `found: false` with a 200; a
+  here and only here. Build it so it cannot pass by accident, and **do not drive
+  it through the real `LookupCodeByName`** — its 250 ms TTL would decide the
+  outcome by timing rather than by implementation. Pin the name→code map with a
+  fake provider (`fast_path_test.go:21`'s `fakeFastSessionProvider` already
+  exposes `lookup`) holding the **pre-swap** mapping `A → code($0)`,
+  `B → code($1)`; set the panes' *names* to the post-swap values while leaving
+  `SetPaneSessionID` untouched; then query `code($0)` and assert the answer's
+  `session_id` and `tmux_pane_id` are `$0`'s — not merely that `found` is true,
+  which a crossed-over answer would also satisfy; unknown code → `found: false` with a 200; a
   disagreeing generation sample → `tmux_instance: ""`; the deadline expiring →
   `found: false`; and **memoization across two panes**, asserted the same
   positive way as Task 6 — the exact PID set, once each, including the ancestor
