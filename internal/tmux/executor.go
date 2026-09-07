@@ -82,6 +82,11 @@ type Executor interface {
 	SetWindowOption(target, option, value string) error
 	SetWindowOptionGlobal(option, value string) error
 	ShowWindowOption(option string) (string, error)
+	// ShowGlobalOption reads a SERVER/global option (`show-options -g`).
+	// ShowWindowOption passes `-w` and can only see window options, so it
+	// returns "" for a server option such as `default-shell` — which reads as
+	// "unset" and is indistinguishable from a real absence.
+	ShowGlobalOption(option string) (string, error)
 	SetHookGlobal(event, command string) error
 	RemoveHookGlobal(event string) error
 	ShowHooksGlobal() (string, error)
@@ -451,6 +456,20 @@ func (r *RealExecutor) ShowWindowOption(option string) (string, error) {
 			}
 		}
 		return "", fmt.Errorf("tmux show-options -w %s: %w", option, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (r *RealExecutor) ShowGlobalOption(option string) (string, error) {
+	out, err := exec.Command("tmux", "show-options", "-g", "-q", "-v", option).Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr := string(exitErr.Stderr)
+			if strings.Contains(stderr, "no server running") {
+				return "", nil
+			}
+		}
+		return "", fmt.Errorf("tmux show-options -g %s: %w", option, err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }

@@ -62,13 +62,19 @@ type FakeExecutor struct {
 	autoResizeCalls      []string              // targets passed to ResizeWindowAuto
 	setWindowOptionCalls []SetWindowOptionCall // calls to SetWindowOption
 	windowOptions        map[string]string
-	paneIDs              []string // global pane id list for HasPane
-	hasPaneErr           error    // simulated transient tmux error for HasPane
-	listCallCount        int      // how many times ListSessions was called
-	alive                bool     // whether tmux server is "alive"
-	HooksOutput          string   // returned by ShowHooksGlobal
-	FailSendKeys         bool     // if true, SendKeysRaw returns an error
-	FailPasteText        bool     // if true, PasteText returns an error
+	// Server/global options live in their own map. Sharing windowOptions
+	// would let a caller that reaches for ShowWindowOption find a value only
+	// ShowGlobalOption can really read, and hide the bug.
+	globalOptions         map[string]string
+	globalOptionErrs      map[string]error
+	showGlobalOptionCalls []string
+	paneIDs               []string // global pane id list for HasPane
+	hasPaneErr            error    // simulated transient tmux error for HasPane
+	listCallCount         int      // how many times ListSessions was called
+	alive                 bool     // whether tmux server is "alive"
+	HooksOutput           string   // returned by ShowHooksGlobal
+	FailSendKeys          bool     // if true, SendKeysRaw returns an error
+	FailPasteText         bool     // if true, PasteText returns an error
 }
 
 func NewFakeExecutor() *FakeExecutor {
@@ -89,6 +95,8 @@ func NewFakeExecutor() *FakeExecutor {
 		paneCwds:             make(map[string]string),
 		paneSizes:            make(map[string][2]int),
 		windowOptions:        make(map[string]string),
+		globalOptions:        make(map[string]string),
+		globalOptionErrs:     make(map[string]error),
 		alive:                true,
 	}
 }
@@ -636,6 +644,38 @@ func (f *FakeExecutor) ShowWindowOption(option string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.windowOptions[option], nil
+}
+
+// SetGlobalOptionValue seeds what ShowGlobalOption will answer.
+func (f *FakeExecutor) SetGlobalOptionValue(option, value string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.globalOptions[option] = value
+}
+
+// SetGlobalOptionError makes ShowGlobalOption fail for one option — the shape
+// of "no tmux server running", which the shell probe has to fall back from.
+func (f *FakeExecutor) SetGlobalOptionError(option string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.globalOptionErrs[option] = err
+}
+
+func (f *FakeExecutor) ShowGlobalOption(option string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.showGlobalOptionCalls = append(f.showGlobalOptionCalls, option)
+	if err := f.globalOptionErrs[option]; err != nil {
+		return "", err
+	}
+	return f.globalOptions[option], nil
+}
+
+// ShowGlobalOptionCalls returns the options asked for, in order.
+func (f *FakeExecutor) ShowGlobalOptionCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.showGlobalOptionCalls...)
 }
 
 func (f *FakeExecutor) SetWindowOptionCalls() []SetWindowOptionCall {
