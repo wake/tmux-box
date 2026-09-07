@@ -8,16 +8,17 @@
 //
 // Not persisted: an in-flight operation must never outlive the page.
 import { create } from 'zustand'
+import { bindingEquals, type SessionBinding } from '../lib/rebuild/binding'
 import type { Session } from '../lib/host-api'
 import type { RebuildPlan, RebuildReport } from '../lib/rebuild/engine'
 import type { HostIdentity } from '../lib/rebuild/transport'
 
-/** The pane binding an operation started from — the re-point guard's baseline. */
-export interface RebuildBinding {
-  hostId: string
-  sessionCode: string
-  tmuxInstance: string
-}
+/**
+ * The pane binding an operation started from — the re-point guard's baseline.
+ * Compared with `bindingEquals`: an operation that planned from one generation
+ * may not act on a pane that has since moved to another (spec §4.5).
+ */
+export type RebuildBinding = SessionBinding
 
 export interface RebuildOperation {
   paneId: string
@@ -155,11 +156,6 @@ export const useRebuildStore = create<RebuildState>()((set, get) => ({
   },
 }))
 
-/** Two bindings describe the same session under the same tmux generation. */
-export function sameBinding(a: RebuildBinding, b: RebuildBinding): boolean {
-  return a.hostId === b.hostId && a.sessionCode === b.sessionCode && a.tmuxInstance === b.tmuxInstance
-}
-
 /**
  * The pane's operation, scoped to the rebuild cycle it started from.
  *
@@ -180,7 +176,7 @@ export function usePaneOperation(paneId: string, binding?: RebuildBinding): Rebu
   return useRebuildStore((s) => {
     const op = s.operations[paneId]
     if (!op) return undefined
-    return !binding || sameBinding(op.binding, binding) ? op : undefined
+    return !binding || bindingEquals(op.binding, binding) ? op : undefined
   })
 }
 

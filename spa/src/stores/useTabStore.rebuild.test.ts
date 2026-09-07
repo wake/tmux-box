@@ -202,6 +202,32 @@ describe('setPaneRebuild', () => {
     expect(rec(tab.id)?.cwd).toBe('/w/p')
   })
 
+  it('skips a pane that terminated while the write was in flight', () => {
+    // The probe asks about a binding, not a pane. If pane A dies while the
+    // answer is in flight and its sibling B is still on the same reused code,
+    // the answer describes B's session — writing it into A's now-historical
+    // record would put the wrong directory into the rebuild it offers.
+    const tab = seed()
+    const split = splitTabWithSecondPane(tab, 'p2')
+    if (split.layout.type !== 'split') throw new Error('bad fixture')
+    const [first, second] = split.layout.children
+    if (second.type !== 'leaf' || second.pane.content.kind !== 'tmux-session') throw new Error('bad fixture')
+    const dead = {
+      ...second,
+      pane: { ...second.pane, content: { ...second.pane.content, terminated: 'session-closed' as const } },
+    }
+    useTabStore.setState({
+      tabs: { [tab.id]: { ...split, layout: { ...split.layout, children: [first, dead] } } },
+      tabOrder: [tab.id],
+      activeTabId: tab.id,
+    })
+
+    useTabStore.getState().setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'probe-cwd', cwd: '/w/answer' })
+
+    expect(recordOfPane(tab.id, 'p1')?.cwd).toBe('/w/answer')
+    expect(recordOfPane(tab.id, 'p2')).toBeUndefined()
+  })
+
   it('leaves stream-mode panes alone', () => {
     const tab = createTab({
       kind: 'tmux-session', hostId: 'h1', sessionCode: 'abc123',

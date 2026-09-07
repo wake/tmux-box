@@ -122,6 +122,43 @@ describe('probeSessionCwd', () => {
     expect(fetchSessionCwd).not.toHaveBeenCalled()
   })
 
+  it('does not write the answer into a sibling that terminated while it was in flight', async () => {
+    // Two panes on one session code. `wantsProbe` excludes terminated panes,
+    // but the write itself is session-scoped, so a pane that dies between the
+    // request and the answer must be skipped by the WRITE, not just by the read.
+    const live = seed()
+    const dying = createTab({
+      kind: 'tmux-session', hostId: 'h1', sessionCode: 'abc123',
+      mode: 'terminal', cachedName: 'dev', tmuxInstance: '222:2000',
+    })
+    useTabStore.setState({
+      tabs: { ...useTabStore.getState().tabs, [dying.id]: dying },
+      tabOrder: [live.id, dying.id],
+      activeTabId: live.id,
+    })
+
+    const d = deferred()
+    vi.mocked(fetchSessionCwd).mockReturnValue(d.promise)
+    probeSessionCwd('h1', 'abc123', '222:2000')
+
+    // The reconciler marks the second pane dead while the request is out.
+    const tab = useTabStore.getState().tabs[dying.id]
+    if (tab.layout.type !== 'leaf' || tab.layout.pane.content.kind !== 'tmux-session') throw new Error('bad seed')
+    useTabStore.setState({
+      tabs: {
+        ...useTabStore.getState().tabs,
+        [dying.id]: { ...tab, layout: { ...tab.layout, pane: { ...tab.layout.pane, content: {
+          ...tab.layout.pane.content, terminated: 'session-closed',
+        } } } },
+      },
+    })
+
+    d.resolve(answer('/w/live'))
+    await flush()
+    expect(recordOf(live.id)?.cwd).toBe('/w/live')
+    expect(recordOf(dying.id)).toBeUndefined()
+  })
+
   it('releases the dedup slot when the request fails', async () => {
     seed()
     const d = deferred()

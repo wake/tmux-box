@@ -5,6 +5,7 @@ import type { FileSource } from '../types/fs'
 import { createTab } from '../types/tab'
 import { getPrimaryPane, findPane, updatePaneInLayout, splitAtPane, removePane, applyLayoutPattern, remountLeaf } from '../lib/pane-tree'
 import { contentMatches, isFilePaneContent } from '../lib/pane-utils'
+import { bindingMatchesLegacy, generationMatchesLegacy } from '../lib/rebuild/binding'
 import { purdexStorage, STORAGE_KEYS, syncManager } from '../lib/storage'
 import type { UntitledDocumentState } from '../types/tab'
 
@@ -63,8 +64,7 @@ function markPanesInLayout(
     const c = layout.pane.content
     const generationMatches = expectedTmuxInstance === undefined
       || c.kind !== 'tmux-session'
-      || c.tmuxInstance === ''
-      || c.tmuxInstance === expectedTmuxInstance
+      || generationMatchesLegacy(c.tmuxInstance, expectedTmuxInstance)
     if (c.kind === 'tmux-session' && c.hostId === hostId && c.sessionCode === sessionCode && generationMatches && !c.terminated) {
       return { ...layout, pane: { ...layout.pane, content: { ...c, terminated: reason } } }
     }
@@ -96,12 +96,10 @@ function adoptInstanceInLayout(layout: PaneLayout, hostId: string, sessionCode: 
 /**
  * Does this pane belong to the binding a writer is addressing?
  *
- * The binding is the triple (hostId, sessionCode, tmuxInstance): session codes
- * are reused across tmux server restarts, so host+code alone would let a
- * payload from a new tmux server write onto a pane bound to the old one. A
- * pane whose recorded instance is `''` (legacy pane, or a host whose
- * generation is unknown) matches any expected instance, which is the same
- * compatibility rule `markPanesInLayout` uses.
+ * The legacy-compatible comparison (`binding.ts`): host and code exact, and a
+ * pane whose recorded instance is `''` — a legacy pane, or one on a host whose
+ * generation is unknown — answers to any expected instance, which is the same
+ * rule `markPanesInLayout` uses.
  */
 function sessionBindingMatches(
   c: PaneContent,
@@ -110,9 +108,7 @@ function sessionBindingMatches(
   expectedTmuxInstance: string,
 ): c is TmuxSessionContent {
   return c.kind === 'tmux-session'
-    && c.hostId === hostId
-    && c.sessionCode === sessionCode
-    && (c.tmuxInstance === '' || c.tmuxInstance === expectedTmuxInstance)
+    && bindingMatchesLegacy(c, { hostId, sessionCode, tmuxInstance: expectedTmuxInstance })
 }
 
 /** As above, minus stream-mode panes, which are out of scope for rebuild. */
@@ -123,6 +119,30 @@ function rebuildBindingMatches(
   expectedTmuxInstance: string,
 ): c is TmuxSessionContent {
   return sessionBindingMatches(c, hostId, sessionCode, expectedTmuxInstance) && c.mode === 'terminal'
+}
+
+/**
+ * The final eligibility check for a SESSION-scoped record write, per pane.
+ *
+ * A terminated pane is excluded. The readers that trigger these writes — the
+ * cwd probe, the agent-group envelope — decide whether to ask while every pane
+ * on the binding is still alive, but the answer arrives later, and by then one
+ * pane may have died while a sibling on the same reused code is still live. The
+ * answer then describes the sibling's session, and writing it into the dead
+ * pane's record would put a stranger's directory (or agent) into the rebuild
+ * that pane offers. So the check that matters is made HERE, against each pane,
+ * in the same synchronous `set` that writes.
+ *
+ * Pane-scoped writes (`setPaneRebuildForPane`) deliberately do NOT use this: a
+ * terminated pane is exactly where the user edits the cwd before rebuilding it.
+ */
+function acceptsSessionScopedWrite(
+  c: PaneContent,
+  hostId: string,
+  sessionCode: string,
+  expectedTmuxInstance: string,
+): c is TmuxSessionContent {
+  return rebuildBindingMatches(c, hostId, sessionCode, expectedTmuxInstance) && !c.terminated
 }
 
 /**
@@ -606,7 +626,9 @@ export const useTabStore = create<TabState>()(
         }),
 
       // Session-scoped: the agent group and the cwd probe describe the tmux
-      // SESSION, so they land on every pane bound to the triple (spec §4.1).
+      // SESSION, so they land on every LIVE pane bound to the triple (spec
+      // §4.1) — see `acceptsSessionScopedWrite` for why terminated is excluded
+      // here rather than only at the reader.
       setPaneRebuild: (hostId, sessionCode, expectedTmuxInstance, patch) =>
         set((state) => {
           let changed = false
@@ -614,7 +636,7 @@ export const useTabStore = create<TabState>()(
           for (const [id, tab] of Object.entries(tabs)) {
             const newLayout = mapTmuxPanesInLayout(
               tab.layout,
-              (c): c is TmuxSessionContent => rebuildBindingMatches(c, hostId, sessionCode, expectedTmuxInstance),
+              (c): c is TmuxSessionContent => acceptsSessionScopedWrite(c, hostId, sessionCode, expectedTmuxInstance),
               (c) => applyRebuildPatch(c, patch),
             )
             if (newLayout !== tab.layout) {

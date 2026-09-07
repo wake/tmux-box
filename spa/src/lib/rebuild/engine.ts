@@ -13,8 +13,8 @@
 // There is no rollback: a created session is a real session, so every partial
 // failure keeps it named in the report.
 import { pinHost, type PinnedTransport } from './transport'
+import { bindingEquals } from './binding'
 import {
-  sameBinding,
   useRebuildStore,
   withOperationLock,
   type OperationLockGrant,
@@ -170,12 +170,10 @@ function readTerminalPane(tabId: string, paneId: string): TmuxSessionContent | n
   return content
 }
 
+/** Exact, not legacy-compatible: see `binding.ts` for why the two differ. */
 function bindingUnchanged(tabId: string, paneId: string, binding: RebuildBinding): boolean {
   const now = readTerminalPane(tabId, paneId)
-  return !!now
-    && now.hostId === binding.hostId
-    && now.sessionCode === binding.sessionCode
-    && now.tmuxInstance === binding.tmuxInstance
+  return !!now && bindingEquals(now, binding)
 }
 
 /**
@@ -443,7 +441,7 @@ async function runRebuild(
   }
   // The caller's baseline, checked here rather than at plan time: everything
   // from this line to the create below is one synchronous run.
-  if (deps.expectedBinding && !sameBinding(binding, deps.expectedBinding)) {
+  if (deps.expectedBinding && !bindingEquals(binding, deps.expectedBinding)) {
     const want = deps.expectedBinding
     report.steps.create = failed(new Error(
       `pane ${paneId} no longer holds the binding this operation planned from `
