@@ -733,10 +733,10 @@ func (s *TraceStore) SaveChain(record TraceRecord) (err error) {
 	}
 
 	for i, step := range steps {
-		// Deduped steps store the empty string as their payload — a literal SQL
-		// value, deliberately not routed through rawJSONText, which would turn
-		// an empty payload into "null" and make the marker indistinguishable
-		// from a genuine null payload.
+		// payload_is_root is what says a step references the chain's payload; the
+		// column itself just holds the empty string so the bytes are not repeated.
+		// It is written as a literal SQL value rather than through rawJSONText,
+		// which would expand empty to "null" and store four pointless bytes.
 		payload := rawJSONText(step.PayloadJSON)
 		isRoot := 0
 		if payloadIsRoot[i] {
@@ -804,9 +804,7 @@ func (s *TraceStore) GetChainRecord(chainID string) (*TraceRecord, error) {
 	return getTraceChainRecord(context.Background(), s.db, chainID)
 }
 
-// getTraceChainRecord is the body of GetChainRecord, parameterised over
-// sqlQuerier so tests can interpose a deterministic seam between the chain query
-// and the step query.
+// getTraceChainRecord reads a chain and its steps through the given querier.
 func getTraceChainRecord(ctx context.Context, q sqlQuerier, chainID string) (*TraceRecord, error) {
 	var chain TraceChain
 	err := q.QueryRowContext(ctx, `
@@ -842,9 +840,10 @@ func getTraceChainRecord(ctx context.Context, q sqlQuerier, chainID string) (*Tr
 	// must come from one snapshot. Resolving it in the JOIN makes that
 	// structural: reading the chain and the steps as two independent queries
 	// and pairing them in Go would let an interleaved SaveChain hand root B's
-	// payload to root A's steps. The 17 result columns keep their order, with
-	// the CASE in the payload position, so collectTraceSteps — this query's only
-	// consumer, and a positional scanner — needs no change.
+	// payload to root A's steps.
+	//
+	// collectTraceSteps scans positionally, so the column order below is load
+	// bearing — the CASE has to stay in the payload column's position.
 	rows, err := q.QueryContext(ctx, `
 		SELECT s.step_id, s.chain_id, s.parent_step_id, s.seq, s.kind, s.tmux_session, s.pane_id,
 		       s.agent_type, s.frame_id, s.parent_frame_id, s.event_name, s.decision, s.reason,
