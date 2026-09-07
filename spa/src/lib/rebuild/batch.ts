@@ -19,6 +19,7 @@ import { collectLeaves } from '../pane-tree'
 import { useTabStore } from '../../stores/useTabStore'
 import { useRebuildStore, type OperationLockToken, type RebuildBinding } from '../../stores/useRebuildStore'
 import { rebuildPane, repointMember, type RebuildDeps, type RebuildPlan, type RebuildReport } from './engine'
+import { pinHost } from './transport'
 import type { PaneRebuildRecord, Tab, TerminatedReason } from '../../types/tab'
 
 /** The batch's lock owner. One name for the whole run, per rule 3 above. */
@@ -244,6 +245,12 @@ async function runGroup(
   // summary, and `defaultRepoint` needs the session itself.
   const created = useRebuildStore.getState().operations[group.sourcePaneId]?.createdSession
 
+  // The host the group pinned. `pinHost` throws when the address, the token or
+  // the host itself changed since the create, which is exactly the condition
+  // that makes the created code meaningless for these panes.
+  const pinnedHost = useRebuildStore.getState().operations[group.sourcePaneId]?.host
+  const assertHostUnchanged = () => { pinHost(group.hostId, pinnedHost) }
+
   const members: BatchMemberResult[] = []
   for (const paneId of group.paneIds) {
     if (paneId === group.sourcePaneId) continue
@@ -259,13 +266,8 @@ async function runGroup(
       members.push({ paneId, tabId, repointed: false, reason: 'resume failed' })
       continue
     }
-    const repointed = repointMember(tabId, paneId, binding, created, deps.repoint)
-    members.push({
-      paneId,
-      tabId,
-      repointed,
-      reason: repointed ? undefined : 'the pane binding changed',
-    })
+    const outcome = repointMember(tabId, paneId, binding, created, deps.repoint, assertHostUnchanged)
+    members.push({ paneId, tabId, ...outcome })
   }
 
   return {

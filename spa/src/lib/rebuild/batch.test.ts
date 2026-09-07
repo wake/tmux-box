@@ -334,6 +334,37 @@ describe('runBatchRebuild', () => {
     expect(skipped?.report.steps.create.error).toMatch(/binding/)
   })
 
+  it('does not re-point a group member once the host address has changed', async () => {
+    // Two panes on one dead session: p1 is the source, p2 a member. The host
+    // is re-addressed while the resume is in flight, so the code the group
+    // created belongs to the old machine while both panes now resolve to the
+    // new one. Neither may adopt it.
+    seedPane('h1', 't1', 'p1', { sessionName: 'dev' })
+    seedPane('h1', 't2', 'p2', { sessionName: 'dev' })
+
+    const sending = deferred<void>()
+    const finishSend = deferred<void>()
+    const report = await (async () => {
+      const run = runBatchRebuild({
+        createSession: vi.fn(async () => session({ code: 'new1', name: 'dev', tmux_instance: '222:2000' })),
+        sendKeys: vi.fn(async () => { sending.resolve(); await finishSend.promise }),
+      })
+      await sending.promise
+      useHostStore.setState({
+        hosts: { h1: { id: 'h1', name: 'h1', ip: '10.0.0.9', port: 7860, token: null, order: 0 } },
+        hostOrder: ['h1'], activeHostId: 'h1', runtime: { h1: { status: 'connected', attachReady: true } },
+      })
+      finishSend.resolve()
+      return run
+    })()
+
+    expect(sessionCodeOfPane('t1', 'p1')).toBe('old111')
+    expect(sessionCodeOfPane('t2', 'p2')).toBe('old111')
+    const member = report.groups[0].members[0]
+    expect(member.repointed).toBe(false)
+    expect(member.reason).toMatch(/host/)
+  })
+
   it('reports an empty run without taking the lock hostage', async () => {
     const report = await runBatchRebuild({ createSession: vi.fn(), sendKeys: vi.fn() })
     expect(report.status).toBe('ok')

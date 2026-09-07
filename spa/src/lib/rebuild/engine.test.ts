@@ -60,6 +60,13 @@ function rebindPane(tabId: string, _paneId: string, sessionCode: string) {
   })
 }
 
+/** A promise the test resolves at the exact moment it wants the race to open. */
+function deferred<T = void>() {
+  let resolve!: (v: T) => void
+  const promise = new Promise<T>((res) => { resolve = res })
+  return { promise, resolve }
+}
+
 function paneContent(tabId: string, paneId: string) {
   const layout = useTabStore.getState().tabs[tabId].layout
   if (layout.type !== 'leaf' || layout.pane.id !== paneId) throw new Error('fixture is a leaf')
@@ -618,5 +625,75 @@ describe('rebuildPane — refusals reach the store', () => {
     const op = useRebuildStore.getState().operations['p1']
     expect(op?.report.steps.resume.error).toContain('snapshot:restoreAll')
     expect(op?.createdSession?.code).toBe('new1')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A re-point writes the operation's session code onto the pane, and the pane's
+// `hostId` is resolved fresh every time the terminal builds its URL. So the
+// re-point has to re-assert the PINNED host, not just the binding: if the
+// host's address was edited while the create or the send-keys was in flight,
+// the code belongs to the old machine while the pane now resolves to the new
+// one (spec §4.8, "pinned transport").
+// ---------------------------------------------------------------------------
+describe('re-point — the pinned host', () => {
+  beforeEach(() => {
+    useRebuildStore.setState({ operations: {}, lockedBy: null })
+    useSessionStore.setState({ sessions: {}, activeHostId: null, activeCode: null })
+    seedHost('h1')
+    seedPane('h1', 't1', 'p1', { cwd: '/w', resumeCommand: 'claude --resume S1' })
+    vi.unstubAllGlobals()
+  })
+
+  it('refuses the re-point when the host address is edited while the resume is in flight', async () => {
+    const sending = deferred()
+    const finishSend = deferred()
+    const run = rebuildPane('h1', 't1', 'p1', plan, {
+      createSession: vi.fn(async () => session({ code: 'new1', name: 'dev', tmux_instance: '222:2000' })),
+      sendKeys: vi.fn(async () => { sending.resolve(); await finishSend.promise }),
+    })
+    await sending.promise
+    // The user edits the host's address in Settings → Hosts, mid-operation.
+    seedHost('h1', { ip: '10.0.0.9' })
+    finishSend.resolve()
+    const report = await run
+
+    expect(report.steps.resume.status).toBe('ok')
+    expect(report.steps.repoint.status).toBe('failed')
+    expect(report.steps.repoint.error).toMatch(/host h1 changed/)
+    expect(report.repointed).toBe(false)
+    // The created session is not lost, and nothing was written anywhere.
+    expect(report.created?.code).toBe('new1')
+    expect(paneContent('t1', 'p1')).toMatchObject({ sessionCode: 'old111', terminated: 'tmux-restarted' })
+    expect(useSessionStore.getState().sessions['h1']).toBeUndefined()
+  })
+
+  it('refuses the re-point when the host is removed while the resume is in flight', async () => {
+    const sending = deferred()
+    const finishSend = deferred()
+    const run = rebuildPane('h1', 't1', 'p1', plan, {
+      createSession: vi.fn(async () => session({ code: 'new1', name: 'dev', tmux_instance: '222:2000' })),
+      sendKeys: vi.fn(async () => { sending.resolve(); await finishSend.promise }),
+    })
+    await sending.promise
+    removeHostFromStore()
+    finishSend.resolve()
+    const report = await run
+
+    expect(report.steps.repoint.status).toBe('failed')
+    expect(report.repointed).toBe(false)
+    expect(paneContent('t1', 'p1')).toMatchObject({ sessionCode: 'old111' })
+  })
+
+  it('refuses attachAnyway\'s re-point when the host changed after the create', async () => {
+    await rebuildPane('h1', 't1', 'p1', plan, {
+      createSession: vi.fn(async () => session({ code: 'new1', name: 'dev', tmux_instance: '222:2000' })),
+      sendKeys: vi.fn(async () => { throw new Error('boom') }),
+    })
+    expect(paneContent('t1', 'p1')).toMatchObject({ sessionCode: 'old111' })
+    seedHost('h1', { ip: '10.0.0.9' })
+    const report = await attachAnyway('p1', { sendKeys: vi.fn() })
+    expect(report.repointed).toBe(false)
+    expect(paneContent('t1', 'p1')).toMatchObject({ sessionCode: 'old111' })
   })
 })

@@ -234,14 +234,23 @@ function defaultRepoint(tabId: string, paneId: string, session: Session): void {
   syncSessionStore(content.hostId, session, { code: content.sessionCode, tmuxInstance: content.tmuxInstance })
 }
 
+/** Whether a member was re-pointed, and the reason when it was not. */
+export interface MemberRepointResult {
+  repointed: boolean
+  reason?: string
+}
+
 /**
  * Re-point one further pane of a batch group onto the session the group's
  * source pane already created (spec §4.11): one create and one resume per
  * group, with EVERY pane in it re-pointed.
  *
- * Each member re-verifies its own binding first, against the baseline the
- * batch planned from — a pane that moved while the create was in flight keeps
- * whatever it moved to. Returns whether the pane was re-pointed.
+ * Two guards, in the order that gives the truer reason. `assertHostUnchanged`
+ * re-asserts the host the group pinned — a session code only means anything on
+ * the machine that issued it, and the pane's `hostId` is re-resolved every
+ * time the terminal builds its URL. Then each member re-verifies its own
+ * binding against the baseline the batch planned from, so a pane that moved
+ * while the create was in flight keeps whatever it moved to.
  */
 export function repointMember(
   tabId: string,
@@ -249,10 +258,20 @@ export function repointMember(
   binding: RebuildBinding,
   created: Session,
   repoint: NonNullable<RebuildDeps['repoint']> = defaultRepoint,
-): boolean {
-  if (!bindingUnchanged(tabId, paneId, binding)) return false
+  assertHostUnchanged?: () => void,
+): MemberRepointResult {
+  if (assertHostUnchanged) {
+    try {
+      assertHostUnchanged()
+    } catch (err) {
+      return { repointed: false, reason: err instanceof Error ? err.message : String(err) }
+    }
+  }
+  if (!bindingUnchanged(tabId, paneId, binding)) {
+    return { repointed: false, reason: 'the pane binding changed' }
+  }
   repoint(tabId, paneId, created)
-  return true
+  return { repointed: true }
 }
 
 /** Everything the resume and re-point steps need, however they were reached. */
@@ -311,6 +330,19 @@ function runRepointStep(ctx: StepContext): void {
   }
   if (!ctx.created) {
     ctx.report.steps.repoint = skipped('nothing was created')
+    return
+  }
+  try {
+    // The host may have been re-addressed while the create or the send-keys
+    // was awaited. The code belongs to the machine that issued it, but the
+    // pane's `hostId` resolves fresh on every attach — writing the code now
+    // would point the terminal at a stranger's session of the same code. Read
+    // before the binding check: it is the more fundamental of the two.
+    ctx.pinned.assertUnchanged()
+  } catch (err) {
+    // Nothing is written to the pane or the session store; the created session
+    // stays named in the report.
+    ctx.report.steps.repoint = failed(err)
     return
   }
   if (!bindingUnchanged(ctx.tabId, ctx.paneId, ctx.binding)) {
