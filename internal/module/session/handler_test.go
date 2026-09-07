@@ -293,6 +293,30 @@ func TestHandlerCreateSession(t *testing.T) {
 	assert.Len(t, sessions, 1)
 }
 
+// TestHandlerCreateSession_StampsTmuxInstance guards the create response, which
+// builds its SessionInfo by hand rather than going through ListSessions. The
+// rebuild engine re-points a pane using the generation in this very response
+// (spec v4 §4.8 step 4), so an unstamped create leaves the rebuilt pane with an
+// unknown generation until the next sessions broadcast.
+func TestHandlerCreateSession_StampsTmuxInstance(t *testing.T) {
+	mod, _, _ := newTestModule(t)
+	mod.tmuxInstanceFn = func() string { return "4471:1788740000" }
+	mux := http.NewServeMux()
+	mod.RegisterRoutes(mux)
+
+	body := `{"name": "stamped", "cwd": "/tmp"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	var info SessionInfo
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&info))
+	assert.Equal(t, "4471:1788740000", info.TmuxInstance)
+}
+
 func TestHandlerCreateSessionWithMode(t *testing.T) {
 	mod, meta, _ := newTestModule(t)
 	mux := http.NewServeMux()

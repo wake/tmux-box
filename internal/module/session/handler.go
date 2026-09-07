@@ -143,6 +143,12 @@ func (m *SessionModule) handleCreate(w http.ResponseWriter, r *http.Request) {
 				Exists: true,
 				Mode:   req.Mode,
 				Cwd:    req.Cwd,
+				// This response is built by hand rather than via ListSessions,
+				// so it needs its own stamp. The rebuild engine re-points a
+				// pane using the generation carried here (spec §4.8 step 4);
+				// leaving it empty would give the rebuilt pane an unknown
+				// generation until the next sessions broadcast.
+				TmuxInstance: m.TmuxInstance(),
 			}
 			break
 		}
