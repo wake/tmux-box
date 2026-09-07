@@ -357,3 +357,29 @@ func TestRenderManagedPlugin_MagicMarkerUnchanged(t *testing.T) {
 		t.Fatalf("rendered body missing magic marker `pdx-managed:opencode-hooks:v1`")
 	}
 }
+
+// TestRenderManagedPlugin_StopAndPromptEmitCwd pins the two emits that spec
+// 2026-09-07 §3.3 measured sending session_id alone. opencode switches back
+// into an existing session inside one process without a session.created, so a
+// frame that only ever sees Stop / UserPromptSubmit would otherwise carry a
+// session id it has no directory to resume from.
+func TestRenderManagedPlugin_StopAndPromptEmitCwd(t *testing.T) {
+	body := renderManagedPlugin("/fake/pdx")
+
+	for _, tc := range []struct{ event, call string }{
+		{"PdxStop", "emit(PURDEX_EVENT.PdxStop, {"},
+		{"PdxUserPromptSubmit", "emit(PURDEX_EVENT.PdxUserPromptSubmit, {"},
+	} {
+		start := strings.Index(body, tc.call)
+		if start < 0 {
+			t.Fatalf("rendered body missing %s emit (%q)", tc.event, tc.call)
+		}
+		end := strings.Index(body[start:], "})")
+		if end < 0 {
+			t.Fatalf("rendered body has no closing brace for the %s emit", tc.event)
+		}
+		if call := body[start : start+end]; !strings.Contains(call, "cwd: pdxCwd()") {
+			t.Errorf("%s emit missing `cwd: pdxCwd()`; got %q", tc.event, call)
+		}
+	}
+}

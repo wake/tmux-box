@@ -142,7 +142,7 @@ export const PurdexOpenCodeHooks = async (ctx = {}) => {
             suppressIdleForSession.delete(sid)
             return
           }
-          await emit(PURDEX_EVENT.PdxStop, { session_id: sid })
+          await emit(PURDEX_EVENT.PdxStop, { session_id: sid, cwd: pdxCwd() })
           return
         }
         case 'session.deleted': {
@@ -176,6 +176,7 @@ export const PurdexOpenCodeHooks = async (ctx = {}) => {
       const modelName = model ? (model.providerID + '/' + model.modelID) : ''
       await emit(PURDEX_EVENT.PdxUserPromptSubmit, {
         session_id: input.sessionID,
+        cwd: pdxCwd(),
         message_id: input.messageID || output.message?.id || '',
         agent: output.message?.agent || input.agent || '',
         modelName,

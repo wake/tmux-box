@@ -374,3 +374,63 @@ func TestRenderManagedPlugin_BunRuntimeEmitsCwd(t *testing.T) {
 		}
 	})
 }
+
+// TestRenderManagedPlugin_BunRuntimeStopAndPromptCarryCwd proves at runtime
+// that the two emits spec 2026-09-07 §3.3 measured as cwd-less now carry one.
+// It drives a parent session that has a child, so the same run also re-pins
+// the parentID child-session filter: spec v1 §9.3 makes that filter a
+// precondition of the opencode ownership invariant, and a child event
+// leaking through here would attach the wrong session's cwd to the parent's
+// frame — exactly the mis-attribution the daemon-side wiring avoids.
+func TestRenderManagedPlugin_BunRuntimeStopAndPromptCarryCwd(t *testing.T) {
+	bunPath := requireBun(t)
+
+	const projectDir = "/tmp/pdx-project-dir"
+	const tail = `
+;(async () => {
+  const hooks = await PurdexOpenCodeHooks({ directory: '/tmp/pdx-project-dir' })
+  const fire = (ev) => hooks.event({ event: ev })
+  await fire({ type: 'session.created', properties: { sessionID: 'parent1', info: { id: 'parent1' } } })
+  await fire({ type: 'session.created', properties: { sessionID: 'child1', info: { id: 'child1', parentID: 'parent1' } } })
+  await hooks['chat.message']({ sessionID: 'parent1', messageID: 'msg1' }, { message: { id: 'msg1' } })
+  await hooks['chat.message']({ sessionID: 'child1', messageID: 'msg2' }, { message: { id: 'msg2' } })
+  await fire({ type: 'session.status', properties: { sessionID: 'child1', status: { type: 'idle' } } })
+  await fire({ type: 'session.status', properties: { sessionID: 'parent1', status: { type: 'idle' } } })
+})()
+`
+	emits := runRenderedPluginUnderBun(t, bunPath, tail, t.TempDir())
+
+	want := []string{"PdxSessionStart", "PdxUserPromptSubmit", "PdxUserPromptSubmit", "PdxStop"}
+	var names []string
+	for _, e := range emits {
+		names = append(names, e.Name)
+	}
+	// chat.message is not gated by parentID — it is the event that carries
+	// the now-current session id when opencode switches sessions in-process
+	// (spec §3.3) — so the child's prompt reaches the daemon under the
+	// child's own session id. The lifecycle emits (created / idle) stay
+	// gated: exactly one PdxSessionStart and one PdxStop, both for parent1.
+	if len(names) != len(want) {
+		t.Fatalf("captured events = %v, want %v", names, want)
+	}
+	for i, n := range names {
+		if n != want[i] {
+			t.Fatalf("captured events = %v, want %v", names, want)
+		}
+	}
+
+	for _, e := range emits {
+		got, _ := e.Payload["cwd"].(string)
+		if got != projectDir {
+			t.Errorf("%s cwd = %q, want %q (payload=%+v)", e.Name, got, projectDir, e.Payload)
+		}
+	}
+	for _, e := range emits {
+		if e.Name == "PdxUserPromptSubmit" {
+			continue
+		}
+		if sid, _ := e.Payload["session_id"].(string); sid != "parent1" {
+			t.Errorf("%s session_id = %q, want parent1 (the parentID filter must gate child lifecycle)", e.Name, sid)
+		}
+	}
+}
