@@ -72,7 +72,9 @@ it before it reaches the SPA.
 All three payloads are now **directly observed** (opencode was added by the
 Task 3 verification gate, 2026-09-07). The daemon's trace table
 `agent_trace_steps` stores every hook request verbatim in `payload_json` at
-`kind = 'trigger'` (`internal/store/trace.go:314`):
+`kind = 'trigger'` (`internal/store/trace_migration.go:270`; the table lived in
+`trace.go` when this evidence was gathered and moved during the alpha.331
+trace-store split):
 
 ```sql
 select payload_json from agent_trace_steps
