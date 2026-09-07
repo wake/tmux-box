@@ -587,8 +587,8 @@ The table below is by **termination reason**, over the walks that end with
 exhaustive and mutually exclusive. `SawPanePID` is an independent bit that may
 be true or false in any of them.
 
-Two paths end with a **non-nil error** and are outside the table: a
-`FindByPanePID` failure (`ancestor.go:60`) and context cancellation. Both
+Three paths end with a **non-nil error** and are outside the table: a
+`FindByPanePID` failure, a `ListByPane` failure, and context cancellation. Both
 exclude the frame and propagate to the handler, which answers `found: false`
 (Task 7). They are never treated as a verdict.
 
@@ -601,16 +601,19 @@ exclude the frame and propagate to the handler, which answers `found: false`
 | the self-parent guard fired (`ancestorInfo.PPID == ppid`) | `Indeterminate` | no |
 | identity of a candidate frame was unverifiable | `Indeterminate` | no |
 
-**Where `SawPanePID` is set — two places, both load-bearing:**
+**Where `SawPanePID` is set — two places, in two different functions:**
 
-1. **Before the loop**, if `frame.PID == panePID`. The loop starts one level up
-   and would otherwise never see the frame itself, and `PidAncestorIncludes`
-   counts that case as inside the tree.
-2. **At the top of every iteration, against the current `ppid`, before the
-   candidate lookup and before any early return.** Checking only after reading
-   `ancestorInfo` would miss the commonest case of all — the first parent *is*
-   the pane shell (measured depth 1) — whenever that same iteration also hits an
-   early return.
+1. **In `resolvePaneOwners`, before it calls the walker**, as
+   `frame.PID == panePID`, OR-ed with what the walk reports. It cannot live
+   inside `walkPaneAncestry`: the walker is given `startPID` (already the
+   frame's *parent*) and never learns the frame's own PID, so there is no
+   position inside it that can observe the case. `PidAncestorIncludes` counts
+   `pid == ancestor` as inside the tree and so must this.
+2. **In the walker, at the top of every iteration, against the current `ppid`,
+   before the candidate lookup and before any early return.** Checking only
+   after reading `ancestorInfo` would miss the commonest case of all — the first
+   parent *is* the pane shell (measured depth 1) — whenever that same iteration
+   also hits an early return.
 
 **Is a completed walk actually reachable?** Measured on this machine
 (2026-09-08, `ps -axo pid,ppid,comm`), for every pane currently running an
@@ -628,8 +631,15 @@ than guesses, which is the failure mode this whole design has chosen everywhere
 else.
 
 `ctx.Err()` is checked between process reads (it cannot interrupt one —
-`readProcessInfoPlatform` has no context). On expiry, return what is decided so
-far as an error the handler turns into `found: false`.
+`readProcessInfoPlatform` has no context). On expiry, return the
+partially-built slice **together with** `ctx.Err()`; the doc comment must say
+that a caller receiving a non-nil error **must discard the slice**. Task 7 does
+exactly that — a partial answer is not an answer, and half a pane's frames could
+name the wrong root.
+
+A `ListByPane` failure propagates the same way and for the same reason. The
+plan's error table names `FindByPanePID` and ctx cancellation; `ListByPane` is
+the third, and all three end as `found: false`.
 
 `newMemoProcReader` caches by PID for the life of one request. It must be
 created per request in Task 7, never package-level.
@@ -655,9 +665,10 @@ created per request in Task 7, never package-level.
   - **`panePID` seen but the cap exhausted → excluded.** `SawPanePID` never
     rescues an incomplete walk;
   - **the deepest walk that still completes → kept.** Mind where the root check
-    lives: `ancestor.go:56` tests `ppid <= 1` at the **top of an iteration**, and
-    a loop that runs out of iterations falls through to `Indeterminate`
-    (`ancestor.go:112`). The last read that can still be *observed* is therefore
+    lives: the `ppid <= 1` test is at the **top of an iteration**, and a loop
+    that runs out of iterations falls through to `Indeterminate`. (Both moved in
+    Task 5's extraction — find them in `walkPaneAncestry`, not by the old line
+    numbers.) The last read that can still be *observed* is therefore
     the one taken at `depth = proxyMaxDepth-2`; a PPID 1 produced by the read at
     `proxyMaxDepth-1` has no further iteration to see it. With `proxyMaxDepth`
     5, `panePID` 200, and no framed ancestors:
@@ -678,8 +689,13 @@ created per request in Task 7, never package-level.
     match is recorded and the verdict is unchanged from today, pinning that the
     options struct replaced a `0` sentinel that would have been unsound;
   - **an early ancestor-frame hit stops the walk**: assert the reader is *not*
-    called for PIDs above that ancestor, so "we stopped" is observable rather
-    than merely plausible;
+    called for PIDs above that ancestor. **This one must be asserted on
+    `walkPaneAncestry` directly, not through `resolvePaneOwners`** — the
+    ancestor that stops the walk is by definition a *surviving* frame of the
+    same pane (the survivor filter and the walker's candidate gate are the same
+    predicate), so the query walks that ancestor too and reads exactly the PIDs
+    above it, masking the assertion. It is a regression guard on behaviour Task
+    5 already had, not a driver of new code; say so in the test comment;
   - a root whose chain reaches PID 1 without passing `panePID` → excluded;
   - `resolvePanePIDFn` failing → empty result, no error escalation;
   - **memoization, asserted positively.** "at most once per PID" also passes for
