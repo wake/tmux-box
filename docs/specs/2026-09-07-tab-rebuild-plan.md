@@ -1403,6 +1403,34 @@ gate re-check immediately before the socket is created:
   setupWs(wsUrl)
 ```
 
+- [ ] **Step 1: Write the failing tests** (the snippets below)
+- [ ] **Step 2: Run them to verify they fail**
+
+Run: `pnpm --prefix spa exec vitest run gate` and
+`pnpm --prefix spa exec vitest run epoch`
+Expected: FAIL — `attach-gate` module not found, and the transport does not
+yet drop superseded frames.
+
+- [ ] **Step 3: Implement**
+
+`spa/src/lib/rebuild/attach-gate.ts` exports three functions:
+`canAttachTerminal(hostId)`, `openAttachGate(hostId)`, `closeAttachGate(hostId)`,
+all reading and writing `runtime[hostId].attachReady` through `useHostStore`.
+
+⚠️ **`connectHostEvents`'s real signature is positional**, not an options
+object: `connectHostEvents(url, onEvent, onClose?, onOpen?, getTicket?,
+autoReconnect = true, lazy = false)`.
+
+⚠️ **`connect()` opens with `if (connecting) return`.** A reconnect arriving
+during an in-flight ticket therefore never reaches `++socketEpoch`: the stale
+attempt still matches its own epoch, opens the socket with the **old** ticket,
+and silently discards the fresh `pendingTicket`. Bump the epoch from an
+explicit `supersede()` in both reconnect entry points, and have the superseded
+attempt hand over by re-entering `connect()` in a `finally` — without the
+hand-over the fresh ticket strands and no socket ever opens. Also move
+`pendingTicket = undefined` **below** the post-await re-check; clearing it
+above consumes the superseding attempt's ticket.
+
 Sequence per host in `useMultiHostEventWs`:
 
 - **starting a connection (initial or retry):** set `attachReady: false`;
