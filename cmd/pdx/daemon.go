@@ -15,6 +15,87 @@ import (
 	"github.com/wake/purdex/internal/config"
 )
 
+const (
+	// healthCheckTimeout is how long `pdx start` waits for the freshly spawned
+	// daemon to answer /api/health before giving up.
+	healthCheckTimeout = 60 * time.Second
+	// healthCheckInterval is the gap between health probes.
+	healthCheckInterval = 200 * time.Millisecond
+	// healthCheckNotifyAfter is how long the wait must last before we print a
+	// progress line, so a slow (but healthy) startup does not look hung.
+	healthCheckNotifyAfter = 3 * time.Second
+)
+
+// waitForHealthy polls healthURL every interval until it returns 200, the child
+// exits, or timeout elapses. A value on childExited (including a nil error, or a
+// closed channel) means the daemon died during startup and the wait ends
+// immediately instead of burning the rest of the window. notify, when non-nil, is
+// called at most once — only if the wait outlasts healthCheckNotifyAfter.
+func waitForHealthy(healthURL string, childExited <-chan error, timeout, interval time.Duration, notify func(string)) error {
+	return waitForHealthyWithNotify(healthURL, childExited, timeout, interval, healthCheckNotifyAfter, notify)
+}
+
+// waitForHealthyWithNotify is waitForHealthy with an injectable notify threshold,
+// so tests do not have to wait out the production one.
+func waitForHealthyWithNotify(healthURL string, childExited <-chan error, timeout, interval, notifyAfter time.Duration, notify func(string)) error {
+	probeTimeout := 5 * interval
+	if probeTimeout > timeout {
+		probeTimeout = timeout
+	}
+	client := &http.Client{Timeout: probeTimeout}
+
+	start := time.Now()
+	deadline := start.Add(timeout)
+	notified := false
+
+	for {
+		select {
+		case err := <-childExited:
+			return childExitError(err)
+		default:
+		}
+
+		resp, err := client.Get(healthURL)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return nil
+			}
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("daemon did not become healthy within %s", timeout)
+		}
+
+		if notify != nil && !notified && time.Since(start) >= notifyAfter {
+			notified = true
+			notify(fmt.Sprintf("still waiting for daemon to become healthy (%s elapsed, giving it up to %s)",
+				time.Since(start).Round(time.Second), timeout))
+		}
+
+		wait := interval
+		if wait > remaining {
+			wait = remaining
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case err := <-childExited:
+			timer.Stop()
+			return childExitError(err)
+		case <-timer.C:
+		}
+	}
+}
+
+// childExitError describes a daemon that exited before it became healthy.
+func childExitError(err error) error {
+	if err == nil {
+		return fmt.Errorf("daemon exited during startup (exited before becoming healthy)")
+	}
+	return fmt.Errorf("daemon exited during startup (%v)", err)
+}
+
 func acquirePidLock(pidPath string, pid int) (*os.File, error) {
 	f, err := os.OpenFile(pidPath, os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
@@ -132,24 +213,19 @@ func runStart(args []string) {
 
 	addr := fmt.Sprintf("%s:%d", cfg.Bind, cfg.Port)
 	healthURL := fmt.Sprintf("http://%s/api/health", addr)
-	healthy := false
 
-	time.Sleep(500 * time.Millisecond)
-	for i := 0; i < 5; i++ {
-		resp, err := http.Get(healthURL)
-		if err == nil && resp.StatusCode == 200 {
-			resp.Body.Close()
-			healthy = true
-			break
-		}
-		if resp != nil {
-			resp.Body.Close()
-		}
-		time.Sleep(200 * time.Millisecond)
+	// Buffered so this goroutine never blocks, even when nobody reads the result.
+	childExited := make(chan error, 1)
+	go func() {
+		childExited <- cmd.Wait()
+	}()
+
+	notify := func(msg string) {
+		fmt.Fprintf(os.Stderr, "pdx: %s\n", msg)
 	}
 
-	if !healthy {
-		fmt.Fprintf(os.Stderr, "pdx: daemon started but health check failed, killing child\n")
+	if err := waitForHealthy(healthURL, childExited, healthCheckTimeout, healthCheckInterval, notify); err != nil {
+		fmt.Fprintf(os.Stderr, "pdx: %v\n", err)
 		cmd.Process.Kill()
 		fmt.Fprintf(os.Stderr, "pdx: last 20 lines of %s:\n\n", filepath.Join(logsDir, "pdx.log"))
 		tailCmd := exec.Command("tail", "-n", "20", filepath.Join(logsDir, "pdx.log"))
