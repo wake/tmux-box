@@ -646,14 +646,21 @@ panel that is supposed to report that result (review R2 finding 6).
    the operation started from; if the user closed or re-pointed it meanwhile,
    stop with `repointed: false` — the created session is named in the report,
    not lost. Otherwise update `sessionCode`, `cachedName`, `tmuxInstance` (the
-   *new* generation), `rebuild.sessionName`, clear `terminated`, and upsert the
-   new `Session` into `useSessionStore` the way `restore.ts:342` does.
+   *new* generation), `rebuild.sessionName`, **`rebuild.tmuxInstance`**, clear
+   `terminated`, and upsert the new `Session` into `useSessionStore` the way
+   `restore.ts:342` does. `rebuild.tmuxInstance` is by definition "the
+   generation this record describes", so leaving the dead one there would have
+   the record claim a session that no longer exists.
 
 **Partial failure.** No rollback — a created session is a real, useful session.
 When step 3 fails, step 4 does not run, so the panel stays mounted; it renders
-the completed rows checked-and-disabled plus **"Retry resume"** (re-runs step 3
-against the already-created session) and **"Attach anyway"** (runs step 4 and
-drops the resume). The report — created host/code/name and each step's result —
+the completed rows checked-and-disabled plus **"Retry resume"** and
+**"Attach anyway"**. "Retry resume" re-runs step 3 against the already-created
+session **and then step 4 on success** — otherwise a successful retry would
+leave the user staring at a resumed session that still renders as terminated.
+"Attach anyway" runs step 4 only and marks the resume `skipped`. Both re-run
+the binding verification, using the binding recorded on the operation rather
+than whatever the pane holds now, so they stay correct across a remount. The report — created host/code/name and each step's result —
 lives in a rebuild-operation store keyed by `paneId`, not in component state,
 so it survives any re-render or remount.
 
