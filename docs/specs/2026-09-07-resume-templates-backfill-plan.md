@@ -1,6 +1,6 @@
 # Resume Templates & Provenance Backfill — Implementation Plan
 
-**Status:** v2 — revised after codex plan review `task-mtrhhdht-bl382f` (1 Blocker, 11 Important, 1 Minor); dispositions at the end.
+**Status:** v3 — revised after codex plan reviews `task-mtrhhdht-bl382f` (1 Blocker, 11 Important, 1 Minor) and `task-mtrhv4kc-507pse` (2 Blocker, 2 Important); dispositions at the end.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -99,9 +99,10 @@ hardcoded resume commands with templates, a per-pane override and a shell probe.
 | `internal/module/agent/ancestor.go` *(modify)* | Traversal extracted into a shared walker |
 | `internal/module/agent/pane_owner.go` *(new)* | Root resolution over a pane's frames, memoized reader |
 | `internal/module/agent/provenance_handler.go` *(new)* | `GET /api/sessions/{code}/provenance` |
+| `internal/tmux/{executor,fake_executor}.go` *(modify)* | `PaneSessionID` (Task 7) and `ShowGlobalOption` (Task 15) |
 | `internal/agent/opencode/plugin_template.go` *(modify)* | `cwd` on `PdxStop` / `PdxUserPromptSubmit` |
 | `internal/module/session/shell_resolve.go` *(new)* | `POST /api/shell/resolve-command` |
-| `internal/tmux/executor.go` *(modify)* | Global (`-g`) option read for `default-shell` |
+
 
 **SPA (TypeScript)**
 
@@ -261,13 +262,24 @@ Placement matters:
 **`applyFrameEvent` has several success returns and only the general one is
 obvious. Wire all three own-frame returns, and neither proxy return:**
 
-| Site | Frame returned | Identity write |
-|---|---|---|
-| `frame_ops.go:213-221` — native `SubagentStart`/`SubagentStop` membership change, after `mutateSubagentsWithRetry` | the sender's own | **yes** |
-| `frame_ops.go:348-357` — `StopFailure` proxy-subagent detach path, when the mutation applied to the sender's own frame | the sender's own | **yes** |
-| `frame_ops.go:880` onward — the general `created_frame` / `updated_frame` return | the sender's own | **yes** |
-| the pre-Upsert proxy fast path (`frame_ops.go:568` onward) | the **parent's** | **no** |
-| `reconcileCreatedFrameAsProxy` canonicalization (`frame_ops.go:860-871`) | the **parent's** | **no** |
+**The governing rule** — write the identity exactly when the frame being
+returned is the frame of the process that sent the event. Judge every return by
+that rule; the table below enumerates the own-frame ones (which is the list you
+must be exhaustive about) and gives examples of the others.
+
+| Own-frame return — **write** | |
+|---|---|
+| `frame_ops.go:169-176` — `subagent_id_missing`: a `SubagentStart`/`Stop` whose payload has no `agent_id` returns the sender's existing frame as `skipped`. It is still a real own-frame event carrying `session_id`, and cc marks it `Valid` (`cc/status.go:107-110`) | |
+| `frame_ops.go:213-221` — native `SubagentStart`/`SubagentStop` membership change, after `mutateSubagentsWithRetry` | |
+| `frame_ops.go:348-357` — `native_subagent_detached_on_stop_failure` (**native**, not proxy — the reason string says so) | |
+| `frame_ops.go:880` onward — the general `created_frame` / `updated_frame` return | |
+
+Returns that hand back **someone else's** frame must not write. These are
+examples, not an exhaustive list — apply the rule: the pre-Upsert proxy fast
+path (`frame_ops.go:568` onward), `reconcileCreatedFrameAsProxy`
+canonicalization (`frame_ops.go:860-871`), and the codex broker parent upsert
+(`frame_ops.go:287-294`). Returns with no frame at all (`frame_missing`,
+error paths) write nothing.
 
 Hooking only the general return would still pass a naive test while silently
 dropping the identity for every `Stop` / subagent event — spec §5.2 says *every*
@@ -285,8 +297,11 @@ own-frame event contributes.
     frame — the pre-Upsert fast path and the post-Upsert canonicalization are
     different code, and one case cannot stand for both. Reuse the proxy fixtures
     in `frame_ops_test.go`;
-  - a native `SubagentStart` and a `StopFailure` detach each write the id,
-    covering the two non-obvious return points in the table above;
+  - a native `SubagentStart`, a `StopFailure` native detach, and a
+    `SubagentStart` **with no `agent_id`** each write the id — the three
+    non-obvious own-frame returns. The last one must also leave the subagent
+    membership untouched;
+  - the codex broker parent-upsert path writes nothing to the parent's frame;
   - interleaving: an identity write between a proxy attach's read and its
     `UpsertIfUnchanged` retry leaves both the merged subagents list and the new
     id intact.
@@ -398,10 +413,22 @@ where it lives.
 **Files:**
 - Create: `internal/module/agent/pane_owner.go`, `pane_owner_test.go`
 - **Modify: `internal/module/agent/ancestor.go`** — `ancestryResult` gains
-  `SawPanePID`, and `walkPaneAncestry` gains a `panePID int` parameter. Adding a
-  field and a parameter keeps `classifyAncestor`'s adapter a one-line change;
-  it passes `0`, which can never match a real PID, so its behaviour and its
-  read order are untouched.
+  `SawPanePID`, and `walkPaneAncestry` takes an options struct with an
+  **explicit opt-in** for the pane check:
+
+  ```go
+  type ancestryOpts struct {
+      PanePID    int
+      CheckPane  bool   // when false, PanePID is never consulted
+  }
+  ```
+
+  **Do not use `panePID == 0` as the "disabled" sentinel.** A PPID of `0` is
+  representable and the reader does not exclude it (`process_info.go:41-50`);
+  the existing loop only treats `ppid <= 1` as a *terminator*, so a `0` on the
+  chain would be compared before that check and could spuriously set
+  `SawPanePID`. `classifyAncestor` passes `CheckPane: false` and is provably
+  unaffected.
 - Modify: `internal/module/agent/ancestor_test.go` — assert the adapter's reads
   are unchanged in count and order.
 
@@ -432,23 +459,49 @@ Then, for each survivor, decide two things **in one walk**:
   signature `func(tmux.Executor, string) (int, error)`) appears on the chain;
 - **not a root** — another surviving frame of this pane appears on the chain.
 
-**The complete boundary matrix.** The existing loop gives you none of this for
-free, so decide every row explicitly:
+**The rule, stated once:** a frame is kept **iff the walk ran to completion with
+`VerdictRoot` and `SawPanePID` was set somewhere along the way.** Everything else
+is excluded — never promoted.
 
-| Situation | `SawPanePID` | Verdict | Frame kept? |
-|---|---|---|---|
-| `frame.PID == panePID`, checked **before** entering the loop | true | continue the walk from the PPID as usual | depends on the rest |
-| `panePID` found at some depth ≤ cap | true | continue | depends on the rest |
-| `panePID` found at exactly the **last** allowed depth | true | continue | yes if no ancestor frame — the cap must not turn a legitimate hit into a refusal |
-| another surviving frame of this pane found first | irrelevant | `SameTypeAbove` / `ProxyParent`, walk stops | **excluded** — already not a root, so membership is moot and the walk must **not** be extended to establish it |
-| `ppid <= 1` before `panePID` | false | `Root` | **excluded** — a root that is not in the pane's tree is the reused-pane-id case |
-| depth cap exhausted, `panePID` never seen | false | `Indeterminate` | **excluded** |
-| a process read fails mid-walk | false | `Indeterminate` | **excluded** |
+`SawPanePID` is *observational*: it records that `panePID` appeared on the chain
+and never terminates the walk or licenses a shortcut. Seeing the pane proves
+membership; it proves nothing about whether a framed ancestor sits further up,
+so it can never on its own justify keeping a frame. v2 of this plan had a row
+that said a hit at the last allowed depth should be kept, and that was wrong for
+exactly this reason.
 
-The rule underneath all of it: a frame is kept only when
-`SawPanePID && Verdict == VerdictRoot`. Everything else is excluded — never
-promoted. Measured depth is 1 for an agent under its pane shell and 2 for an npm
-launcher (spec §3.5); the cap is 5.
+The table below is by **termination reason** — one row fires per walk, so the
+rows are exhaustive and mutually exclusive. `SawPanePID` is an independent bit
+that may be true or false in any of them.
+
+| The walk ended because… | Verdict | Frame kept? |
+|---|---|---|
+| `ppid <= 1` reached | `Root` | **yes iff `SawPanePID`** |
+| another surviving frame of this pane was found on the chain | `SameTypeAbove` / `ProxyParent` | no — not a root |
+| the depth cap was exhausted | `Indeterminate` | no |
+| a process read failed | `Indeterminate` | no |
+| the self-parent guard fired (`ancestorInfo.PPID == ppid`) | `Indeterminate` | no |
+| identity of a candidate frame was unverifiable | `Indeterminate` | no |
+
+One thing happens before the loop: **if `frame.PID == panePID`, set
+`SawPanePID` immediately**, then walk from the PPID as normal. The loop starts
+one level up and would otherwise never see the frame itself, and
+`PidAncestorIncludes` counts that case as inside the tree.
+
+**Is a completed walk actually reachable?** Measured on this machine
+(2026-09-08, `ps -axo pid,ppid,comm`), for every pane currently running an
+agent:
+
+```
+claude 47858 → -zsh 46435 (pane, depth 1) → tmux 4465 (depth 2) → launchd 1 (depth 3)
+```
+
+The chain reaches PID 1 at depth 3 against a cap of 5, and `panePID` is hit at
+depth 1 — two levels of headroom. Requiring a *completed* walk is therefore
+strict without being unsatisfiable. An npm launcher adds one level (spec §3.5),
+still inside the cap. If a future setup does exceed it, the walk refuses rather
+than guesses, which is the failure mode this whole design has chosen everywhere
+else.
 
 `ctx.Err()` is checked between process reads (it cannot interrupt one —
 `readProcessInfoPlatform` has no context). On expiry, return what is decided so
@@ -475,8 +528,13 @@ created per request in Task 7, never package-level.
   - a stale frame (start-time mismatch) does not shadow a live root;
   - an unreadable process mid-walk → that frame excluded, others unaffected;
   - a chain longer than `proxyMaxDepth` → excluded;
-  - **`panePID` at exactly the last allowed depth → kept** (the cap must not
-    reject a legitimate hit);
+  - **`panePID` seen but the cap exhausted before `ppid <= 1` → excluded**, and
+    **`panePID` seen at the last allowed depth with `ppid <= 1` on the next
+    read → kept**: together these pin that `SawPanePID` never rescues an
+    incomplete walk, and that a complete one is not rejected for being long;
+  - **`ppid == 0` appears on the chain while `CheckPane: false`** → no pane
+    match is recorded and the verdict is unchanged from today, pinning that the
+    options struct replaced a `0` sentinel that would have been unsound;
   - **an early ancestor-frame hit stops the walk**: assert the reader is *not*
     called for PIDs above that ancestor, so "we stopped" is observable rather
     than merely plausible;
@@ -545,7 +603,10 @@ treats "no answer" uniformly and a dead code is a normal race.
   `LastSeenAt` → ascending `FrameID`); **two panes in two different windows of
   the same session** are both considered, so an implementation that only ever
   looks at the active pane fails; a framed pane belonging to a *different*
-  session is not considered; unknown code → `found: false` with a 200; a
+  session is not considered; **the rename-swap case** — the fake reports session
+  ids that encode to the right codes while the *names* have been swapped between
+  two live sessions, so an implementation routed through `PaneSessionName` fails
+  here and only here; unknown code → `found: false` with a 200; a
   disagreeing generation sample → `tmux_instance: ""`; the deadline expiring →
   `found: false`; and **memoization across two panes**, asserted the same
   positive way as Task 6 — the exact PID set, once each, including the ancestor
@@ -795,6 +856,15 @@ more scheduler tests.
   one **with the pane's recorded generation**; a hook broadcast for a pane that
   already has a verified agent schedules none; nothing is scheduled before the
   attach gate opens.
+
+  **The ordering test, which the "already verified" case cannot stand in for.**
+  Start from a pane with no agent, deliver a `SessionStart` carrying a valid
+  provenance envelope through the real socket path with `handleNormalizedEvent`
+  **not** stubbed, and assert that the record ends up verified **and that no
+  provenance request was scheduled**. Scheduling before normalization also
+  passes the "already verified" case, because that fixture was already verified
+  when the hook arrived; only an event that *causes* the transition
+  distinguishes the two orderings.
 - [ ] **Step 2: Run — fail** · [ ] **Step 3: Implement** · [ ] **Step 4: Run — pass**
 - [ ] **Step 5:** vitest + lint + build
 - [ ] **Step 6: Commit** — `feat(rebuild): ask for provenance on attach, sweep and hook`
@@ -1103,7 +1173,18 @@ themselves** — do not schedule it, and do not kill any tmux server.
 | I11 | The `field` arm's same-value early return would skip `cwdSource: 'user'` | Task 8's narrowed condition + its test |
 | M1 | Reference drift: opencode guard lines, `storage/keys.ts`, `eligibility.ts` | corrected in place |
 
-Also adopted from that review: **do not memoize `classifyAncestor`**
+**From the second plan review** (codex `task-mtrhv4kc-507pse`, 2 Blocker /
+2 Important):
+
+| # | Finding | Where it landed |
+|---|---|---|
+| 1 | **Blocker, new** — routing pane→session through `resolvePaneSession` inherits `LookupCodeByName`'s 250 ms stale name cache, so a rename swap between two live sessions can answer one session's code with the other's agent | Task 7 goes through `PaneSessionID` + the pure `EncodeSessionID`; new `Executor`/`FakeExecutor` method; the rename-swap test |
+| 2 | **Blocker** — the boundary matrix's rows were not mutually exclusive, and "keep a hit at the last allowed depth" contradicted "an incomplete walk is excluded" | Task 6's matrix is rewritten by termination reason; the rule is `Root && SawPanePID`; `SawPanePID` is explicitly observational; the measured 3-deep chain shows the strict rule is satisfiable |
+| 2b | `panePID == 0` is not a safe "disabled" sentinel — a PPID of 0 is representable | an `ancestryOpts{PanePID, CheckPane}` struct, plus a `ppid == 0` test |
+| 3 | Task 3 missed a fourth own-frame return (`subagent_id_missing`), mislabelled the `StopFailure` detach as proxy, and implied the parent list was exhaustive | Task 3's table is rewritten around the governing rule, with the fourth return and its test |
+| 4 | Task 11b's tests could not catch scheduling *before* normalization | the ordering test, using an event that *causes* the transition |
+
+Also adopted from the first review: **do not memoize `classifyAncestor`**
 (`provenance_test.go:170` depends on successive reads differing), and **a green
 `provenance_test.go` does not prove Task 3's wiring** — its fixtures' providers
 do not implement `SessionIdentifier`.
