@@ -213,7 +213,8 @@ export function RebuildActionSet({
   const hostRemoved = terminated === 'host-removed'
   const busy = op?.status === 'running'
   const created = op?.report?.created
-  const resumeStep = op?.report?.steps?.resume
+  const steps = op?.report?.steps
+  const resumeStep = steps?.resume
   const repointed = op?.report?.repointed ?? false
   // Once a session exists the rows describe something already done; editing
   // them would only pretend to change it.
@@ -312,9 +313,21 @@ export function RebuildActionSet({
           <span className="font-mono">{created.code}</span>
         </p>
       )}
-      {resumeStep?.status === 'failed' && resumeStep.error && (
-        <p data-testid="rebuild-error" className="pt-1 text-[11px] text-status-error">{resumeStep.error}</p>
-      )}
+      {/*
+        * Every stage can fail, and only the resume used to be shown: an invalid
+        * name, an offline host or an exhausted rename retry all land in
+        * `create`, and a refused re-point in `repoint`. A skipped step keeps
+        * its explanatory text out of here — it is not a failure.
+        */}
+      {(['create', 'resume', 'repoint'] as const).map((step) => {
+        const result = steps?.[step]
+        if (result?.status !== 'failed' || !result.error) return null
+        return (
+          <p key={step} data-testid={`rebuild-error-${step}`} className="pt-1 text-[11px] text-status-error">
+            {result.error}
+          </p>
+        )
+      })}
 
       <div className="flex justify-end gap-2 pt-3">
         {hostRemoved

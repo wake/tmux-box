@@ -227,6 +227,40 @@ describe('RebuildActionSet', () => {
     screen.getAllByRole('checkbox').forEach((cb) => expect(cb).toBeDisabled())
   })
 
+  // === Failure reporting ===
+  //
+  // An invalid session name, an offline host or an exhausted rename retry all
+  // land in `steps.create`. Rendering only the resume error left Rebuild
+  // restoring its button with nothing said about why it did nothing.
+
+  it('shows why the create failed, with Rebuild still available', () => {
+    render(<RebuildActionSet tabId="t1" paneId="p1" record={record} onRebuild={vi.fn()}
+      operation={{ status: 'done', report: { hostId: 'h1', repointed: false, steps: {
+        create: { status: 'failed', error: 'host h1 is not configured' },
+        resume: { status: 'skipped' }, repoint: { status: 'skipped' } } } }} />)
+    expect(screen.getByTestId('rebuild-error-create')).toHaveTextContent('host h1 is not configured')
+    expect(screen.getByRole('button', { name: /^rebuild$/i })).toBeEnabled()
+  })
+
+  it('shows why a re-point was refused', () => {
+    render(<RebuildActionSet tabId="t1" paneId="p1" record={record} onRebuild={vi.fn()}
+      operation={{ status: 'done', report: { hostId: 'h1', created: { code: 'new1', name: 'dev' }, repointed: false, steps: {
+        create: { status: 'ok' }, resume: { status: 'skipped', error: 'not requested' },
+        repoint: { status: 'failed', error: 'session new1 now belongs to tmux generation 333:3000' } } } }} />)
+    expect(screen.getByTestId('rebuild-error-repoint'))
+      .toHaveTextContent('session new1 now belongs to tmux generation 333:3000')
+  })
+
+  it('does not mistake a skipped step for a failure', () => {
+    render(<RebuildActionSet tabId="t1" paneId="p1" record={record} onRebuild={vi.fn()}
+      operation={{ status: 'done', report: { hostId: 'h1', created: { code: 'new1', name: 'dev' }, repointed: false, steps: {
+        create: { status: 'ok' }, resume: { status: 'skipped', error: 'no resume command recorded' },
+        repoint: { status: 'skipped', error: 'the pane binding changed' } } } }} />)
+    expect(screen.queryByTestId('rebuild-error-create')).toBeNull()
+    expect(screen.queryByTestId('rebuild-error-resume')).toBeNull()
+    expect(screen.queryByTestId('rebuild-error-repoint')).toBeNull()
+  })
+
   // === §7 limits copy ===
 
   it('surfaces the five documented limits', () => {

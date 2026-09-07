@@ -61,6 +61,7 @@ beforeEach(() => {
   cleanup()
   useHostStore.setState({ hosts: {}, hostOrder: [], runtime: {}, activeHostId: null })
   useSessionStore.setState({ sessions: {}, activeHostId: null, activeCode: null })
+  useRebuildStore.setState({ operations: {}, lockedBy: null })
 })
 
 describe('TerminatedPane', () => {
@@ -201,6 +202,18 @@ describe('TerminatedPane rebuild action set', () => {
     render(<TerminatedPane content={content} tabId={TAB_ID} paneId={PANE_ID} />)
     expect(screen.queryByRole('button', { name: 'Rebuild' })).toBeNull()
     expect(screen.getByTestId('rebuild-host-removed-hint')).toBeInTheDocument()
+  })
+
+  // A rebuild that is refused before it starts never reaches `beginOperation`,
+  // so nothing but the returned report knows why. The panel has to say so
+  // rather than silently restoring its button.
+  it('reports a refusal that happened before the operation started', async () => {
+    const content = makeContent('tmux-restarted')
+    setupTab(content)
+    render(<TerminatedPane content={content} tabId={TAB_ID} paneId={PANE_ID} />)
+    // No host is configured in this suite, so `pinHost` refuses immediately.
+    fireEvent.click(screen.getByRole('button', { name: 'Rebuild' }))
+    expect(await screen.findByTestId('rebuild-error-create')).toHaveTextContent(/not configured/)
   })
 
   it('an edit lands on this pane only, not on its split sibling', () => {

@@ -483,3 +483,59 @@ describe('retryResume / attachAnyway — target identity', () => {
     expect(report.repointed).toBe(true)
   })
 })
+
+// ---------------------------------------------------------------------------
+// A refusal is a result. `rebuildPane` can stop before `beginOperation` ever
+// runs, and the store is where the panel looks — so those reports have to land
+// there too, without destroying anything worth more.
+// ---------------------------------------------------------------------------
+describe('rebuildPane — refusals reach the store', () => {
+  beforeEach(() => {
+    useRebuildStore.setState({ operations: {}, lockedBy: null })
+    useSessionStore.setState({ sessions: {}, activeHostId: null, activeCode: null })
+    seedHost('h1')
+    seedPane('h1', 't1', 'p1', { cwd: '/w', resumeCommand: 'claude --resume S1' })
+    vi.unstubAllGlobals()
+  })
+
+  it('publishes an unknown-host refusal under the pane binding', async () => {
+    await rebuildPane('gone', 't1', 'p1', plan, { createSession: vi.fn(), sendKeys: vi.fn() })
+    const op = useRebuildStore.getState().operations['p1']
+    expect(op?.status).toBe('done')
+    expect(op?.report.steps.create.status).toBe('failed')
+    expect(op?.report.steps.create.error).toContain('not configured')
+    // Under the pane's own binding, so the panel actually shows it.
+    expect(op?.binding).toEqual({ hostId: 'h1', sessionCode: 'old111', tmuxInstance: '111:1000' })
+  })
+
+  it('publishes a lock refusal', async () => {
+    useRebuildStore.getState().acquireOperationLock('snapshot:restoreAll')
+    await rebuildPane('h1', 't1', 'p1', plan, { createSession: vi.fn(), sendKeys: vi.fn() })
+    expect(useRebuildStore.getState().operations['p1']?.report.steps.create.error)
+      .toContain('snapshot:restoreAll')
+  })
+
+  it('never overwrites an operation that created a session', async () => {
+    await rebuildPane('h1', 't1', 'p1', plan, {
+      createSession: vi.fn(async () => session({ code: 'new1', name: 'dev', tmux_instance: '222:2000' })),
+      sendKeys: vi.fn(async () => { throw new Error('boom') }),
+    })
+    useRebuildStore.getState().acquireOperationLock('snapshot:restoreAll')
+    await rebuildPane('h1', 't1', 'p1', plan, { createSession: vi.fn(), sendKeys: vi.fn() })
+    const op = useRebuildStore.getState().operations['p1']
+    expect(op?.createdSession?.code).toBe('new1')
+    expect(op?.report.created?.code).toBe('new1')
+  })
+
+  it('tells the panel why a retry was refused, keeping the created session', async () => {
+    await rebuildPane('h1', 't1', 'p1', plan, {
+      createSession: vi.fn(async () => session({ code: 'new1', name: 'dev', tmux_instance: '222:2000' })),
+      sendKeys: vi.fn(async () => { throw new Error('boom') }),
+    })
+    useRebuildStore.getState().acquireOperationLock('snapshot:restoreAll')
+    await retryResume('p1', { sendKeys: vi.fn() })
+    const op = useRebuildStore.getState().operations['p1']
+    expect(op?.report.steps.resume.error).toContain('snapshot:restoreAll')
+    expect(op?.createdSession?.code).toBe('new1')
+  })
+})

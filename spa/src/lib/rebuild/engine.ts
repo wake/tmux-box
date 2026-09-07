@@ -96,6 +96,43 @@ function refusedReport(hostId: string, step: 'create' | 'resume', reason: string
   return { hostId, steps, repointed: false }
 }
 
+/**
+ * Write a refusal into the store so the panel can show it.
+ *
+ * A refused or aborted operation never reaches `beginOperation`, and the panel
+ * reads the store — so without this, pressing Rebuild against an unknown host,
+ * a pane that moved, or a held operation lock just restored the button with no
+ * reason given. The report is stored under the pane's CURRENT binding, which
+ * is what makes it visible (`usePaneOperation`).
+ *
+ * Two entries are never traded for an error message: one that is still running,
+ * and a finished one that created a session — its retries hang off it.
+ */
+function publishRefusal(
+  hostId: string,
+  tabId: string,
+  paneId: string,
+  plan: RebuildPlan,
+  report: RebuildReport,
+): RebuildReport {
+  const existing = useRebuildStore.getState().operations[paneId]
+  if (existing && (existing.status === 'running' || existing.createdSession)) return report
+  const content = readTerminalPane(tabId, paneId)
+  useRebuildStore.getState().beginOperation({
+    paneId,
+    tabId,
+    hostId,
+    plan,
+    binding: content
+      ? { hostId: content.hostId, sessionCode: content.sessionCode, tmuxInstance: content.tmuxInstance }
+      : { hostId, sessionCode: '', tmuxInstance: '' },
+    resumeCommand: content?.rebuild?.resumeCommand ?? '',
+    report,
+  })
+  useRebuildStore.getState().finishOperation(paneId, { report })
+  return report
+}
+
 /** The daemon returns 409 only for a duplicate session name; 400/500 never retry. */
 function isDuplicateName(err: unknown): boolean {
   return typeof err === 'object' && err !== null
@@ -282,14 +319,17 @@ export async function rebuildPane(
   plan: RebuildPlan,
   deps: RebuildDeps = {},
 ): Promise<RebuildReport> {
+  const refuse = (reason: string) =>
+    publishRefusal(hostId, tabId, paneId, plan, refusedReport(hostId, 'create', reason))
+
   if (paneBusy(paneId)) {
-    return refusedReport(hostId, 'create', `a rebuild is already running for pane ${paneId}`)
+    return refuse(`a rebuild is already running for pane ${paneId}`)
   }
   const borrowed = deps.lockToken
   if (borrowed) {
     const holder = useRebuildStore.getState().lockedBy
     if (holder !== borrowed.owner) {
-      return refusedReport(hostId, 'create', `the caller's operation lock (${borrowed.owner}) is no longer held`)
+      return refuse(`the caller's operation lock (${borrowed.owner}) is no longer held`)
     }
     // Run inside the caller's lock — and never release it: the batch is not
     // finished when one group is.
@@ -298,7 +338,7 @@ export async function rebuildPane(
   return withOperationLock(
     paneOwner(paneId),
     () => runRebuild(hostId, tabId, paneId, plan, deps),
-    (holder) => refusedReport(hostId, 'create', `another operation is already running (${holder})`),
+    (holder) => refuse(`another operation is already running (${holder})`),
   )
 }
 
@@ -322,13 +362,13 @@ async function runRebuild(
     pinned = pinHost(hostId)
   } catch (err) {
     report.steps.create = failed(err)
-    return report
+    return publishRefusal(hostId, tabId, paneId, plan, report)
   }
 
   const content = readTerminalPane(tabId, paneId)
   if (!content || content.hostId !== hostId) {
     report.steps.create = failed(new Error(`pane ${paneId} is no longer a terminal pane on ${hostId}`))
-    return report
+    return publishRefusal(hostId, tabId, paneId, plan, report)
   }
 
   const binding: RebuildBinding = {
@@ -424,6 +464,20 @@ function refuseTail(report: RebuildReport, withResume: boolean, reason: string):
   report.repointed = false
 }
 
+/**
+ * A refusal on the retry path. The operation itself is left alone — its created
+ * session is the whole reason a retry exists — but its report picks up the
+ * reason, so the panel says why instead of just re-enabling the button.
+ */
+function publishTailRefusal(paneId: string, withResume: boolean, reason: string): RebuildReport {
+  const op = useRebuildStore.getState().operations[paneId]
+  if (!op) return refusedReport('', 'resume', reason)
+  const report: RebuildReport = { ...op.report, steps: { ...op.report.steps }, repointed: false }
+  refuseTail(report, withResume, reason)
+  publish(paneId, report, op.createdSession)
+  return report
+}
+
 /** The shared tail of "Retry resume" and "Attach anyway". */
 async function resumeTail(paneId: string, withResume: boolean, deps: RebuildDeps): Promise<RebuildReport> {
   const op = useRebuildStore.getState().operations[paneId]
@@ -438,7 +492,7 @@ async function resumeTail(paneId: string, withResume: boolean, deps: RebuildDeps
   return withOperationLock(
     paneOwner(paneId),
     () => runResumeTail(paneId, withResume, deps),
-    (holder) => refusedReport(op.hostId, 'resume', `another operation is already running (${holder})`),
+    (holder) => publishTailRefusal(paneId, withResume, `another operation is already running (${holder})`),
   )
 }
 
