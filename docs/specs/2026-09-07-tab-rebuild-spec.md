@@ -59,14 +59,59 @@ Three mechanisms exist and none of them close this:
 already inside the daemon. It is `DeriveStatus`'s `Detail` allowlist that drops
 it before it reaches the SPA.
 
-| Agent | Event | Fields present in payload | Source of evidence |
-|---|---|---|---|
-| Claude Code | `SessionStart` (`source` = `startup` / `resume` / `clear` / `compact`) | `session_id`, `cwd`, `transcript_path` | CC hook payload contract; `internal/agent/cc/status.go:14-23` already reads `source` and `modelName` off the same object |
-| Codex | `SessionStart` | `session_id`, `turn_id`, `agent_type`, `transcript_path`, `cwd`, `hook_event_name`, `model`, `permission_mode` | Extracted from the hook wire schema embedded in the shipped codex binary (`@openai/codex-darwin-arm64 .../bin/codex`); the field run `session_idtranscript_pathcwdhook_event_name...` appears verbatim in its serde string table |
-| OpenCode | `session.created` → `PdxSessionStart` | `session_id` only, today | `internal/agent/opencode/plugin_template.go:83-93`. The plugin template is **ours**, so `cwd` can be added there (§4.2) |
+Two of the three payloads below are **directly observed**, not inferred. The
+daemon's trace table `agent_trace_steps` stores every hook request verbatim in
+`payload_json` at `kind = 'trigger'` (`internal/store/trace.go:314`), which
+makes it the cheapest ground truth available:
 
-Codex hooks are installed and pdx-owned on this machine
-(`~/.codex/hooks.json` entries all point at `bin/pdx hook --agent codex`).
+```sql
+select payload_json from agent_trace_steps
+where agent_type = ? and event_name like '%SessionStart%' and kind = 'trigger'
+order by created_at desc limit 1;
+```
+
+**Claude Code** (observed 2026-09-07, `claude-opus-5[1m]`):
+
+```json
+{"tmux_session":"csp","tmux_session_id":"$6","tmux_pane_id":"%6",
+ "purdex_name":"PdxSessionStart",
+ "raw_event":{"session_id":"441c80d5-…","transcript_path":"/Users/…/441c80d5-….jsonl",
+   "cwd":"/Users/wake/Workspace/tangency/csp-plugin","scratchpad_dir":"…",
+   "hook_event_name":"SessionStart","source":"startup","model":"claude-opus-5[1m]"},
+ "agent_type":"cc","sender_pid":59800,
+ "sender_start_time":"Mon Sep  7 15:34:30 2026","sender_uncertain":false}
+```
+
+**Codex** (observed 2026-09-07, codex `v0.153.4`, `gpt-6-astra`):
+
+```json
+{"tmux_session":"purdex1","tmux_session_id":"$2","tmux_pane_id":"%2",
+ "purdex_name":"PdxSessionStart",
+ "raw_event":{"session_id":"01a07ace-…","transcript_path":"/Users/wake/.codex/sessions/2026/09/07/rollout-….jsonl",
+   "cwd":"/Users/wake/Workspace/wake/purdex/.claude/worktrees/tab-rebuild",
+   "hook_event_name":"SessionStart","model":"gpt-6-astra",
+   "permission_mode":"bypassPermissions","source":"startup"},
+ "agent_type":"codex","sender_pid":93731,
+ "sender_start_time":"Mon Sep  7 15:39:06 2026","sender_uncertain":false}
+```
+
+| Agent | `session_id` | `cwd` | `source` | Status |
+|---|---|---|---|---|
+| Claude Code | ✅ | ✅ | ✅ (`startup` / `resume` / `clear` / `compact`) | observed |
+| Codex | ✅ | ✅ | ✅ (`startup`) | observed |
+| OpenCode | ✅ | ❌ — must be added | n/a | code-read: `internal/agent/opencode/plugin_template.go:83-93`. The plugin template is **ours**, so `cwd` is added there (§4.2) |
+
+Both payloads are wrapped by `pdx hook` with `tmux_session_id`, `tmux_pane_id`,
+`sender_pid`, `sender_start_time` and `sender_uncertain` — the last three are
+what §4.3's ownership test needs, and they are present and populated.
+
+Codex hooks are installed, pdx-owned and firing on this machine
+(`~/.codex/hooks.json` entries all point at `bin/pdx hook --agent codex`;
+`~/.config/pdx/logs/pdx.log` shows live `[hook] trigger … agent=codex` lines).
+Note the installed codex is `0.153.4` while
+`internal/agent/codex/hooks.go:15` still declares
+`codexHooksSupportedVersion = "0.124.0"`; the payload shape above is from the
+installed version, so Phase 1 codes against what was actually observed.
 
 ### 3.2 Resume flags (all three verified by running `--help` locally)
 
@@ -457,13 +502,18 @@ Full-suite green + `pnpm run lint` + `pnpm run build` before each PR
 
 ## 8. Risks / open items
 
-1. **Codex `session_id` is schema-derived, not observed.** §3.1 reads the field
-   list out of the shipped binary's serde tables; no live codex `SessionStart`
-   payload was captured (the daemon's `agent_events` table was empty at the
-   time of writing). Phase 1's first task must assert the real shape against a
-   captured payload and fall back to `codex resume --last` if the field is
-   absent or named differently. The degradation path already exists (§4.7), so
-   this is a quality-of-resume risk, not a feature-blocking one.
+1. **OpenCode is the only unobserved agent.** cc and codex `SessionStart`
+   payloads are captured verbatim in §3.1; no opencode session had run recently
+   enough to leave a trace row. The opencode path is code-read only
+   (`plugin_template.go:83-93`), and it is also the one payload we author
+   ourselves, so the risk is confined to whether `cwd` is reachable from the
+   plugin's event object. Phase 1 must verify against a real opencode run
+   before relying on it; the degradation path (`opencode -c`, §4.7) covers the
+   failure.
+   Related but out of scope: `internal/agent/codex/hooks.go:15` declares
+   `codexHooksSupportedVersion = "0.124.0"` while the installed codex is
+   `0.153.4`. Nothing in this feature depends on that constant, but it is stale
+   and worth a separate issue.
 2. **`owner_session_start` injection point** touches `frame_ops.go`, a large
    and heavily-reviewed file. The plan should keep the change to a single
    well-named helper and not restructure the surrounding flow.
