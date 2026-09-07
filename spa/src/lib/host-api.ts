@@ -202,6 +202,46 @@ export async function fetchSessionCwd(
   return { cwd: String(body.cwd ?? ''), tmuxInstance: String(body.tmux_instance ?? '') }
 }
 
+/**
+ * The daemon's answer to "which agent owns this pane?" (spec §5.3): the root
+ * agent frame of the session, resolved through the frames and the tmux session
+ * id, never through the session name.
+ *
+ * `found: false` means no root frame carried a session id; every `omitempty`
+ * field is then absent from the body and normalised to '' / 0 here, so a caller
+ * never has to distinguish "missing" from "empty". `tmuxInstance` follows the
+ * same rule as {@link SessionCwd}: '' is the daemon's "I could not tell" and
+ * never equals a real generation.
+ */
+export interface SessionProvenance {
+  found: boolean
+  agentType: string
+  sessionId: string
+  cwd: string
+  tmuxPaneId: string
+  tmuxInstance: string
+  lastSeenAt: number
+}
+
+export async function fetchSessionProvenance(
+  hostId: string,
+  sessionCode: string,
+  signal?: AbortSignal,
+): Promise<SessionProvenance> {
+  const res = await hostFetch(hostId, `/api/sessions/${sessionCode}/provenance`, { signal })
+  if (!res.ok) throw new Error(`fetchSessionProvenance failed: ${res.status}`)
+  const body = await res.json()
+  return {
+    found: Boolean(body.found),
+    agentType: String(body.agent_type ?? ''),
+    sessionId: String(body.session_id ?? ''),
+    cwd: String(body.cwd ?? ''),
+    tmuxPaneId: String(body.tmux_pane_id ?? ''),
+    tmuxInstance: String(body.tmux_instance ?? ''),
+    lastSeenAt: Number(body.last_seen_at ?? 0),
+  }
+}
+
 export async function fetchSessionHome(
   hostId: string,
   sessionCode: string,
