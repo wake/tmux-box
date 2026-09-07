@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.0.0-alpha.329] - 2026-09-07
+
+### Fix(daemon): `pdx start` 健康檢查窗口修復（#960）
+
+開機後 purdex 沒起來，表面像是重開機造成的，實際上跟重開機無關 —— 是既有問題被資料庫大小推過了臨界點。
+
+`pdx start` spawn 出 `pdx serve` 之後，只用固定的 `500ms + 5×200ms ≈ 1.5s` 探測 `/api/health`，探不到就 SIGKILL 子行程並 exit 1。而 `agent_events.db` 已經長到 1.1 GB，冷開機時檔案不在 page cache，光是 SQLite 開檔就超過這個窗口 —— **daemon 被自己的啟動指令殺掉**，只留下一個指向死 pid 的 `pdx.pid`。因為是 SIGKILL，沒有 panic 也沒有 crash report，看起來像是無聲不啟動。
+
+這個窗口是個跟「啟動實際需要多久」無關的固定預算，資料庫越大越容易踩到。
+
+- 抽出可測試的 `waitForHealthy()`：窗口 1.5s → **60s**，200ms 輪詢。
+- 用一條跑 `cmd.Wait()` 的 goroutine 偵測子行程提早退出 —— 真的啟動失敗時立刻回報，不會白等滿 60 秒（沒有這層，延長窗口只會讓失敗變慢）。
+- 整個等待綁在一個 `context.WithDeadline` 上，probe 改用 `http.NewRequestWithContext`；每次 probe 前先檢查 deadline，單次上限取 `min(5*interval, 剩餘時間)`，沒有任何一次 probe 能活過窗口。
+- 接受 200 之前再複查 `childExited` 與 deadline —— 子行程送出 200 後隨即崩潰、或 200 落在窗口外，都不會被誤判成啟動成功。
+- 失敗訊息區分「子行程退出」與「窗口耗盡」，取代原本含糊的 `health check failed, killing child`；等超過 3 秒印進度行。
+- 探測改用帶 timeout 的 request（原本 `http.Get` 無 timeout，daemon 接了連線但 hang 住會讓整個窗口失效），並移除無條件的 500ms sleep。
+
+端對端實測：子行程 bind 失敗即死，舊版 1.535s + 含糊訊息 → 新版 0.47s + 指出根因；正常啟動 0.21s（比舊版快）。
+
+Codex 三輪 review（標準 → 對抗性 → 複查），對抗性攔下兩條：接受 200 前未複查子行程退出、deadline 到了仍發動完整長度 probe（最壞總耗時可逼近 `2×timeout`，且窗口外的 200 會被判成功）。
+
+同時手動 `VACUUM` 把 `agent_events.db` 從 1.1 GB 縮到 389 MB（其中 730 MB 是舊 FK leak 刪除後未回收的 free pages）。成長來源未修，追蹤於 #957。
+
+延後項目：#957（`agent_trace_steps` 無保留期限）、#958（失敗時只 Kill 子行程未殺 process group）、#959（健康檢查無法分辨 200 是否來自自己 spawn 的 daemon）。
+
 ## [1.0.0-alpha.328] - 2026-08-19
 
 ### Fix(editor/storage): in-Purdex 檔案編輯四大問題修復（#940 / #947 / #952）
