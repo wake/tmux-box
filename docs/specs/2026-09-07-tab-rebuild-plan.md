@@ -47,6 +47,15 @@ generation-aware and accumulate the record in the persisted tab store. Phase
   `"rebuild.create_session"`.
 - **Stream-mode panes (`mode: 'stream'`) are out of scope** in every task.
   Guard on `content.mode === 'terminal'` wherever panes are selected.
+- **Go test packages are mixed — check before copying a snippet.** The
+  `internal/agent/{cc,codex,opencode}` status tests are *external*
+  (`package cc_test` etc.) and cannot call unexported functions such as
+  `deriveCCStatus`; go through `Provider.DeriveStatus` via each file's existing
+  helper (`deriveViaProvider` in cc/opencode, `deriveWithRaw` in codex).
+  `internal/module/agent` and `internal/module/session` tests are *internal*
+  (`package agent` / `package session`) and may call unexported symbols
+  directly, which is what Tasks 1, 4 and 5 rely on. The opencode
+  plugin-template tests are also internal (`package opencode`).
 
 ---
 
