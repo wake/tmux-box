@@ -81,9 +81,10 @@ hardcoded resume commands with templates, a per-pane override and a shell probe.
   `frame_ops_test.go`, `handler_test.go`, `frame_ops_l2_test.go`,
   `probe_intent_dispatcher.go`,
   `probe_intent_dispatcher_observability_test.go`,
-  `probe_orchestrator_test.go`, `statusline_selftest.go`). Format your own
-  files; do **not** add a repo-wide `gofmt` gate, and do not reformat those
-  thirteen as a side effect of another task.
+  `probe_orchestrator_test.go`, `statusline_selftest.go`), nor in
+  `internal/module/session/` (`codec.go`). Format your own files; do **not** add
+  a repo-wide `gofmt` gate, and do not reformat those **fourteen** as a side
+  effect of another task.
 - **The two identity columns never travel inside a `Frame` round-trip write.**
   Spec §5.2 has the per-method table; Task 1 implements it and Task 3 depends on
   it. Any task that adds a column to `UpsertIfUnchanged`, `UpdateHookPath`,
@@ -1358,6 +1359,24 @@ Validation **warns and still saves**: `exact` without `{id}`, `fallback` with
 still match. Switching the host picker or editing the row clears it, and a
 response arriving after either changed is discarded — a verdict from another
 machine must never sit beside a command being judged for this one.
+
+Five contracts from the spec that this component is the only place to honour:
+
+- **Probe the command word, not the template** (§4.4): POST only the first
+  whitespace-separated token, `{id}` left unsubstituted, so testing
+  `cld-yolo --resume {id}` sends `cld-yolo`. **The split is this component's
+  job.** Task 15 passes `command` through as a single argv element, so a
+  multi-word value resolves to `not_found` rather than being silently
+  reinterpreted as its first word — the right failure, and the reason this
+  cannot be left to the daemon.
+- **A failed or impossible probe never blocks a save** (§4.4). The template is
+  already stored; the verdict is advice.
+- **The host picker defaults to the active host** (§4.5).
+- **A 404 renders as `unverifiable`** (§8) — an older daemon has no such
+  endpoint, and that is not the user's problem to debug.
+- **Say what the limits are** (§9), in i18n copy: the templates are shared by
+  every host, and the test approximates the pane's shell rather than
+  reproducing it.
 
 - [ ] **Step 1: Write the failing tests** — rows render per agent with defaults;
   editing persists; reset restores defaults; the two warnings appear and do not
