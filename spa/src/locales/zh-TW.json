@@ -893,6 +893,8 @@
   "terminated.close_tab": "關閉分頁",
   "terminated.select_session": "選擇 session 以重新連線",
 
+  "rebuild.session_name": "工作階段名稱",
+  "rebuild.pane_terminated": "工作階段已消失",
   "rebuild.create_session": "建立 tmux session",
   "rebuild.working_directory": "工作目錄",
   "rebuild.run_resume": "執行 resume 指令",

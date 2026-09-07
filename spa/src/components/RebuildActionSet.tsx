@@ -59,8 +59,11 @@ const LIMIT_KEYS = ['agent_only', 'minimal_flags', 'cwd_scoped', 'multi_pane', '
  *
  * `disabled` blocks entering edit mode at all, which is what freezes the rows
  * once an operation has created a session.
+ *
+ * Exported because Task 15's tab-name popover shows the same cwd and resume
+ * rows on a live pane, and those guards are not worth rediscovering twice.
  */
-function EditableValue({
+export function EditableValue({
   value,
   placeholder,
   disabled,

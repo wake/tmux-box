@@ -893,6 +893,8 @@
   "terminated.close_tab": "Close tab",
   "terminated.select_session": "Select a session to reconnect",
 
+  "rebuild.session_name": "Session name",
+  "rebuild.pane_terminated": "Session gone",
   "rebuild.create_session": "Create tmux session",
   "rebuild.working_directory": "Working directory",
   "rebuild.run_resume": "Run resume command",
