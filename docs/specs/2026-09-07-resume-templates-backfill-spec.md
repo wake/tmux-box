@@ -305,6 +305,14 @@ the identity-correcting backfill of §5.5. A writer that lands the same identity
 (an idle `SessionStart` re-emit, or the **confirm** mode of §5.5) leaves the
 override alone.
 
+**A record that held no agent at all keeps its override.** The rule says
+"cleared when the identity it was written against changes", and there was no
+identity to change: the user typed a command for a pane whose agent Purdex could
+not name, and an agent arriving later does not make that command wrong. Clearing
+it would delete a deliberate choice at the moment the pane became more useful,
+which is the opposite of the intent. This is the same reading the backfill's
+fill mode already takes (§5.5).
+
 This is a **product policy, not a proof**. It is neither necessary nor
 sufficient in every case: an override of the form `cld-yolo -c` stays valid
 across an identity change and is nevertheless discarded, while an override can
