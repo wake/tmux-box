@@ -888,6 +888,19 @@ does the equivalent thing to `resumeCommand`, and Task 13 migrates it.
 - **no-op** — return the content unchanged (`return c`), like the other
   no-op arms.
 
+**Two facts that stop a later reader from "fixing" this:**
+
+- **Fill does not clear `unverified`, and does not need to.** The flag's only
+  writer is `flagUnverifiedAgent` (`useAgentStore.ts:112`), which returns early
+  unless the record already has an `agent.type` to disagree with. "No agent and
+  flagged" is therefore unreachable, and row 1 winning over the flag is moot
+  rather than a gap.
+- **The patch's `resumeCommand?` has no producer.** The daemon's answer carries
+  no command (§5.3), so the only value that ever reaches it is the one the store
+  composes. It is kept because the spec declares the shape and Task 13 removes
+  the whole field anyway — **Task 13 must delete it from the patch type too**,
+  not just from the record.
+
 The generation guard is unchanged: panes are matched on
 `(hostId, sessionCode, tmuxInstance)`.
 
