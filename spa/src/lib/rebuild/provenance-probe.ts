@@ -41,6 +41,38 @@ const inFlight = new Set<string>()
  */
 const disowned = new Set<string>()
 
+/** Minimum gap between two requests for one binding, measured from completion. */
+const COOLDOWN_MS = 30_000
+
+/**
+ * The defer-never-drop state of one binding (spec §5.4.1).
+ *
+ * Dropping a suppressed trigger loses the one hook that mattered: a session
+ * that emits a single event at t=5 s and then goes idle would be skipped by a
+ * bare cooldown and never asked again. So a suppressed trigger is DEFERRED.
+ *
+ * `nextAllowedAt` is computed ONLY when a request completes, as
+ * `completedAt + COOLDOWN_MS`. Later triggers never move it — a debounce would,
+ * and a busy session would then starve its own deferred run by pushing the
+ * deadline forward forever.
+ */
+interface Cooldown {
+  nextAllowedAt: number
+  pending: boolean
+  timer: ReturnType<typeof setTimeout> | null
+}
+
+const cooldowns = new Map<string, Cooldown>()
+
+function cooldownFor(key: string): Cooldown {
+  let cd = cooldowns.get(key)
+  if (!cd) {
+    cd = { nextAllowedAt: 0, pending: false, timer: null }
+    cooldowns.set(key, cd)
+  }
+  return cd
+}
+
 // NUL separates the parts of a composite key: it cannot occur in a host id, a
 // session code or an instance stamp, so no two distinct triples collide. It is
 // written as the `\u0000` escape rather than as a raw byte — a literal NUL
@@ -80,14 +112,10 @@ function wantsProbe(
 }
 
 /**
- * Ask the daemon which agent owns this pane and apply the answer as an
- * `agent-backfill` patch (spec §5.5's four ordered modes).
+ * The one scheduling entry point: every trigger calls this, and it decides
+ * whether the request runs now, is deferred, or is merely noted (spec §5.4.1).
  *
- * The pane set is re-read when the request resolves: a pane re-pointed,
- * terminated or filled in while the request was in flight no longer wants this
- * answer. That re-read only asks whether SOME pane still wants it, though —
- * the write is session-scoped, so the per-pane decision is made by the store
- * inside the same `set` that writes.
+ * Coalescing is the point — ten hooks inside one cooldown buy one request.
  */
 export function probeSessionProvenance(
   hostId: string,
@@ -100,9 +128,78 @@ export function probeSessionProvenance(
   // evidence about which generation owns this code.
   if (!canAttachTerminal(hostId)) return
   const key = bindingKey(hostId, sessionCode, tmuxInstance)
-  if (inFlight.has(key) || disowned.has(key)) return
+  if (disowned.has(key)) return
   if (!wantsProbe(hostId, sessionCode, tmuxInstance)) return
 
+  const cd = cooldownFor(key)
+
+  // In flight: note the interest and stop. NO timer is armed here — the
+  // completion handler owns what happens next, and it is the only place that
+  // knows when the next slot opens.
+  if (inFlight.has(key)) {
+    cd.pending = true
+    return
+  }
+
+  const now = Date.now()
+  if (now >= cd.nextAllowedAt) {
+    startRequest(cd, hostId, sessionCode, tmuxInstance, key)
+    return
+  }
+
+  // Still cooling: defer, never drop. One timer serves however many triggers
+  // arrive before it fires.
+  cd.pending = true
+  if (cd.timer === null) {
+    cd.timer = setTimeout(
+      () => runDeferred(cd, hostId, sessionCode, tmuxInstance, key),
+      cd.nextAllowedAt - now,
+    )
+  }
+}
+
+/**
+ * The deferred run re-checks EVERYTHING before spending a request: the pane may
+ * have gained an agent, been re-pointed, terminated, been disowned or lost its
+ * attach gate while the cooldown ran.
+ *
+ * The timer handle is cleared whether or not a request follows. A handle left
+ * behind would make the scheduler believe a timer is still armed, and every
+ * later deferred run would be silently swallowed.
+ */
+function runDeferred(
+  cd: Cooldown,
+  hostId: string,
+  sessionCode: string,
+  tmuxInstance: string,
+  key: string,
+): void {
+  cd.timer = null
+  cd.pending = false
+  if (inFlight.has(key) || disowned.has(key)) return
+  if (Date.now() < cd.nextAllowedAt) return
+  if (!canAttachTerminal(hostId)) return
+  if (!wantsProbe(hostId, sessionCode, tmuxInstance)) return
+  startRequest(cd, hostId, sessionCode, tmuxInstance, key)
+}
+
+/**
+ * Ask the daemon which agent owns this pane and apply the answer as an
+ * `agent-backfill` patch (spec §5.5's four ordered modes).
+ *
+ * The pane set is re-read when the request resolves: a pane re-pointed,
+ * terminated or filled in while the request was in flight no longer wants this
+ * answer. That re-read only asks whether SOME pane still wants it, though —
+ * the write is session-scoped, so the per-pane decision is made by the store
+ * inside the same `set` that writes.
+ */
+function startRequest(
+  cd: Cooldown,
+  hostId: string,
+  sessionCode: string,
+  tmuxInstance: string,
+  key: string,
+): void {
   inFlight.add(key)
   fetchSessionProvenance(hostId, sessionCode)
     .then((ans) => {
@@ -133,11 +230,33 @@ export function probeSessionProvenance(
       })
     })
     .catch(() => { /* a host that cannot answer just leaves the record alone */ })
-    .finally(() => { inFlight.delete(key) })
+    .finally(() => {
+      inFlight.delete(key)
+      // A REJECTED request enters the cooldown exactly like a resolved one,
+      // otherwise a host that is briefly down would be hammered.
+      cd.nextAllowedAt = Date.now() + COOLDOWN_MS
+      // A binding dropped by `resetProvenanceProbes` while this request was out
+      // must not leave a timer behind for the next test (or the next session).
+      if (cooldowns.get(key) !== cd) return
+      // Something asked while this was in flight: schedule it for the NEW
+      // deadline rather than running now. Firing on completion would let a slow
+      // request with continuous hooks run back to back.
+      if (cd.pending && cd.timer === null) {
+        cd.timer = setTimeout(
+          () => runDeferred(cd, hostId, sessionCode, tmuxInstance, key),
+          COOLDOWN_MS,
+        )
+      }
+    })
 }
 
-/** Test seam: drop the in-flight and disowned sets between cases. */
+/** Test seam: drop the in-flight, disowned and cooldown state between cases. */
 export function resetProvenanceProbes(): void {
+  for (const cd of cooldowns.values()) {
+    // Without this an armed timer outlives its test and fires inside the next.
+    if (cd.timer !== null) clearTimeout(cd.timer)
+  }
+  cooldowns.clear()
   inFlight.clear()
   disowned.clear()
 }
