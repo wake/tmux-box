@@ -90,7 +90,8 @@ generation-aware and accumulate the record in the persisted tab store. Phase
 **Files:**
 - Create: `internal/module/agent/ancestor.go`
 - Create: `internal/module/agent/ancestor_test.go`
-- Modify: `internal/module/agent/frame_ops.go` (`findProxyParent`, ~1963-2030)
+- Modify: `internal/module/agent/frame_ops.go` (`findProxyParent`, 1963-2035;
+  1963 is the doc comment, 1972 the `func` line, 2030 the self-parent guard)
 
 **Interfaces:**
 - Consumes: `EventRequest` (`handler.go:85-103`), `store.Frame`,
@@ -967,8 +968,11 @@ func TestProvenance_SenderUncertain_NoEnvelope(t *testing.T) {
 the **production** `applyFrameEvent` + `buildProjectionNormalized` pair and
 returns the resulting `agentpkg.NormalizedEvent` — it must not re-implement the
 attachment condition, or the tests would assert the test helper back to
-itself. `withProcessTreeSequence` swaps `readProcessInfoFn` for one that
-returns the given PPIDs in call order.
+itself. `withProcessTreeSequence` does **not** exist yet — Task 1 deliberately
+wrote only the three helpers it used, so write this one here, alongside them in
+`ancestor_test.go`: it swaps `readProcessInfoFn` for one that returns the given
+PPIDs in call order (call 1 and 2 miss, call 3 hits, mirroring
+`TestPhase35_IT3_PreWalkMiss_PostReconcileHit`'s fixture).
 
 The proxy and post-reconcile cases additionally need the liveness fixtures
 (`withLivePids`) that Task 1 introduced, or the candidate is treated as stale
