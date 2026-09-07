@@ -25,16 +25,21 @@ import { useRebuildStore } from '../../stores/useRebuildStore'
 import { useTabStore } from '../../stores/useTabStore'
 import {
   BATCH_LOCK_OWNER,
-  collectRecordRows,
   groupForBatch,
-  batchCandidates,
   planForRecord,
   recordsDisagree,
   runBatchRebuild,
-  type BatchCandidate,
   type BatchGroup,
-  type RecordRow,
 } from '../../lib/rebuild/batch'
+import {
+  batchCandidates,
+  collectRecordRows,
+  recordHealth,
+  type BatchCandidate,
+  type HostLiveness,
+  type RecordHealth,
+  type RecordRow,
+} from '../../lib/rebuild/eligibility'
 import { rebuildPane } from '../../lib/rebuild/engine'
 import { RestoreError } from '../../lib/snapshot/types'
 import type { RestoreReport, SessionMeta, WorkspaceSnapshot } from '../../lib/snapshot/types'
@@ -70,13 +75,29 @@ function errMessage(e: unknown): string {
 /** Per-host live-session lookup state: still loading, host offline, or the list. */
 type HostLive = 'loading' | 'offline' | Session[]
 
-/** Four-state (plus loading) health of a captured session vs. the live world. */
-type Health = 'loading' | 'live' | 'dead' | 'structure' | 'offline'
+/**
+ * Four-state (plus loading) health, shared by both tables. The per-tab records
+ * table gets its verdict from `lib/rebuild/eligibility`, which is also what
+ * "Rebuild all" acts on, so a badge and a button can never disagree.
+ */
+type Health = RecordHealth
+
+/** What `liveByHost` says about one host, reduced to what the records table needs. */
+function livenessOf(live: HostLive): HostLiveness {
+  if (live === 'loading') return 'loading'
+  if (live === 'offline') return 'offline'
+  return 'online'
+}
 
 /**
  * Reconcile one captured {@link SessionMeta} against its host's live list. Mirrors
  * the engine's reattach rule (code AND name must match — a code-only match is a
  * different session after a tmux restart, so it is NOT "live").
+ *
+ * This is the LEGACY snapshot table's own policy and stays that way: its rows
+ * are `SessionMeta`, not panes, so they carry no `terminated` verdict and no
+ * generation — the live list is the only evidence there is. The per-tab records
+ * table below has both, and decides in `lib/rebuild/eligibility`.
  *
  * Precedence: an unreachable host wins (every row ⚪) → a live code+name match is
  * 🟢 → a non-restorable OR cwd-less entry is ⚠️ (the engine's `ensureSessions`
@@ -89,24 +110,6 @@ function computeHealth(meta: SessionMeta, live: HostLive): Health {
   const match = live.some((s) => s.code === meta.sessionCode && s.name === meta.name)
   if (match) return 'live'
   if (!meta.restorable || !meta.cwd) return 'structure'
-  return 'dead'
-}
-
-/**
- * The same four states over a per-tab rebuild record (spec §4.11). Deliberately
- * the same precedence as {@link computeHealth} — an unreachable host wins, then
- * a live code+name match, then "we could not put it back where it was" — so the
- * two tables in this section never disagree about what a colour means.
- *
- * ⚠️ here is a record with no cwd: Rebuild would open a shell in the wrong
- * directory, which is exactly the "structure only" the snapshot table means.
- */
-function computeRecordHealth(row: RecordRow, live: HostLive): Health {
-  if (live === 'loading') return 'loading'
-  if (live === 'offline') return 'offline'
-  const name = row.record?.sessionName || row.cachedName
-  if (live.some((s) => s.code === row.sessionCode && s.name === name)) return 'live'
-  if (!row.record?.cwd) return 'structure'
   return 'dead'
 }
 
@@ -661,7 +664,7 @@ function RebuildRecordsBlock({
                   <td className="py-1 pr-3 font-mono">{row.record?.resumeCommand || '—'}</td>
                   <td className="py-1">
                     <HealthBadge
-                      health={computeRecordHealth(row, liveByHost[row.hostId] ?? 'loading')}
+                      health={recordHealth(row, livenessOf(liveByHost[row.hostId] ?? 'loading'))}
                       testId={`record-health-${row.paneId}`}
                       t={t}
                     />

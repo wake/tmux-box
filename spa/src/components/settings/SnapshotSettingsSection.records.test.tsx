@@ -134,6 +134,26 @@ describe('SnapshotSettingsSection — per-tab rebuild records (T16)', () => {
     await waitFor(() => {
       expect(screen.getByTestId('record-health-p1').getAttribute('data-health')).toBe('structure')
     })
+    // ⚠️ and "Rebuild all" must mean the same thing: the batch would otherwise
+    // create a session for a record that cannot say where it belongs.
+    expect((screen.getByTestId('record-rebuild-all-btn') as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.queryByTestId('record-attention-rebuild-p1')).toBeNull()
+  })
+
+  it('a dead pane whose code and name were reused by a new session is not live', async () => {
+    // The generation moved (111 → 222) but tmux minted the same code for a
+    // session the user gave the same name. Comparing code+name alone says
+    // 🟢 live while the batch, which reads `terminated`, rebuilds the row.
+    seedTabs(recordTab('t1', 'p1'))
+    mockedListSessions.mockResolvedValue([
+      session({ code: 'old111', name: 'dev', tmux_instance: '222:2000' }),
+    ])
+
+    render(<SnapshotSettingsSection />)
+    await waitFor(() => {
+      expect(screen.getByTestId('record-health-p1').getAttribute('data-health')).toBe('dead')
+    })
+    expect((screen.getByTestId('record-rebuild-all-btn') as HTMLButtonElement).disabled).toBe(false)
   })
 
   it('names the winning pane before running when hand-edits conflict', async () => {

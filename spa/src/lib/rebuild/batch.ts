@@ -15,36 +15,15 @@
 //     down to every group's engine call (`RebuildDeps.lockGrant`). Re-entry is
 //     granted on the strength of that grant alone, never on the owner name —
 //     two independent batches share the name and must not interleave.
-import { collectLeaves } from '../pane-tree'
 import { useTabStore } from '../../stores/useTabStore'
 import { useRebuildStore, type OperationLockGrant, type RebuildBinding } from '../../stores/useRebuildStore'
 import { rebuildPane, repointMember, type RebuildDeps, type RebuildPlan, type RebuildReport } from './engine'
+import { batchCandidates, collectRecordRows, type BatchCandidate, type PaneRef } from './eligibility'
 import { pinHost } from './transport'
-import type { PaneRebuildRecord, Tab, TerminatedReason } from '../../types/tab'
+import type { PaneRebuildRecord, Tab } from '../../types/tab'
 
 /** The batch's lock owner. One name for the whole run, per rule 3 above. */
 export const BATCH_LOCK_OWNER = 'rebuild:batch'
-
-/** Where a pane lives and what session generation it is bound to. */
-export interface PaneRef {
-  paneId: string
-  tabId: string
-  hostId: string
-  sessionCode: string
-  tmuxInstance: string
-}
-
-/** One row of the Snapshot section's records table — every terminal tmux pane. */
-export interface RecordRow extends PaneRef {
-  cachedName: string
-  terminated?: TerminatedReason
-  record?: PaneRebuildRecord
-}
-
-/** A row the batch can actually act on: dead, on a live host, with a record. */
-export interface BatchCandidate extends PaneRef {
-  record: PaneRebuildRecord
-}
 
 export interface BatchGroup extends PaneRef {
   /** Every pane re-pointed to this group's result, in collection order. */
@@ -79,49 +58,6 @@ export interface BatchReport {
   blockedBy?: string
   groups: BatchGroupResult[]
   excluded: BatchCandidate[]
-}
-
-/**
- * Every terminal `tmux-session` pane in the workspace, live ones included —
- * the table shows the whole picture, the batch acts on part of it.
- * Stream panes are out of scope for the whole feature.
- */
-export function collectRecordRows(tabs: Record<string, Tab>): RecordRow[] {
-  const rows: RecordRow[] = []
-  for (const tab of Object.values(tabs)) {
-    for (const pane of collectLeaves(tab.layout)) {
-      const content = pane.content
-      if (content.kind !== 'tmux-session' || content.mode !== 'terminal') continue
-      rows.push({
-        paneId: pane.id,
-        tabId: tab.id,
-        hostId: content.hostId,
-        sessionCode: content.sessionCode,
-        tmuxInstance: content.tmuxInstance,
-        cachedName: content.cachedName,
-        terminated: content.terminated,
-        record: content.rebuild,
-      })
-    }
-  }
-  return rows
-}
-
-/**
- * The rows "Rebuild all" may act on: a dead pane that still carries a record.
- *
- * `host-removed` is not one of them — the host it belonged to is gone, so
- * there is nothing to create the session on (`pinHost` would refuse), and the
- * action set says so on the pane itself.
- */
-export function batchCandidates(rows: RecordRow[]): BatchCandidate[] {
-  const candidates: BatchCandidate[] = []
-  for (const row of rows) {
-    if (!row.terminated || row.terminated === 'host-removed' || !row.record) continue
-    const { cachedName: _cachedName, terminated: _terminated, record, ...ref } = row
-    candidates.push({ ...ref, record })
-  }
-  return candidates
 }
 
 /** The plan a batched group runs with. Unverified exact resumes are skipped (§9.1). */

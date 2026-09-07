@@ -2,12 +2,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
   BATCH_LOCK_OWNER,
-  batchCandidates,
-  collectRecordRows,
   groupForBatch,
   runBatchRebuild,
-  type BatchCandidate,
 } from './batch'
+import type { BatchCandidate } from './eligibility'
 import { useRebuildStore } from '../../stores/useRebuildStore'
 import { useHostStore } from '../../stores/useHostStore'
 import { useTabStore } from '../../stores/useTabStore'
@@ -163,42 +161,6 @@ function resetStores() {
   useSessionStore.setState({ sessions: {}, activeHostId: null, activeCode: null })
   useTabStore.setState({ tabs: {}, tabOrder: [], activeTabId: null })
 }
-
-// ---------------------------------------------------------------------------
-// collectRecordRows / batchCandidates
-// ---------------------------------------------------------------------------
-
-describe('collectRecordRows', () => {
-  beforeEach(resetStores)
-
-  it('collects every terminal tmux pane across tabs, live ones included', () => {
-    seedPane('h1', 't1', 'p1')
-    seedPane('h1', 't2', 'p2', {}, { terminated: undefined })
-    const rows = collectRecordRows(useTabStore.getState().tabs)
-    expect(rows.map((r) => r.paneId)).toEqual(['p1', 'p2'])
-    expect(rows[1].terminated).toBeUndefined()
-  })
-
-  it('ignores stream panes and non-tmux panes', () => {
-    seedPane('h1', 't1', 'p1', {}, { mode: 'stream' })
-    useTabStore.setState({
-      tabs: {
-        ...useTabStore.getState().tabs,
-        t2: { id: 't2', pinned: false, locked: false, createdAt: 0,
-              layout: { type: 'leaf', pane: { id: 'p2', content: { kind: 'new-tab' } } } },
-      },
-    })
-    expect(collectRecordRows(useTabStore.getState().tabs)).toEqual([])
-  })
-
-  it('keeps only dead panes that still carry a record as batch candidates', () => {
-    seedPane('h1', 't1', 'p1')
-    seedPane('h1', 't2', 'p2', {}, { terminated: undefined })          // live
-    seedPane('h1', 't3', 'p3', {}, { rebuild: undefined })             // no record
-    seedPane('h1', 't4', 'p4', {}, { terminated: 'host-removed' })     // no host to build on
-    expect(batchCandidates(collectRecordRows(useTabStore.getState().tabs)).map((c) => c.paneId)).toEqual(['p1'])
-  })
-})
 
 // ---------------------------------------------------------------------------
 // runBatchRebuild — the orchestration the grouping exists for
