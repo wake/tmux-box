@@ -1060,8 +1060,16 @@ Set it in exactly one place — the `created_frame` / `updated_frame` return at
 ```
 
 where `verdict` is the `classifyAncestor` result computed once at the top of
-the `LifecycleSessionStart` handling — replace the existing `findProxyParent`
-call on that path with it so the walk still runs exactly once.
+the `LifecycleSessionStart` handling.
+
+⚠️ **Hoist it above the `frame == nil` guard.** The existing `findProxyParent`
+call sits inside `if lifecycle == LifecycleSessionStart && frame == nil`, so
+merely swapping that call would leave a SessionStart on an **existing** frame
+without a verdict — and that is precisely the `/clear` case rule 4 requires to
+be granted provenance. Compute the verdict under `if lifecycle ==
+LifecycleSessionStart` (any frame state) and keep the proxy fast-path gated on
+`frame == nil`. Cost is one extra `readProcessInfoFn` per
+SessionStart-on-existing-frame.
 
 The two proxy paths return **before** reaching this site: the pre-Upsert
 fast-path returns at `frame_ops.go:572-600` and the post-Upsert reconcile
