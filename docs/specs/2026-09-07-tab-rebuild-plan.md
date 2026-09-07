@@ -58,7 +58,7 @@ generation-aware and accumulate the record in the persisted tab store. Phase
 |---|---|
 | `internal/module/agent/ancestor.go` *(new)* | `AncestorVerdict` + `classifyAncestor` — the single pane-ancestor traversal |
 | `internal/module/agent/frame_ops.go` *(modify)* | `findProxyParent` becomes a thin caller; envelope gated on mutation outcome |
-| `internal/module/agent/provenance.go` *(new)* | Builds the `pdx_provenance` map from a request + mutation outcome |
+| `internal/module/agent/provenance.go` *(new, Task 5)* | Builds the `pdx_provenance` map from a request + mutation outcome |
 | `internal/agent/{cc,codex,opencode}/status.go` *(modify)* | `SessionStart` passes `session_id` / `cwd` through `Detail` |
 | `internal/agent/opencode/plugin_template.go` *(modify)* | Plugin emits `cwd` |
 | `internal/module/session/{provider,service}.go` *(modify)* | `SessionInfo.TmuxInstance` |
@@ -584,7 +584,7 @@ If `cwd` is wrong or absent, fix the plugin before proceeding — the fallback
 - [ ] **Step 5: Commit**
 
 ```bash
-git add internal/agent/opencode/plugin_template.go internal/agent/opencode/plugin_template_contract_test.go
+git add internal/agent/opencode/plugin_template.go internal/agent/opencode/plugin_template_contract_test.go internal/agent/opencode/plugin_template_bun_integration_test.go
 git commit -m "feat(opencode): plugin reports cwd on session start"
 ```
 
@@ -600,8 +600,9 @@ git commit -m "feat(opencode): plugin reports cwd on session start"
 
 **Interfaces:**
 - Produces: `SessionInfo.TmuxInstance` (JSON `tmux_instance`) on every
-  `/api/sessions` response and every `sessions` WS broadcast. Tasks 6, 7 and
-  11 read it.
+  `/api/sessions` response and every `sessions` WS broadcast, plus
+  `SessionProvider.TmuxInstance()`. **Task 5** stamps the envelope with it;
+  Tasks 6 and 11 read the wire field.
 
 **Context — why the hash must include it:** `hashSessions`
 (`watcher.go:213-217`) hashes only the marshalled list. A tmux restart between
@@ -621,16 +622,24 @@ changes the hash again, so it self-heals.
 // tickNormal broadcasts directly (watcher.go:84-88), bypassing the 500ms
 // debounce that broadcastSessions applies, so back-to-back ticks are fine.
 
-func drainSessions(t *testing.T, sub *core.TestSubscriber) []string {
+// `events.AddTestSubscriber()` returns *core.EventSubscriber
+// (internal/core/events.go:139). Frames are the outer envelope, so parse it and
+// keep only the sessions events before asserting on the inner JSON.
+func drainSessions(t *testing.T, sub *core.EventSubscriber) []string {
 	t.Helper()
 	var out []string
 	timeout := time.After(100 * time.Millisecond)
 	for {
 		select {
 		case msg := <-sub.SendCh():
-			if len(msg) > 0 {
-				out = append(out, string(msg))
+			var env struct {
+				Type  string `json:"type"`
+				Value string `json:"value"`
 			}
+			if err := json.Unmarshal(msg, &env); err != nil || env.Type != "sessions" {
+				continue
+			}
+			out = append(out, env.Value)
 		case <-timeout:
 			return out
 		}
@@ -743,8 +752,21 @@ with
 	TmuxInstance() string
 ```
 
-so Task 5 has a real source. Add the same method to any fake implementing
-`SessionProvider` in the agent module's tests.
+so Task 5 has a real source. **Every implementer must gain the method in this
+same commit** or the build breaks:
+
+| Implementer | Location |
+|---|---|
+| `session.SessionModule` (real) | `internal/module/session/module.go:60` |
+| agent `fakeSessionProvider` | `internal/module/agent/fakes_test.go:18` |
+| agent `fakeFastSessionProvider` | `internal/module/agent/fast_path_test.go:21` |
+| fs `fakeSessionProvider` | `internal/module/fs/module_test.go:16` |
+| stream `fakeSessionProvider` | `internal/module/stream/handler_test.go:21` |
+
+The monitor module declares its own narrow interface
+(`internal/module/monitor/module.go:31`) and is unaffected. The fakes can
+return a fixed string; the agent fakes need a settable field so Task 5's tests
+can assert the stamped value.
 
 Add the seam on the module (`module.go`), defaulting to the real reader:
 
@@ -803,7 +825,7 @@ Expected: PASS
 
 ```bash
 go test ./...
-git add internal/module/session/
+git add internal/module/session/ internal/module/agent/fakes_test.go internal/module/agent/fast_path_test.go internal/module/fs/module_test.go internal/module/stream/handler_test.go
 git commit -m "feat(session): stamp the tmux generation on session payloads"
 ```
 
@@ -1008,7 +1030,7 @@ a large diff and easy to get wrong. Instead add **one nullable field**:
 	// pre-Upsert proxy fast-path and the post-Upsert reconcile. Every other
 	// return path leaves it nil by zero value, which is the fail-safe: no
 	// field set, no envelope emitted.
-	Provenance *agentpkg.Provenance
+	Provenance *Provenance
 ```
 
 Every existing construction site keeps compiling untouched and yields `nil`.
@@ -1016,7 +1038,7 @@ Set it in exactly one place — the `created_frame` / `updated_frame` return at
 `frame_ops.go:860-880`, after `reason` and `decision` are computed:
 
 ```go
-	var prov *agentpkg.Provenance
+	var prov *Provenance
 	if lifecycle == agentpkg.LifecycleSessionStart && !req.SenderUncertain &&
 		verdict == VerdictRoot && stored.ParentFrameID == "" {
 		p := buildProvenance(req, result, m.sessionTmuxInstance())
@@ -1283,7 +1305,7 @@ Expected: PASS (full suite)
 
 ```bash
 pnpm --prefix spa run lint
-git add spa/src/lib/host-api.ts spa/src/lib/rebuild/reconcile.ts spa/src/stores/useTabStore.ts spa/src/hooks/useMultiHostEventWs.ts spa/src/stores/useTabStore.generation.test.ts spa/src/hooks/useMultiHostEventWs.generation.test.ts
+git add spa/src/lib/host-api.ts spa/src/lib/rebuild/reconcile.ts spa/src/stores/useTabStore.ts spa/src/hooks/useMultiHostEventWs.ts spa/src/components/SessionSection.tsx spa/src/components/hosts/SessionsSection.tsx spa/src/components/SessionPickerList.tsx spa/src/components/TerminatedPane.tsx spa/src/features/workspace/components/WorkspaceQuickActionsPopover.tsx spa/src/features/workspace/components/WorkspaceQuickCommandsContextMenu.tsx spa/src/hooks/useNotificationDispatcher.ts spa/src/stores/useTabStore.generation.test.ts spa/src/hooks/useMultiHostEventWs.generation.test.ts
 git commit -m "feat(spa): detect tmux restarts by generation, not code absence"
 ```
 
@@ -1292,10 +1314,10 @@ git commit -m "feat(spa): detect tmux restarts by generation, not code absence"
 ### Task 7: Gate terminal attach on the current connection epoch
 
 **Files:**
-- Modify: `spa/src/stores/useHostStore.ts` (`HostRuntime` gains
-  `sessionsEpoch`, `attachReady`)
-- Modify: `spa/src/hooks/useMultiHostEventWs.ts` (bump epoch on connect,
-  set `attachReady` on the first payload of that epoch)
+- Modify: `spa/src/stores/useHostStore.ts` (`HostRuntime` gains `attachReady`)
+- Modify: `spa/src/lib/host-events.ts` (socket epoch + ticket-await re-check)
+- Modify: `spa/src/lib/ws.ts:20-32` (gate re-check after the ticket await)
+- Modify: `spa/src/hooks/useMultiHostEventWs.ts` (open/close `attachReady`)
 - Modify: `spa/src/hooks/useTerminalWs.ts:51-58` **and its `connectTerminal`
   call site**
 - Test: `spa/src/hooks/useTerminalWs.gate.test.ts`
@@ -1319,81 +1341,54 @@ git commit -m "feat(spa): detect tmux restarts by generation, not code absence"
    `canAttachTerminal(hostId)` is true (re-running the effect when it flips),
    and `canReconnect` keeps it for retries.
 
-**Epoch contract.** `connectHostEvents` (`spa/src/lib/host-events.ts:57-61`)
-invokes its callback with no source identity, so the epoch cannot be recovered
-inside the callback. Capture it in the closure: `useMultiHostEventWs`
-increments a counter when it creates a connection, closes over that number, and
-every payload handler compares its captured value against
-`runtime[hostId].sessionsEpoch`, returning early on a mismatch — which makes a
-message from a superseded socket inert without the transport identifying
-itself.
-
-- [ ] **Step 1: Write the failing test**
+**Epoch contract — filter inside the transport, not at the consumer.**
+`reconnect` / `reconnectWithTicket` (`host-events.ts:80-94`) reuse the **same**
+connection object and the **same** `onEvent` closure; they only null the old
+socket's `onclose` and open a new one. So a closure-captured epoch on the
+consumer side would reject the *new* socket's payloads too. Put the epoch
+inside `connectHostEvents` instead, where each socket's handlers are created:
 
 ```ts
-// spa/src/hooks/useTerminalWs.gate.test.ts
-import { describe, it, expect, beforeEach } from 'vitest'
-import { useHostStore } from '../stores/useHostStore'
-import { canAttachTerminal } from '../lib/rebuild/attach-gate'
+// spa/src/lib/host-events.ts
+let socketEpoch = 0
 
-describe('canAttachTerminal', () => {
-  beforeEach(() => useHostStore.setState({ runtime: {} }))
-
-  it('blocks before the first sessions payload of this connection', () => {
-    useHostStore.setState({ runtime: { h1: { status: 'connected', attachReady: false } } })
-    expect(canAttachTerminal('h1')).toBe(false)
-  })
-
-  it('allows once the payload for this epoch landed', () => {
-    useHostStore.setState({ runtime: { h1: { status: 'connected', attachReady: true } } })
-    expect(canAttachTerminal('h1')).toBe(true)
-  })
-
-  it('blocks again after a reconnect closes the gate', () => {
-    useHostStore.setState({ runtime: { h1: { status: 'connected', attachReady: true } } })
-    useHostStore.getState().setRuntime('h1', { attachReady: false })
-    expect(canAttachTerminal('h1')).toBe(false)
-  })
-
-  it('does not block a host that is merely offline (no spinner lock)', () => {
-    useHostStore.setState({ runtime: { h1: { status: 'disconnected', attachReady: false } } })
-    expect(canAttachTerminal('h1')).toBe(false)
-  })
-})
+async function connect() {
+  // Claim an epoch BEFORE the await so a slower ticket cannot resurrect a
+  // superseded attempt (reconnectWithTicket bumps it again immediately).
+  const myEpoch = ++socketEpoch
+  const ticket = pendingTicket ?? (getTicket ? await getTicket().catch(() => null) : null)
+  pendingTicket = undefined
+  if (closed || myEpoch !== socketEpoch) return   // ← the ticket-await re-check
+  // …create the socket…
+  ws.onmessage = (e) => {
+    if (myEpoch !== socketEpoch) return           // ← stale socket's queued frames
+    // …existing parse + onEvent(event)…
+  }
+}
 ```
 
-- [ ] **Step 2: Run to verify failure**
+With the filter here, a superseded socket's frames never reach `onEvent`, so
+`useMultiHostEventWs` needs no epoch parameter and its signature is unchanged.
+`runtime.sessionsEpoch` is then only a diagnostic and can be dropped from
+`HostRuntime`.
 
-Run: `pnpm --prefix spa exec vitest run gate`
-Expected: FAIL — module not found.
-
-- [ ] **Step 3: Implement**
-
-Add `attachReady?: boolean` and `sessionsEpoch?: number` to `HostRuntime`.
-Create `spa/src/lib/rebuild/attach-gate.ts`:
+Apply the same post-await re-check to the terminal transport: `ws.ts:20-32`
+resolves its ticket and then checks only `closed` before `setupWs`. Add the
+gate re-check immediately before the socket is created:
 
 ```ts
-import { useHostStore } from '../../stores/useHostStore'
-
-/**
- * A terminal may attach only after a sessions payload from the CURRENT host
- * connection has been reconciled. Session codes are reused across tmux server
- * restarts, so attaching on connection status alone can bind a pane to an
- * unrelated session. See spec §4.6.
- */
-export function canAttachTerminal(hostId: string): boolean {
-  return useHostStore.getState().runtime[hostId]?.attachReady === true
-}
+  if (closed) return
+  if (canReconnect && !canReconnect()) { scheduleRetry(); return }   // gate closed while awaiting
+  setupWs(wsUrl)
 ```
 
 Sequence per host in `useMultiHostEventWs`:
 
-- **starting a connection (initial or retry):** bump `sessionsEpoch`, set
-  `attachReady: false`;
+- **starting a connection (initial or retry):** set `attachReady: false`;
 - **socket closed / error:** set `attachReady: false` immediately (do not wait
   for the next open);
-- **`sessions` payload whose captured epoch matches, after reconciliation:**
-  set `attachReady: true`.
+- **any `sessions` payload, after reconciliation:** set `attachReady: true` —
+  stale payloads can no longer arrive, so no epoch comparison is needed here.
 
 In `useTerminalWs`, subscribe to `runtime[hostId]?.attachReady` and skip the
 `connectTerminal` call while it is false; also add
@@ -1414,11 +1409,47 @@ it('constructs no terminal socket until the gate opens', async () => {
   await waitFor(() => expect(ctor).toHaveBeenCalledTimes(1))
 })
 
-it('ignores a sessions payload from a superseded epoch', () => {
-  const handler = makeSessionsHandler('h1', 1)   // handler captured at epoch 1
-  useHostStore.setState({ runtime: { h1: { sessionsEpoch: 2 } } })
-  handler(JSON.stringify([{ code: 'abc123', name: 'stale', tmux_instance: '111:1000' }]))
-  expect(useHostStore.getState().runtime.h1.attachReady).not.toBe(true)
+// spa/src/lib/host-events.epoch.test.ts — transport-level, where the fix lives.
+it('drops frames from a socket that reconnect superseded', () => {
+  const onEvent = vi.fn()
+  const sockets: FakeSocket[] = []
+  vi.stubGlobal('WebSocket', class extends FakeSocket { constructor(u: string) { super(u); sockets.push(this) } })
+
+  const conn = connectHostEvents('ws://h/events', onEvent)
+  conn.reconnect()                       // second socket supersedes the first
+  sockets[0].emit(JSON.stringify({ type: 'sessions', value: '[]' }))
+  expect(onEvent).not.toHaveBeenCalled()
+
+  sockets[1].emit(JSON.stringify({ type: 'sessions', value: '[]' }))
+  expect(onEvent).toHaveBeenCalledTimes(1)
+})
+
+it('abandons a connect whose ticket resolved after a newer connect started', async () => {
+  let releaseTicket!: (t: string) => void
+  const getTicket = () => new Promise<string>((r) => { releaseTicket = r })
+  const sockets: FakeSocket[] = []
+  vi.stubGlobal('WebSocket', class extends FakeSocket { constructor(u: string) { super(u); sockets.push(this) } })
+
+  const conn = connectHostEvents('ws://h/events', vi.fn(), { getTicket })
+  conn.reconnectWithTicket('fresh')      // supersedes the pending first attempt
+  releaseTicket('stale')
+  await Promise.resolve()
+  expect(sockets.filter((s) => s.url.includes('ticket=stale'))).toHaveLength(0)
+})
+
+// spa/src/hooks/useTerminalWs.gate.test.ts
+it('does not attach when the gate closed while the ticket was in flight', async () => {
+  const ctor = vi.fn()
+  vi.stubGlobal('WebSocket', class { constructor(url: string) { ctor(url) } close() {} } as never)
+  let releaseTicket!: (t: string) => void
+  mockTicket(() => new Promise<string>((r) => { releaseTicket = r }))
+  useHostStore.setState({ runtime: { h1: { status: 'connected', attachReady: true } } })
+  renderTerminalPane('h1', 'abc123')
+
+  act(() => { useHostStore.getState().setRuntime('h1', { attachReady: false }) })
+  releaseTicket('tk')
+  await Promise.resolve()
+  expect(ctor).not.toHaveBeenCalled()
 })
 ```
 
@@ -1431,7 +1462,7 @@ Expected: PASS
 
 ```bash
 pnpm --prefix spa run lint
-git add spa/src/lib/rebuild/attach-gate.ts spa/src/stores/useHostStore.ts spa/src/hooks/useMultiHostEventWs.ts spa/src/hooks/useTerminalWs.ts spa/src/hooks/useTerminalWs.gate.test.ts
+git add spa/src/lib/rebuild/attach-gate.ts spa/src/stores/useHostStore.ts spa/src/lib/host-events.ts spa/src/lib/host-events.epoch.test.ts spa/src/lib/ws.ts spa/src/hooks/useMultiHostEventWs.ts spa/src/hooks/useTerminalWs.ts spa/src/hooks/useTerminalWs.gate.test.ts
 git commit -m "feat(spa): gate terminal attach on the current connection's session payload"
 ```
 
@@ -1703,8 +1734,12 @@ empty-instance compatibility rule, and refreshes both `cachedName` and
 `rebuild.sessionName`. Without the generation match, a rename broadcast from a
 new tmux server would write the new name onto the old pane the reconciler is
 about to mark dead — and pollute its `rebuild.sessionName`, which is what the
-rebuild would then use. Update the caller in `useMultiHostEventWs.ts:108` to
-pass the session's `tmux_instance`. Add these tests:
+rebuild would then use. Update **every** caller to pass a generation:
+`useMultiHostEventWs.ts:108` (the session's `tmux_instance`),
+`spa/src/features/workspace/hooks.ts:183` (the renamed session's
+`tmux_instance`, or the pane's own recorded instance when the daemon response
+does not carry one), and the five call sites in
+`spa/src/stores/useTabStore.test.ts:381,395,409,424,436`. Add these tests:
 
 ```ts
   it('a rename follows into the rebuild record', () => {
@@ -1742,7 +1777,7 @@ Expected: PASS
 
 ```bash
 pnpm --prefix spa run lint
-git add spa/src/types/tab.ts spa/src/stores/useTabStore.ts spa/src/stores/useTabStore.rebuild.test.ts
+git add spa/src/types/tab.ts spa/src/stores/useTabStore.ts spa/src/stores/useTabStore.rebuild.test.ts spa/src/stores/useTabStore.test.ts spa/src/features/workspace/hooks.ts spa/src/hooks/useMultiHostEventWs.ts
 git commit -m "feat(spa): add the per-pane rebuild record and its writer ranking"
 ```
 
@@ -2028,7 +2063,7 @@ Expected: PASS
 
 ```bash
 pnpm --prefix spa run lint
-git add spa/src/lib/rebuild/provenance.ts spa/src/lib/rebuild/provenance.test.ts spa/src/stores/useAgentStore.ts spa/src/stores/useAgentStore.provenance.test.ts spa/src/hooks/useMultiHostEventWs.ts
+git add spa/src/lib/rebuild/provenance.ts spa/src/lib/rebuild/provenance.test.ts spa/src/stores/useAgentStore.ts spa/src/stores/useAgentStore.provenance.test.ts spa/src/hooks/useMultiHostEventWs.ts spa/src/components/SessionPaneContent.tsx
 git commit -m "feat(spa): populate the rebuild record from the provenance envelope"
 ```
 
@@ -2645,11 +2680,6 @@ it('opens on a real double-click when the primary pane is an editor', async () =
 })
 
 it('collects one target per terminal pane', () => {
-  const tab = seedSplitTab([
-    { kind: 'editor', source: 'local', filePath: '/a.md' },
-    { kind: 'tmux-session', hostId: 'h1', sessionCode: 'abc123', mode: 'terminal',
-      cachedName: 'dev', tmuxInstance: '111:1000' },
-  ])
   const tab = seedSplitTab([
     { kind: 'editor', source: 'local', filePath: '/a.md' },
     { kind: 'tmux-session', hostId: 'h1', sessionCode: 'abc123', mode: 'terminal',
