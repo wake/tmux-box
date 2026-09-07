@@ -13,15 +13,6 @@ import (
 	"testing"
 )
 
-func readRawTraceRoot(t *testing.T, db *sql.DB, chainID string) string {
-	t.Helper()
-	var root string
-	if err := db.QueryRow(`SELECT root_payload_json FROM agent_trace_chains WHERE chain_id = ?`, chainID).Scan(&root); err != nil {
-		t.Fatalf("read raw root: %v", err)
-	}
-	return root
-}
-
 // dedupTestStore returns a store with limits high enough that pruning never
 // interferes with dedup assertions.
 func dedupTestStore(t *testing.T) *TraceStore {

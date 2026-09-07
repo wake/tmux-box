@@ -93,6 +93,15 @@ func readRawTraceSteps(t *testing.T, db *sql.DB, chainID string) []rawTraceStep 
 	return out
 }
 
+func readRawTraceRoot(t *testing.T, db *sql.DB, chainID string) string {
+	t.Helper()
+	var root string
+	if err := db.QueryRow(`SELECT root_payload_json FROM agent_trace_chains WHERE chain_id = ?`, chainID).Scan(&root); err != nil {
+		t.Fatalf("read raw root: %v", err)
+	}
+	return root
+}
+
 // assertRawShape pins both the chain's stored root payload and every step row.
 func assertRawShape(t *testing.T, db *sql.DB, chainID, wantRoot string, want []rawTraceStep) {
 	t.Helper()
