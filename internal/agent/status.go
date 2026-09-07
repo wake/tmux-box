@@ -27,6 +27,19 @@ type DeriveResult struct {
 	Reason string
 }
 
+// DetailStrings copies only the non-empty string-valued keys present in raw
+// into a new map, so an absent key stays absent rather than serializing as
+// null in the WS payload's detail object.
+func DetailStrings(raw map[string]any, keys ...string) map[string]any {
+	out := make(map[string]any, len(keys))
+	for _, k := range keys {
+		if v, ok := raw[k].(string); ok && v != "" {
+			out[k] = v
+		}
+	}
+	return out
+}
+
 // NormalizedEvent is broadcast to WS subscribers.
 type NormalizedEvent struct {
 	AgentType    string         `json:"agent_type"`

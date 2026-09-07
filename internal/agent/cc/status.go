@@ -19,6 +19,7 @@ func deriveCCStatus(purdexName string, rawEvent json.RawMessage) agent.DeriveRes
 			Valid:  true,
 			Status: agent.StatusIdle,
 			Model:  strVal(raw, "modelName"),
+			Detail: agent.DetailStrings(raw, "session_id", "cwd"),
 		}
 
 	case "PdxUserPromptSubmit":

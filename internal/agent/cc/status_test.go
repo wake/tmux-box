@@ -242,3 +242,47 @@ func TestDeriveCCStatus_LegacySessionStart_Invalid(t *testing.T) {
 		}
 	}
 }
+
+// TestDeriveCCStatus_SessionStart_CarriesProvenance pins the observed cc
+// SessionStart payload (spec 3.1): session_id and cwd sit at the top level of
+// raw_event and must reach Detail so the frame layer can build the rebuild
+// record.
+func TestDeriveCCStatus_SessionStart_CarriesProvenance(t *testing.T) {
+	r := deriveViaProvider("PdxSessionStart", map[string]any{
+		"session_id": "441c80d5",
+		"cwd":        "/w/csp",
+		"source":     "startup",
+		"modelName":  "opus",
+	})
+	if !r.Valid {
+		t.Fatalf("Valid = false, got %+v", r)
+	}
+	if r.Detail["session_id"] != "441c80d5" {
+		t.Fatalf("session_id = %v", r.Detail["session_id"])
+	}
+	if r.Detail["cwd"] != "/w/csp" {
+		t.Fatalf("cwd = %v", r.Detail["cwd"])
+	}
+}
+
+// TestDeriveCCStatus_SessionStart_OmitsAbsentKeys guards the wire shape: an
+// absent key must stay absent from Detail rather than present with a nil
+// value, which would serialize as "session_id": null.
+func TestDeriveCCStatus_SessionStart_OmitsAbsentKeys(t *testing.T) {
+	r := deriveViaProvider("PdxSessionStart", map[string]any{"source": "startup"})
+	if _, ok := r.Detail["session_id"]; ok {
+		t.Fatalf("session_id present for a payload that has none: %+v", r.Detail)
+	}
+	if _, ok := r.Detail["cwd"]; ok {
+		t.Fatalf("cwd present for a payload that has none: %+v", r.Detail)
+	}
+}
+
+// TestDeriveCCStatus_SessionStart_CompactStillIgnored keeps the cc-only
+// compact early return above the provenance passthrough.
+func TestDeriveCCStatus_SessionStart_CompactStillIgnored(t *testing.T) {
+	r := deriveViaProvider("PdxSessionStart", map[string]any{"source": "compact", "session_id": "x"})
+	if r.Valid {
+		t.Fatalf("compact must stay Valid=false, got %+v", r)
+	}
+}

@@ -164,3 +164,30 @@ func TestOpenCodeDeriveStatus_LegacyNames_Invalid(t *testing.T) {
 		}
 	}
 }
+
+// TestOpenCodeDeriveStatus_SessionStart_CarriesProvenance — the plugin emits
+// session_id today and cwd from Task 3 on; both pass through Detail.
+func TestOpenCodeDeriveStatus_SessionStart_CarriesProvenance(t *testing.T) {
+	r := deriveViaProvider("PdxSessionStart", map[string]any{
+		"session_id": "ses_abc123",
+		"cwd":        "/w/purdex",
+	})
+	if !r.Valid {
+		t.Fatalf("Valid = false, got %+v", r)
+	}
+	if r.Detail["session_id"] != "ses_abc123" {
+		t.Fatalf("session_id = %v", r.Detail["session_id"])
+	}
+	if r.Detail["cwd"] != "/w/purdex" {
+		t.Fatalf("cwd = %v", r.Detail["cwd"])
+	}
+}
+
+// TestOpenCodeDeriveStatus_SessionStart_OmitsAbsentKeys — the plugin does not
+// emit cwd until Task 3, so the key must be absent rather than null.
+func TestOpenCodeDeriveStatus_SessionStart_OmitsAbsentKeys(t *testing.T) {
+	r := deriveViaProvider("PdxSessionStart", map[string]any{"session_id": "ses_abc123"})
+	if _, ok := r.Detail["cwd"]; ok {
+		t.Fatalf("cwd present for a payload that has none: %+v", r.Detail)
+	}
+}
