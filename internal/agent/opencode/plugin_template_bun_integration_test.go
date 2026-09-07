@@ -203,3 +203,174 @@ func TestRenderManagedPlugin_BunRuntimeGatesChildSessionLifecycle(t *testing.T) 
 		}
 	}
 }
+
+// capturedEmit is one row of the JSONL capture the stub pdx writes:
+// the event name from argv[4] plus the decoded stdin payload.
+type capturedEmit struct {
+	Name    string
+	Payload map[string]any
+}
+
+// requireBun applies the same four skip gates the older runtime tests use
+// inline and returns the resolved bun path. Skips (never fails) so a single
+// `go test ./...` still works on a host without Bun.
+func requireBun(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("opencode plugin runtime is POSIX-only; skipping real-Bun integration test")
+	}
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skipf("/bin/sh unavailable (%v); skipping real-Bun integration test", err)
+	}
+	bunPath, err := exec.LookPath("bun")
+	if err != nil {
+		t.Skip("bun not on PATH; skipping real-Bun integration test")
+	}
+	if out, err := exec.Command(bunPath, "--version").Output(); err != nil || strings.TrimSpace(string(out)) == "" {
+		t.Skipf("bun --version failed (%v); skipping real-Bun integration test", err)
+	}
+	return bunPath
+}
+
+// runRenderedPluginUnderBun renders the managed plugin against a stub pdx
+// that appends "<eventName>\t<stdin>\n" per invocation, appends `tail`
+// (which must drive the hooks), executes it with `bun` from workDir, and
+// returns the captured emits in order.
+func runRenderedPluginUnderBun(t *testing.T, bunPath, tail, workDir string) []capturedEmit {
+	t.Helper()
+	tmp := t.TempDir()
+	stubPath := filepath.Join(tmp, "pdx-stub")
+	capturePath := filepath.Join(tmp, "events-capture")
+	stubBody := "#!/bin/sh\nprintf '%s\\t' \"$4\" >> \"$PDX_TEST_EVENT_CAPTURE\"\ncat >> \"$PDX_TEST_EVENT_CAPTURE\"\nprintf '\\n' >> \"$PDX_TEST_EVENT_CAPTURE\"\n"
+	if err := os.WriteFile(stubPath, []byte(stubBody), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+	if err := os.Chmod(stubPath, 0o755); err != nil {
+		t.Fatalf("chmod stub: %v", err)
+	}
+
+	scriptPath := filepath.Join(tmp, "plugin.mjs")
+	if err := os.WriteFile(scriptPath, []byte(renderManagedPlugin(stubPath)+tail), 0o644); err != nil {
+		t.Fatalf("write plugin.mjs: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bunPath, scriptPath)
+	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(), "PDX_TEST_EVENT_CAPTURE="+capturePath)
+	if output, runErr := cmd.CombinedOutput(); runErr != nil {
+		t.Fatalf("unexpected bun failure: err=%v output=%s", runErr, string(output))
+	}
+
+	raw, err := os.ReadFile(capturePath)
+	if err != nil {
+		t.Fatalf("read capture: %v", err)
+	}
+	var out []capturedEmit
+	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		name, payloadJSON, found := strings.Cut(line, "\t")
+		if !found {
+			t.Fatalf("malformed capture row (no tab): %q", line)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+			t.Fatalf("unmarshal payload for %q: %v (raw=%q)", name, err, payloadJSON)
+		}
+		out = append(out, capturedEmit{Name: name, Payload: payload})
+	}
+	return out
+}
+
+// TestRenderManagedPlugin_BunRuntimeEmitsCwd proves at runtime — not by
+// source substring — that PdxSessionStart carries the working directory
+// the tab-rebuild record needs (spec 2026-09-07 §3.1 / §4.2), that the
+// process-cwd fallback works when opencode hands the plugin nothing, and
+// that a child session still never produces a second PdxSessionStart.
+func TestRenderManagedPlugin_BunRuntimeEmitsCwd(t *testing.T) {
+	bunPath := requireBun(t)
+
+	t.Run("directory_from_plugin_input", func(t *testing.T) {
+		// opencode calls Plugin(input) with input.directory set; the emitted
+		// cwd must be exactly that, not the plugin process cwd.
+		const tail = `
+;(async () => {
+  const hooks = await PurdexOpenCodeHooks({ directory: '/tmp/pdx-project-dir', worktree: '/tmp/pdx-worktree' })
+  await hooks.event({ event: { type: 'session.created', properties: { sessionID: 'parent1', info: { id: 'parent1' } } } })
+})()
+`
+		emits := runRenderedPluginUnderBun(t, bunPath, tail, t.TempDir())
+		if len(emits) != 1 || emits[0].Name != "PdxSessionStart" {
+			t.Fatalf("captured = %+v, want exactly one PdxSessionStart", emits)
+		}
+		if got, _ := emits[0].Payload["cwd"].(string); got != "/tmp/pdx-project-dir" {
+			t.Fatalf("cwd = %q, want %q (payload=%+v)", got, "/tmp/pdx-project-dir", emits[0].Payload)
+		}
+		if got, _ := emits[0].Payload["session_id"].(string); got != "parent1" {
+			t.Fatalf("session_id = %q, want parent1", got)
+		}
+	})
+
+	t.Run("falls_back_to_process_cwd", func(t *testing.T) {
+		// No plugin input at all (older opencode, or a loader that passes
+		// nothing): the plugin must still report a usable directory.
+		workDir := t.TempDir()
+		resolved, err := filepath.EvalSymlinks(workDir)
+		if err != nil {
+			t.Fatalf("resolve workdir: %v", err)
+		}
+		const tail = `
+;(async () => {
+  const hooks = await PurdexOpenCodeHooks()
+  await hooks.event({ event: { type: 'session.created', properties: { sessionID: 'parent1', info: { id: 'parent1' } } } })
+})()
+`
+		emits := runRenderedPluginUnderBun(t, bunPath, tail, workDir)
+		if len(emits) != 1 || emits[0].Name != "PdxSessionStart" {
+			t.Fatalf("captured = %+v, want exactly one PdxSessionStart", emits)
+		}
+		got, _ := emits[0].Payload["cwd"].(string)
+		if got != workDir && got != resolved {
+			t.Fatalf("cwd = %q, want process cwd %q (or %q)", got, workDir, resolved)
+		}
+	})
+
+	t.Run("child_session_emits_subagent_start_not_session_start", func(t *testing.T) {
+		// spec §9.3: opencode runs parent and child over the same pane and
+		// sender PID, so the plugin-level parentID filter is a precondition
+		// of the whole ownership invariant. A subagent must surface as
+		// PdxSubagentStart only — a second PdxSessionStart would hijack the
+		// parent frame (and would carry a cwd for a session that has none).
+		const tail = `
+;(async () => {
+  const hooks = await PurdexOpenCodeHooks({ directory: '/tmp/pdx-project-dir' })
+  await hooks['tool.execute.before'](
+    { tool: 'task', callID: 'call1', sessionID: 'parent1' },
+    { args: { subagent_type: 'explorer', description: 'dig', prompt: 'go' } },
+  )
+  await hooks.event({ event: { type: 'session.created', properties: { sessionID: 'child1', info: { id: 'child1', parentID: 'parent1' } } } })
+})()
+`
+		emits := runRenderedPluginUnderBun(t, bunPath, tail, t.TempDir())
+		if len(emits) != 1 {
+			t.Fatalf("captured = %+v, want exactly one emit (PdxSubagentStart)", emits)
+		}
+		if emits[0].Name != "PdxSubagentStart" {
+			t.Fatalf("captured event = %q, want PdxSubagentStart", emits[0].Name)
+		}
+		for _, e := range emits {
+			if e.Name == "PdxSessionStart" {
+				t.Fatalf("child session must never emit PdxSessionStart (payload=%+v)", e.Payload)
+			}
+		}
+		if got, _ := emits[0].Payload["agent_type"].(string); got != "explorer" {
+			t.Fatalf("agent_type = %q, want explorer", got)
+		}
+		if _, hasCwd := emits[0].Payload["cwd"]; hasCwd {
+			t.Fatalf("PdxSubagentStart must not carry cwd; payload=%+v", emits[0].Payload)
+		}
+	})
+}

@@ -69,7 +69,8 @@ Three mechanisms exist and none of them close this:
 already inside the daemon. It is `DeriveStatus`'s `Detail` allowlist that drops
 it before it reaches the SPA.
 
-Two of the three payloads are **directly observed**. The daemon's trace table
+All three payloads are now **directly observed** (opencode was added by the
+Task 3 verification gate, 2026-09-07). The daemon's trace table
 `agent_trace_steps` stores every hook request verbatim in `payload_json` at
 `kind = 'trigger'` (`internal/store/trace.go:314`):
 
@@ -104,11 +105,33 @@ order by created_at desc limit 1;
  "sender_start_time":"Mon Sep  7 15:39:06 2026","sender_uncertain":false}
 ```
 
+**OpenCode** (observed, opencode `1.18.29`, `openai/gpt-6-astra`) — captured
+against the **pre-fix** plugin already installed in `~/.config/opencode/plugins/`,
+i.e. this is the `cwd`-absent baseline Task 3 removes:
+
+```json
+{"tmux_session":"pdxocverify","tmux_session_id":"$10","tmux_pane_id":"%10",
+ "purdex_name":"PdxSessionStart",
+ "raw_event":{"session_id":"ses_f84eb36d7fferSh22ZPIw4lt9z"},
+ "agent_type":"opencode","sender_pid":21712,
+ "sender_start_time":"Mon Sep  7 16:55:05 2026","sender_uncertain":false}
+```
+
+Three things this run settles. (1) The plugin does fire, and the `pdx hook`
+wrapper fields are populated exactly as for cc/codex. (2) `raw_event` carries
+**only** `session_id` — no `cwd`, no transcript path, no model; opencode's
+`session.created` Bus event gives the plugin nothing beyond the session id, so
+`cwd` genuinely has to come from the plugin's own `PluginInput`, as §4.2
+assumes. (3) The session id is opaque and `ses_`-prefixed (not a UUID like the
+other two), which is what `opencode -s <session-id>` consumes in §3.2.
+`session.created` fires on the first **prompt**, not at TUI launch — creating a
+new session from the command palette emitted nothing.
+
 | Agent | `session_id` | `cwd` | Status |
 |---|---|---|---|
 | Claude Code | ✅ | ✅ | observed |
 | Codex | ✅ | ✅ | observed |
-| OpenCode | ✅ | ❌ — must be added | code-read: `internal/agent/opencode/plugin_template.go:83-93`. The plugin template is **ours**, so `cwd` is added there (§4.2) |
+| OpenCode | ✅ | ❌ before Task 3 → ✅ after | observed (pre-fix payload above). The plugin template is **ours**, so `cwd` is added there (§4.2): `PurdexOpenCodeHooks` now takes opencode's `PluginInput` and emits `cwd` from `input.directory`, falling back to `input.worktree` then `process.cwd()`. `@opencode-ai/plugin@1.14.19` types confirm `Plugin = (input: PluginInput, options?) => Promise<Hooks>` with `directory: string` and `worktree: string`, so widening the export's signature keeps the loader contract |
 
 `pdx hook` wraps every payload with `tmux_session_id`, `tmux_pane_id`,
 `sender_pid`, `sender_start_time` and `sender_uncertain` — populated, and what
@@ -938,22 +961,29 @@ and would let the composer reproduce `--model`, `--dangerously-skip-permissions`
 and friends. Not in v1: argv reflects the *original* launch, not the current
 state, and the editable field covers the need.
 
-### 9.3 OpenCode is the only unobserved agent
+### 9.3 OpenCode was the only unobserved agent — resolved
 
-cc and codex payloads are captured verbatim (§3.1); no opencode session had run
-recently enough to leave a trace row. The opencode path is code-read only, and
-it is also the payload we author ourselves, so the risk is confined to whether
-`cwd` is reachable from the plugin's event object. Phase 2 verifies against a
-real opencode run before relying on it; `opencode -c` covers the failure.
+**Resolved 2026-09-07 (Task 3 verification gate).** A real opencode `1.18.29`
+session was run in a tmux pane and its `PdxSessionStart` trigger row read back;
+the payload is now quoted in §3.1. It confirmed the plugin fires, that the
+wrapper fields are populated, and that `raw_event` carried only `session_id`
+before the fix — so `cwd` had to come from the plugin's own `PluginInput`
+(`directory`, then `worktree`, then `process.cwd()`), which is what Task 3
+implements. What is *not* yet observed end-to-end is the post-fix payload: the
+plugin on disk in the user's `~/.config/opencode` is still the pre-fix one and
+was deliberately not overwritten. The rendered template is exercised under real
+Bun instead (`plugin_template_bun_integration_test.go`), and `opencode -c`
+remains the fallback if a live install ever reports no `cwd`.
 
 OpenCode additionally runs parent and child sessions over the same pane and
 sender PID, which is why the plugin filters children by `parentID`
-(`plugin_template.go:47,82`). No frame- or process-level test downstream can
+(`plugin_template.go:47,97`). No frame- or process-level test downstream can
 separate them — they are the same process — so **that provider-level filter is
 a stated precondition of the ownership invariant for opencode** and must not be
 removed without replacing it. The measured event mix (§3.3) shows the filter
 working: subagent lifecycles arrive as `PdxSubagentStart` / `PdxSubagentStop`,
-never as `PdxSessionStart`.
+never as `PdxSessionStart`. A Bun runtime assertion now pins that too, so the
+filter cannot be dropped silently along with the `cwd` change.
 
 ### 9.4 Send-keys with no readiness wait
 
