@@ -58,6 +58,13 @@ func (p *Provider) DeriveStatus(eventName string, rawEvent json.RawMessage) agen
 	return deriveCCStatus(eventName, rawEvent)
 }
 
+// IdentifyEvent implements agent.SessionIdentifier. cc puts session_id and cwd
+// at the top level of every hook payload (spec §3.1), so the shared extractor
+// covers every event and purdexName is not consulted.
+func (p *Provider) IdentifyEvent(purdexName string, rawEvent json.RawMessage) (string, string) {
+	return agent.ExtractSessionIdentity(rawEvent)
+}
+
 // SupportedStatuses declares the Status values cc.Provider's DeriveStatus may
 // emit, derived from Events().EmitsStatus. Events() is the single source of
 // truth; this shim exists so the StatusSupporter contract (Phase 1) keeps
