@@ -92,11 +92,22 @@ func (m *Module) resolvePaneOwners(ctx context.Context, paneID string, read proc
 		survivors = append(survivors, frame)
 	}
 
+	// ctx cannot interrupt a single process read — readProcessInfoPlatform has
+	// no context (process_info_darwin.go:9) — so the deadline is enforced at
+	// the only place it can be: immediately BEFORE each read. That is spec
+	// §5.3's wording, "checked between process reads", and it has to be per
+	// read rather than per frame because one frame's ancestry is itself a chain
+	// of up to proxyMaxDepth reads, four `ps` forks each (§3.4). A query can
+	// therefore spend its entire budget inside a single walk and never reach a
+	// second frame to be stopped at.
+	//
+	// The guard wraps whatever reader the caller passed, memo included, so a
+	// cache hit is checked too: the caller cannot tell which reads are memoized
+	// and "cheap" is not the same as "still allowed".
+	read = ctxGuardedReader(ctx, read)
+
 	owners := make([]PaneOwner, 0, len(survivors))
 	for _, frame := range survivors {
-		// ctx cannot interrupt a single process read — readProcessInfoPlatform
-		// has no context (process_info_darwin.go:9) — so the deadline is
-		// checked between walks instead.
 		if err := ctx.Err(); err != nil {
 			return owners, err
 		}
@@ -121,6 +132,15 @@ func (m *Module) resolvePaneOwners(ctx context.Context, paneID string, read proc
 			// so it propagates rather than excluding one frame quietly.
 			return owners, werr
 		}
+		// A cancellation reaches the walker as a failed read, and the walker
+		// reports a failed read as VerdictIndeterminate with a NIL error
+		// (ancestor.go). Left at that, an expired deadline would look like an
+		// ordinary "not a root" and the query would go on to answer with
+		// whatever it had. Re-ask ctx after every walk so an expired deadline
+		// is an error, which the caller turns into "no answer".
+		if err := ctx.Err(); err != nil {
+			return owners, err
+		}
 		// Where SawPanePID is set, 2 of 2 is inside the walk, at the top of
 		// every iteration.
 		if res.Verdict != VerdictRoot || !(sawPanePID || res.SawPanePID) {
@@ -135,7 +155,30 @@ func (m *Module) resolvePaneOwners(ctx context.Context, paneID string, read proc
 			LastSeenAt: frame.LastSeenAt,
 		})
 	}
+	// One last look before the result is called an answer. The paths that
+	// `continue` — a frame whose own process became unreadable — skip the
+	// post-walk check above, and a survivors list that emptied out reaches here
+	// having made no check at all.
+	if err := ctx.Err(); err != nil {
+		return owners, err
+	}
 	return owners, nil
+}
+
+// ctxGuardedReader refuses a read once ctx is done, and otherwise gets out of
+// the way.
+//
+// The context error is deliberately NOT memoized: it is a fact about the clock,
+// not about the PID, so nothing downstream is poisoned by it. It does mean the
+// walker sees it as an ordinary read failure — see resolvePaneOwners, which
+// re-asks ctx after every walk for exactly that reason.
+func ctxGuardedReader(ctx context.Context, read procReader) procReader {
+	return func(pid int) (agentpkg.ProcessInfo, error) {
+		if err := ctx.Err(); err != nil {
+			return agentpkg.ProcessInfo{}, err
+		}
+		return read(pid)
+	}
 }
 
 // newMemoProcReader wraps base so that each PID costs at most one call for the

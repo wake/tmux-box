@@ -493,6 +493,79 @@ func TestHandleSessionProvenance_PartialWalkDiscarded(t *testing.T) {
 	}
 }
 
+// TestHandleSessionProvenance_DeadlineInsideOneWalk_FoundFalse is the same
+// discipline as PartialWalkDiscarded, one level finer: here the session has a
+// SINGLE frame, so there is no next frame whose ctx check could notice. The
+// deadline expires partway up that one frame's ancestry, and the query must
+// still answer found:false rather than finishing the chain and reporting the
+// owner it found after time was up.
+//
+// The chain is long enough (100 → 200 → 300 → 400(pane) → 1) that the first
+// read alone overruns a 20 ms deadline at 30 ms per read.
+func TestHandleSessionProvenance_DeadlineInsideOneWalk_FoundFalse(t *testing.T) {
+	m, fake, _ := newProvenanceQueryModule(t)
+	orig := provenanceTimeout
+	provenanceTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { provenanceTimeout = orig })
+
+	fake.AddSession("work", "/w")
+	attachPane(fake, "%5", "$0", "400")
+	seedIdentityFrame(t, m, "%5", "cc", 100, "t100", 42, "sess-1", "/w/purdex")
+	withProcessTree(t, map[int]int{100: 200, 200: 300, 300: 400, 400: 1})
+	withLivePids(t, map[int]string{100: "t100"})
+	withSlowReads(t, 30*time.Millisecond)
+
+	_, body, _ := getProvenance(t, m, codeOf(t, "$0"))
+	if body.Found {
+		t.Fatalf("body = %+v, want found:false — the one walk ran past the deadline, so its owner is not an answer", body)
+	}
+}
+
+// countingExecutor counts the pane→session lookups the pane enumeration makes,
+// which is the only externally visible thing that enumeration does.
+type countingExecutor struct {
+	*tmux.FakeExecutor
+	sessionIDCalls int
+}
+
+func (c *countingExecutor) PaneSessionID(target string) (string, error) {
+	c.sessionIDCalls++
+	return c.FakeExecutor.PaneSessionID(target)
+}
+
+// TestHandleSessionProvenance_ExpiredDeadline_SkipsPaneEnumeration — the
+// deadline bounds the WHOLE query, and enumerating the session's panes is part
+// of it: one tmux round trip per distinct pane with a frame, before a single
+// process has been read. A request that is already out of time must not spend
+// any of them.
+//
+// found:false is not enough to tell the two implementations apart — an expired
+// deadline ends in found:false either way — so this asserts the work itself.
+func TestHandleSessionProvenance_ExpiredDeadline_SkipsPaneEnumeration(t *testing.T) {
+	m, fake, _ := newProvenanceQueryModule(t)
+	counting := &countingExecutor{FakeExecutor: fake}
+	m.tmux = counting
+	orig := provenanceTimeout
+	provenanceTimeout = -1 // already expired when the query starts
+	t.Cleanup(func() { provenanceTimeout = orig })
+
+	fake.AddSession("work", "/w")
+	attachPane(fake, "%5", "$0", "200")
+	attachPane(fake, "%6", "$0", "210")
+	seedIdentityFrame(t, m, "%5", "cc", 100, "t100", 42, "sess-1", "/w/a")
+	seedIdentityFrame(t, m, "%6", "codex", 110, "t110", 43, "sess-2", "/w/b")
+	withProcessTree(t, map[int]int{100: 200, 200: 1, 110: 210, 210: 1})
+	withLivePids(t, map[int]string{100: "t100", 110: "t110"})
+
+	_, body, _ := getProvenance(t, m, codeOf(t, "$0"))
+	if body.Found {
+		t.Fatalf("body = %+v, want found:false", body)
+	}
+	if counting.sessionIDCalls != 0 {
+		t.Fatalf("pane enumeration made %d tmux lookups after the deadline had expired, want 0", counting.sessionIDCalls)
+	}
+}
+
 // TestHandleSessionProvenance_DefaultDeadlineIsFiveSeconds pins the number the
 // spec names (§5.3), which the test above replaces with an expired one.
 func TestHandleSessionProvenance_DefaultDeadlineIsFiveSeconds(t *testing.T) {

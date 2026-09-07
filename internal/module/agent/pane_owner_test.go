@@ -611,3 +611,46 @@ func TestResolvePaneOwners_CancelledContext_StopsBetweenReads(t *testing.T) {
 		}
 	})
 }
+
+// TestResolvePaneOwners_CancelledInsideOneWalk_IsNotAnAnswer — the deadline has
+// to bite INSIDE one frame's ancestry, not only between frames.
+//
+// Spec §5.3 puts the contract at "checked between process reads", and one
+// frame's chain is up to proxyMaxDepth reads of four `ps` forks each (§3.4), so
+// a query can burn its whole budget without ever reaching a second frame. The
+// test above happens to be caught by the next frame's check; this fixture has
+// no next frame, which is exactly the case that used to slip through: the walk
+// ran to the end, the owner was collected, and the query reported success on a
+// walk that had already outrun its deadline.
+//
+// The cancellation lands one link into a four-link chain, so three reads are
+// still ahead of it and there is no later frame to notice.
+func TestResolvePaneOwners_CancelledInsideOneWalk_IsNotAnAnswer(t *testing.T) {
+	m := newProxyTestModule(t)
+	seedIdentityFrame(t, m, "%5", "cc", 100, "t100", 10, "sess-a", "/w")
+	withPanePID(t, 400)
+	withProcessTree(t, map[int]int{100: 200, 200: 300, 300: 400, 400: 1})
+	withLivePids(t, map[int]string{100: "t100"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var seen []int
+	read := func(pid int) (agentpkg.ProcessInfo, error) {
+		seen = append(seen, pid)
+		if pid == 200 {
+			// One link up the chain; 300 and 400 are still to come, and the
+			// pane's own PID has not been seen yet.
+			cancel()
+		}
+		return readProcessInfoFn(pid)
+	}
+
+	owners, err := m.resolvePaneOwners(ctx, "%5", read)
+	if err == nil {
+		t.Fatalf("err = nil, want the context error; owners = %+v — a walk that outran the deadline is not evidence", owners)
+	}
+	for _, pid := range seen {
+		if pid == 300 || pid == 400 {
+			t.Fatalf("reads = %v; the walk must stop at the first read after cancellation, not finish the chain", seen)
+		}
+	}
+}

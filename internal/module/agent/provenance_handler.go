@@ -97,7 +97,7 @@ func (m *Module) resolveSessionOwner(ctx context.Context, code string) (PaneOwne
 	ctx, cancel := context.WithTimeout(ctx, provenanceTimeout)
 	defer cancel()
 
-	panes, err := m.panesOfSession(code)
+	panes, err := m.panesOfSession(ctx, code)
 	if err != nil {
 		return PaneOwner{}, false
 	}
@@ -154,7 +154,13 @@ func betterOwner(candidate, incumbent PaneOwner) bool {
 //
 // An error at either step excludes that pane, with no fallback to a name
 // lookup.
-func (m *Module) panesOfSession(code string) ([]string, error) {
+//
+// Enumeration is under the request deadline like everything else: it is one
+// tmux round trip per distinct pane that has a frame, spent before a single
+// process has been read, and a request that is already out of time must not
+// spend any of them. ctx's error ends the enumeration, and the caller reads
+// that the same way it reads a store failure — no answer.
+func (m *Module) panesOfSession(ctx context.Context, code string) ([]string, error) {
 	frames, err := m.frames.ListAll()
 	if err != nil {
 		return nil, err
@@ -162,6 +168,9 @@ func (m *Module) panesOfSession(code string) ([]string, error) {
 	panes := make([]string, 0, len(frames))
 	seen := make(map[string]bool, len(frames))
 	for _, frame := range frames {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if seen[frame.PaneID] {
 			continue
 		}
