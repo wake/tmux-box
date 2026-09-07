@@ -378,7 +378,7 @@ describe('useTabStore', () => {
       useTabStore.getState().addTab(tab)
       const tabId = useTabStore.getState().tabOrder[0]
 
-      useTabStore.getState().updateSessionCache('test-host', 'dev001', 'renamed-session')
+      useTabStore.getState().updateSessionCache('test-host', 'dev001', 'renamed-session', '')
 
       const content = getPrimaryPane(useTabStore.getState().tabs[tabId].layout).content
       expect(content.kind).toBe('tmux-session')
@@ -392,7 +392,7 @@ describe('useTabStore', () => {
       useTabStore.getState().addTab(tab)
       const tabId = useTabStore.getState().tabOrder[0]
 
-      useTabStore.getState().updateSessionCache('test-host', 'dev999', 'renamed')
+      useTabStore.getState().updateSessionCache('test-host', 'dev999', 'renamed', '')
 
       const content = getPrimaryPane(useTabStore.getState().tabs[tabId].layout).content
       expect(content.kind).toBe('tmux-session')
@@ -406,7 +406,7 @@ describe('useTabStore', () => {
       useTabStore.getState().addTab(tab)
       const tabId = useTabStore.getState().tabOrder[0]
 
-      useTabStore.getState().updateSessionCache('other-host', 'dev001', 'renamed')
+      useTabStore.getState().updateSessionCache('other-host', 'dev001', 'renamed', '')
 
       const content = getPrimaryPane(useTabStore.getState().tabs[tabId].layout).content
       expect(content.kind).toBe('tmux-session')
@@ -421,7 +421,7 @@ describe('useTabStore', () => {
       const tabId = useTabStore.getState().tabOrder[0]
       const before = useTabStore.getState().tabs[tabId]
 
-      useTabStore.getState().updateSessionCache('test-host', 'dev001', '')
+      useTabStore.getState().updateSessionCache('test-host', 'dev001', '', '')
 
       const after = useTabStore.getState().tabs[tabId]
       expect(after).toBe(before) // same reference — no update
@@ -433,7 +433,7 @@ describe('useTabStore', () => {
       useTabStore.getState().addTab(tab1)
       useTabStore.getState().addTab(tab2)
 
-      useTabStore.getState().updateSessionCache('test-host', 'dev001', 'new-name')
+      useTabStore.getState().updateSessionCache('test-host', 'dev001', 'new-name', '')
 
       for (const tabId of useTabStore.getState().tabOrder) {
         const content = getPrimaryPane(useTabStore.getState().tabs[tabId].layout).content

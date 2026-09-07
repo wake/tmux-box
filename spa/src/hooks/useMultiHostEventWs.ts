@@ -131,7 +131,7 @@ export function useMultiHostEventWs() {
                 useTabStore.getState().adoptTmuxInstance(hostId, sessionCode, tmuxInstance)
               }
               for (const s of data) {
-                useTabStore.getState().updateSessionCache(hostId, s.code, s.name)
+                useTabStore.getState().updateSessionCache(hostId, s.code, s.name, s.tmux_instance ?? '')
               }
 
               const clearedCodes = new Set<string>()

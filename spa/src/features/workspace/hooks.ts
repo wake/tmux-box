@@ -10,7 +10,7 @@ import type { ContextMenuAction } from '../../components/TabContextMenu'
 
 export function useTabWorkspaceActions(displayTabs: Tab[]) {
   const [contextMenu, setContextMenu] = useState<{ tab: Tab; position: { x: number; y: number } } | null>(null)
-  const [renameTarget, setRenameTarget] = useState<{ tabId: string; hostId: string; sessionCode: string; currentName: string; anchorRect: DOMRect } | null>(null)
+  const [renameTarget, setRenameTarget] = useState<{ tabId: string; hostId: string; sessionCode: string; tmuxInstance: string; currentName: string; anchorRect: DOMRect } | null>(null)
   const [renameError, setRenameError] = useState<string | undefined>()
 
   // Tab store
@@ -105,6 +105,7 @@ export function useTabWorkspaceActions(displayTabs: Tab[]) {
       tabId: tab.id,
       hostId: c.hostId,
       sessionCode: c.sessionCode,
+      tmuxInstance: c.tmuxInstance,
       currentName: c.cachedName || c.sessionCode,
       anchorRect: rect,
     })
@@ -179,8 +180,16 @@ export function useTabWorkspaceActions(displayTabs: Tab[]) {
         setRenameError(text)
         return
       }
-      // Immediately update tab label (don't wait for WS session event)
-      useTabStore.getState().updateSessionCache(renameTarget.hostId, renameTarget.sessionCode, name)
+      // Immediately update tab label (don't wait for WS session event).
+      // The name refresh is generation-scoped (spec §4.5), so it needs the
+      // generation the rename response was produced under; an older daemon
+      // that sends none leaves us with the pane's own recorded instance,
+      // which is the binding we just renamed.
+      const info = await res.json().catch(() => null) as { tmux_instance?: string } | null
+      const tmuxInstance = typeof info?.tmux_instance === 'string' && info.tmux_instance
+        ? info.tmux_instance
+        : renameTarget.tmuxInstance
+      useTabStore.getState().updateSessionCache(renameTarget.hostId, renameTarget.sessionCode, name, tmuxInstance)
       setRenameTarget(null)
       setRenameError(undefined)
     } catch (err) {
