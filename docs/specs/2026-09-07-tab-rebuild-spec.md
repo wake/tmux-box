@@ -660,7 +660,16 @@ session **and then step 4 on success** — otherwise a successful retry would
 leave the user staring at a resumed session that still renders as terminated.
 "Attach anyway" runs step 4 only and marks the resume `skipped`. Both re-run
 the binding verification, using the binding recorded on the operation rather
-than whatever the pane holds now, so they stay correct across a remount. The report — created host/code/name and each step's result —
+than whatever the pane holds now, so they stay correct across a remount.
+
+When the resume **succeeded** but the re-point did not — the pane's binding
+changed mid-flight — the footer offers **only** "Attach anyway". Re-sending a
+resume command to a session that is already resumed would be wrong.
+
+Once a session exists, the create row shows the name the daemon actually
+returned as static text rather than the editable recorded name: the response is
+authoritative for the name in use (step 1), and the recorded name is no longer
+what a further action would send. The report — created host/code/name and each step's result —
 lives in a rebuild-operation store keyed by `paneId`, not in component state,
 so it survives any re-render or remount.
 
