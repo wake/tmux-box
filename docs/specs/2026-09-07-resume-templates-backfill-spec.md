@@ -1,6 +1,7 @@
 # Spec — Resume command templates & provenance backfill
 
-**Status:** v2 (v1 reviewed by codex `task-mtre55dl-hnlmvd`: 2 Blocker, 9 Important, 1 Minor — disposition in §10)
+**Status:** v3
+**Review history:** v1 → codex `task-mtre55dl-hnlmvd` (2 Blocker, 9 Important, 1 Minor); v2 → codex `task-mtrggpct-ub3biv` (2 Blocker, 8 Important, 2 Minor). Dispositions in §10.
 **Follows:** `docs/specs/2026-09-07-tab-rebuild-spec.md` (shipped alpha.332)
 **Supersedes:** that spec's §9.1 "Daemon-side backfill (cut from v1)"
 
@@ -87,14 +88,13 @@ Rebuild recreates a bare shell. The user has seen this empty field.
   (§4.4). Stated as a limit (§9).
 - Reconstructing original launch flags from argv (v1 §9.2, still deferred).
 - Templates for anything but the resume command.
-- Running the template to verify it. Only the command word is resolved (§4.4);
-  executing `claude --resume …` to check it would start an agent.
+- Running the template to verify it. Only the command word is resolved (§4.4).
 - A new notion of ownership. §5 reuses the existing frame-layer ancestry walk
-  and nothing else.
+  and the existing pane-tree verification, and adds nothing else.
 
 ---
 
-## 3. Evidence (measured on this machine, 2026-09-07)
+## 3. Evidence (measured on this machine, 2026-09-07/08)
 
 ### 3.1 Every hook event carries the session id, not just `SessionStart`
 
@@ -111,23 +111,32 @@ Read from `~/.config/pdx/agent_events.db`. Since alpha.330 the step-level
 This is what makes B possible at all: the identity is on the wire long after
 the `SessionStart` that Purdex missed.
 
-### 3.2 The frame layer already knows who is in the pane
+### 3.2 What the frame layer already verifies, and what it does not store
 
 `agent_frames` (`internal/store/frames.go:34`) holds one row per agent process
 per tmux pane, with `pid`, `ppid`, `process_start_time`, `parent_frame_id` and
-`subagents_json`. `classifyAncestor` (`internal/module/agent/ancestor.go:47`)
-walks a PID's ancestry against those rows and reports `VerdictRoot` when no
-live, identity-verified frame sits above it in the same pane.
+`subagents_json`.
+
+Two existing checks matter here, and **both** are needed by §5.3:
+
+- `classifyAncestor` (`ancestor.go:47`) walks a PID's ancestry against those
+  rows and reports `VerdictRoot` when no live, identity-verified frame sits
+  above it in the same pane.
+- `verifyEvent` (`verify.go:40`) additionally proves the process is a
+  **descendant of the pane's current process** — `resolvePanePIDFn` +
+  `pidAncestorIncludesFn` (`verify.go:60-65`) — and that the provider still
+  identifies it. Alive-plus-start-time alone is *not* the codebase's bar for
+  "this process belongs to this pane", and a query that skipped it could hand
+  back a surviving old agent under a reused pane id.
 
 What the rows do **not** hold is the agent's own session id — that has only
 ever existed in flight, inside a hook payload. §5.2 adds it.
 
 `SessionProjection.TopFrame` is **not** the owner: `buildPaneProjection`
 (`projection.go:111-119`) sorts by `started_at` and takes the **last**, i.e.
-the innermost / most recent agent, which is what the lights UI wants. Any
-design that reads ownership off `TopFrame` would mis-attribute a nested
-same-type session. The ancestry walk is the only ownership answer in this
-codebase and this spec adds no second one.
+the innermost / most recent agent, which is what the lights UI wants. The
+ancestry walk is the only ownership answer in this codebase and this spec adds
+no second one.
 
 ### 3.3 OpenCode's non-`SessionStart` emits omit `cwd`
 
@@ -136,15 +145,29 @@ codebase and this spec adds no second one.
 send `session_id` alone. Adding `cwd: pdxCwd()` to those two emits is a
 one-line change each.
 
-### 3.4 A shell function is invisible to a non-interactive shell
+OpenCode also switches back to an **existing** session inside one process. Only
+`session.created` emits `PdxSessionStart`, while the following `chat.message`
+carries the now-current `input.sessionID` (`plugin_template.go:97,137,169`). So
+the stored session id must be updated by ordinary events, not only by
+`SessionStart` (§5.2).
+
+### 3.4 A process read on darwin costs four `ps` forks
+
+`readProcessInfoPlatform` (`internal/agent/process_info_darwin.go:9`) shells out
+four times per call — ppid, `comm`, `args`, start time. An ancestry walk capped
+at `proxyMaxDepth` therefore costs up to ~20 forks **per frame**, and §5.3
+walks every frame in the pane. Memoization within one request is a requirement,
+not an optimisation (§5.3).
+
+### 3.5 A shell function is invisible to a non-interactive shell
 
 `cld-yolo` is defined in the user's `~/.zshrc`. It is not on `PATH` and
 `command -v cld-yolo` from a non-interactive shell finds nothing. It resolves
-only in an interactive shell that has sourced the rc file — which is what the
-rebuild engine gets, because it delivers the command with tmux `send-keys`
-into the shell tmux started. Any save-time verification must therefore use an
-interactive login shell, or it will report a false negative on the very case
-this feature exists for.
+only in a shell that has sourced the rc file — which is what the rebuild engine
+gets, because it delivers the command with tmux `send-keys` into the shell tmux
+started. Any save-time verification must therefore reproduce that shell's
+startup, or it will report a false negative on the very case this feature
+exists for.
 
 ---
 
@@ -191,7 +214,7 @@ what already makes an unknown agent rebuild as a shell (v1 §4.7).
 -  resumeCommand?: string
 +  /**
 +   * User override for this pane only. Absent means "compose from templates".
-+   * Never written automatically; cleared only when the agent identity it was
++   * Never written automatically; cleared when the agent identity it was
 +   * written against changes (§4.3).
 +   */
 +  resumeCommandOverride?: string
@@ -230,9 +253,8 @@ export function resolveResumeCommand(
 
 `SAFE_SESSION_ID` (`/^[A-Za-z0-9_-]{1,128}$/`) is retained unchanged and stays
 the only thing ever interpolated. An id outside the alphabet degrades to
-`fallback`, never to an interpolated command — the property the v1 composer
-had, kept. `{id}` is the only placeholder and there is no escape for a literal
-brace.
+`fallback`, never to an interpolated command. `{id}` is the only placeholder
+and there is no escape for a literal brace.
 
 **Every consumer of the old field becomes a call to this function.** The full
 list, so the rename cannot be done half-way:
@@ -242,12 +264,12 @@ list, so the rename cannot be done half-way:
 | `spa/src/types/tab.ts` | the field; the `RebuildPatch` `field` union |
 | `spa/src/stores/useAgentStore.ts` | 94 — stops storing a command |
 | `spa/src/stores/useTabStore.ts` | 200 (agent-group write), 209 (`field` patch) |
-| `spa/src/components/RebuildActionSet.tsx` | 18 (`RebuildEditableField`), 229, 294, 298 |
+| `spa/src/components/RebuildActionSet.tsx` | 18 (`RebuildEditableField`), 226, 229, 294, 298, 379 |
 | `spa/src/components/RenamePopover.tsx` | 149, 153 |
 | `spa/src/components/TerminatedPane.tsx` | wherever it forwards the field |
 | `spa/src/lib/rebuild/batch.ts` | 68, 82 |
 | `spa/src/lib/rebuild/eligibility.ts` | any read of the field |
-| `spa/src/lib/rebuild/engine.ts` | 164 (`publishRefusal`), 498 |
+| `spa/src/lib/rebuild/engine.ts` | 164 (`publishRefusal`), 496-502 |
 | `spa/src/components/settings/SnapshotSettingsSection.tsx` | 664 |
 | fixtures | `useTabStore.rebuild.test.ts`, `RebuildActionSet.test.tsx`, `RenamePopover.rebuild.test.tsx`, `composer.test.ts`, `batch.test.ts`, `engine.test.ts`, `eligibility.test.ts` |
 
@@ -255,27 +277,34 @@ list, so the rename cannot be done half-way:
 record field — it is the string an in-flight operation pinned, and renaming it
 along with the record field would blur exactly the distinction §4.3 depends on.
 
-### 4.3 Interaction with the existing writer ranking
+### 4.3 Override lifetime, and what the panel shows
 
-| Writer | Effect on the resume command |
-|---|---|
-| Qualifying `SessionStart` | Clears `resumeCommandOverride` **only if the agent identity changed** — a different `agent.type`, or a different `agent.sessionId`. A re-sent `SessionStart` carrying the same id (an idle re-emit) keeps the user's edit. |
-| Backfill (§5) | Writes an agent group where there was none, so there is no prior identity and nothing to clear. |
-| User edit | Sets `resumeCommandOverride`; an empty submission **clears** it and the row falls back to the template. |
-| Template change in Settings | Affects every pane with no override, retroactively, including dead ones. That is the point of the feature. |
+**Clearing.** `resumeCommandOverride` is cleared by any writer that changes the
+**agent identity** the record holds — a different `agent.type` or a different
+`agent.sessionId`. That covers a qualifying `SessionStart` with a new id and
+the identity-correcting backfill of §5.5. A writer that lands the same identity
+(an idle `SessionStart` re-emit, a refresh that only fills a missing `cwd`)
+leaves the override alone.
 
-The identity test replaces v1's unconditional clear. Unconditional clearing was
-defensible for a *composed cache*; for something the UI now calls an override
-it is not, because the only real hazard is a verbatim command carrying a
-**stale session id**, and that hazard is exactly "the identity changed".
+This is a **product policy, not a proof**. It is neither necessary nor
+sufficient in every case: an override of the form `cld-yolo -c` stays valid
+across an identity change and is nevertheless discarded, while an override can
+go stale for reasons the identity does not capture (the recorded `cwd` moved
+under it). It is chosen because the one hazard that silently does the *wrong
+thing* — a verbatim command carrying a dead session id — is exactly an identity
+change, and because a discarded override is visible and retypable while a
+silently stale one is not. v1's unconditional clear on every `SessionStart` is
+narrowed to this.
 
-**"What you see is what gets sent" (v1 §4.9)** is preserved by a single rule:
-the panel renders `resolveResumeCommand(...)` **only while no operation exists
-for the pane**. Once `useRebuildStore` holds an operation, every row — the
-live run, the failure footer, "Retry resume" — renders `op.resumeCommand`, the
-string the engine pinned at operation start. Otherwise a template edited in
-another window would make the panel advertise a command that Retry would not
-send.
+**Display.** The panel renders `resolveResumeCommand(...)` **except** while the
+pane's rebuild operation is in flight, or has already created a session
+(`op.created` present) — in those two states, and only those, every row renders
+`op.resumeCommand`, the string the engine pinned at operation start. This is
+what keeps "Retry resume" honest: retry acts on the created session and must
+show the command it will actually re-send. An operation that failed *before*
+creating anything is not actionable — the next Rebuild recomputes from scratch —
+so the panel goes back to the live resolution, and a template edited meanwhile
+is reflected before the user presses the button.
 
 ### 4.4 Save-time verification
 
@@ -287,36 +316,45 @@ separated token of the template, with `{id}` never substituted.
 
 ```
 request   { "command": "cld-yolo" }
-400       malformed body — missing / non-string / absent `command`
-200       { "resolved": true,  "kind": "function", "detail": "cld-yolo is a shell function" }
-200       { "resolved": true,  "kind": "file",     "detail": "/Users/wake/.local/bin/claude" }
+400       malformed body — `command` missing or not a string
+200       { "resolved": true,  "kind": "file",       "detail": "/Users/wake/.local/bin/claude" }
+200       { "resolved": true,  "kind": "shell-word", "detail": "cld-yolo" }
 200       { "resolved": false, "kind": "not-found",    "detail": "" }
 200       { "resolved": false, "kind": "unverifiable", "reason": "shell_metacharacters" | "too_long" | "timeout" | "shell_failed" }
 ```
 
 Everything that is not a malformed request body is a **200 with a verdict**.
 There is no 504: a timeout is a verdict about the probe, not a transport
-failure, and the UI renders all four outcomes the same way.
+failure, and the UI renders all outcomes the same way.
+
+**Only two success kinds, and they are derived structurally.** `resolved` comes
+from the exit status; `kind` is `file` when the output looks like an absolute
+path and `shell-word` otherwise (function, alias, builtin, keyword). Human
+`type` output is **not** parsed: zsh prints `demo_fn is a shell function from
+zsh` while bash prints `demo_fn is a function` *followed by the whole function
+body*, so no single string test works across both and rc chatter can pollute
+either. The probe therefore uses `command -v`, whose output is a path or a
+word, and reads only the **last non-empty line** of stdout.
 
 **Which shell.** The one tmux will actually start, asked of tmux:
-`tmux show-options -gv default-shell` through the existing executor
-(`internal/tmux/executor.go`). Falls back to `$SHELL`, then the passwd shell,
-then `/bin/sh`. Invoked as an **interactive login** shell — `-l -i -c` — because
-with an empty `default-command` tmux starts the pane's shell as a login shell,
-and zsh sources `.zprofile`/`.zlogin` and `.zshrc` under different conditions.
+`show-options -gv default-shell` through the existing executor
+(`internal/tmux/executor.go`, which needs a new server/global-option method —
+`ShowWindowOption` passes `-w` and is not usable here). If the tmux server is
+not running the lookup fails, and the probe falls back to `$SHELL`, then the
+passwd shell, then `/bin/sh`. Invoked as an **interactive login** shell —
+`-l -i -c` — because with an empty `default-command` tmux starts the pane's
+shell as a login shell.
 
 **How.** The token is a positional parameter and never enters the script text:
 
 ```go
-script := `builtin type -- "$1"`          // zsh, bash
+script := `builtin command -v "$1"`   // zsh, bash
 // any other shell:
 script  = `command -v "$1"`
 exec.CommandContext(ctx, shell, "-l", "-i", "-c", script, "_", token)
 ```
 
-`builtin` defeats an rc-defined `type`. A shell whose basename is neither zsh
-nor bash gets the POSIX form, which still resolves functions and aliases but
-yields a weaker `kind`.
+`builtin` defeats an rc-defined `command`.
 
 **Process hygiene** — `exec.CommandContext` kills only the direct child, and an
 rc file can leave descendants holding the output pipe open:
@@ -325,9 +363,9 @@ rc file can leave descendants holding the output pipe open:
   through `Cmd.Cancel`.
 - `Cmd.WaitDelay = 1 * time.Second`, so a descendant holding the pipe cannot
   make `Wait` hang after the kill.
-- stdin is `/dev/null`. stdout and stderr are read through an
-  `io.LimitReader` capped at 8 KiB, so the buffer is bounded **before** the
-  512-byte display truncation, not after.
+- stdin is `/dev/null`; stdout and stderr are read through an `io.LimitReader`
+  capped at 8 KiB, so the buffer is bounded **before** the 512-byte display
+  truncation.
 - 5 s deadline.
 
 **Rejected before exec** (`resolved: false, kind: "unverifiable"`): a token
@@ -335,10 +373,8 @@ longer than 256 bytes, or containing any of ``| & ; < > ( ) $ ` \ " ' newline``
 or a leading `-`. The *template* is not restricted — only what we agree to
 probe.
 
-**The probe never blocks a save.** It reports; the user decides. And it is not
-a guarantee: the probe has no tty, does not run tmux's `default-command`, and
-runs on the host the user picked rather than in the pane the rebuild will
-create (§9).
+**The probe never blocks a save**, and it is an approximation, not a
+guarantee — see §9.
 
 ### 4.5 Settings UI
 
@@ -353,8 +389,8 @@ Resume command templates
   Test against: [ mlab ▾ ]                         ← host picker, defaults to active host
 
   Claude Code
-    With session id   [ cld-yolo --resume {id} ]        [Test]  ✓ shell function
-    Without           [ cld-yolo -c            ]        [Test]  ✓ shell function
+    With session id   [ cld-yolo --resume {id} ]        [Test]  ✓ cld-yolo
+    Without           [ cld-yolo -c            ]        [Test]  ✓ cld-yolo
   Codex
     With session id   [ codex resume {id}      ]        [Test]  ✓ /opt/homebrew/bin/codex
     Without           [ codex resume --last    ]        [Test]
@@ -367,11 +403,13 @@ Resume command templates
   `isComposing` so an IME Enter does not commit. Those were review findings on
   that component; rediscovering them here is not acceptable.
 - **Inline warning, never blocking**: `exact` without `{id}` warns and still
-  saves — it then resolves to the literal template, which is a legitimate if
-  odd choice. `fallback` with `{id}` warns and still saves — `{id}` stays
-  literal there (§4.2 step 2).
-- The Test button probes that row's command word against the host in the
-  picker, and renders the result until the row is edited again.
+  saves — it then resolves to the literal template. `fallback` with `{id}` warns
+  and still saves; `{id}` stays literal there (§4.2 step 2).
+- **A test result is keyed by `(hostId, commandWord)`** and is shown only while
+  both still match. Switching the host picker, or editing the row, clears it;
+  a response that arrives after either changed is discarded. A verdict from
+  another machine must never sit next to a command the user is now judging for
+  this one.
 - All copy goes through i18n.
 
 ---
@@ -386,21 +424,16 @@ properties of pushing rather than of the throttle:
 
 - **No delivery guarantee.** The daemon consumed the one grant while the SPA
   had no pane bound to that session yet — the normal case, since a user opens
-  Purdex before opening the tab. The write no-ops and the grant is gone. A
-  full broadcast queue or a session-code lookup miss does the same.
+  Purdex before opening the tab. A full broadcast queue or a session-code
+  lookup miss does the same.
 - **No correction path.** A fill-only write cannot be corrected by a later
-  fill-only write, so a mis-attribution during a frame-recovery window would
-  be permanent.
+  fill-only write.
 
-Asking inverts both. The answer is a response to the asker, so it cannot be
-dropped in the dark; and the SPA can ask again. It also deletes the reason the
-throttle existed: the request rate is bounded by pane attaches, not by the
-3805-per-session `PostToolUse` stream.
-
-**Ownership is decided the same way it always was** — the frame-layer ancestry
-walk. No new classifier, no process-ancestry rewrite, no reading ownership off
-`TopFrame` (§3.2). This is the constraint the previous round settled and it is
-not reopened.
+Asking inverts both, and deletes the reason the throttle existed: the request
+rate is bounded by SPA triggers, not by the 3805-per-session `PostToolUse`
+stream. Ownership is still decided by the frame-layer ancestry walk plus the
+pane-tree check that every accepted event already passes (§3.2). No new
+classifier, no reading ownership off `TopFrame`.
 
 ### 5.2 Daemon — the frame remembers its own session id
 
@@ -416,13 +449,40 @@ Additive, guarded by a column-existence check next to the existing
 live processes, so an empty column on an existing row is exactly right until
 the next event fills it.
 
-Written in `applyFrameEvent`, onto **the sender's own frame**. That needs no
-ownership decision: it is that agent's session id, whoever owns the pane.
-Only ever set, never cleared — a `Stop` that carries no id must not erase what
-a `UserPromptSubmit` recorded.
+**These two columns never travel inside a `Frame` round-trip write.** That is
+the whole concurrency design, and it is what keeps them out of the optimistic
+retry loops:
 
-**Reading the identity.** An optional provider interface, so the raw payload is
-read once by something that knows the agent's shape:
+| Store method | session_id / cwd |
+|---|---|
+| `Upsert` — INSERT branch | written from the struct |
+| `Upsert` — UPDATE branch (`frames.go:129-141`) | **omitted**; the existing "zero value keeps the stored value" pattern is extended to them for the struct that is returned |
+| `UpsertIfUnchanged` (`frames.go:372`) | **omitted from the SQL** — the proxy-attach retry loop reloads and re-writes whole rows, and including them would let a reloaded stale baseline clobber a fresh id |
+| `UpdateHookPath` / `UpdateHookPathAndResetSubagents` (`frames.go:305`) | **omitted** — this is the narrow UPDATE that ordinary hook events take |
+| **`UpdateSessionIdentity(frameID, sessionID, cwd)`** (new) | the **only** post-insert writer: a two-column UPDATE keyed by `frame_id`, each column written only when the new value is non-empty |
+| every SELECT / scan | included, so reads are complete |
+
+Because identity is written by its own statement, no CAS retry has to
+re-apply it and no read-modify-write can lose it.
+
+**Where it is called.** In `applyFrameEvent`, after the frame mutation, for the
+**sender's own frame**. That needs no ownership decision: it is that agent's
+session id, whoever owns the pane. Ordinary hook events are the important
+caller — they are how a pre-deploy session's frame acquires an id at all, and
+`UpdateHookPath` is the path they take.
+
+**No lifecycle gate.** v2 proposed parsing only when the column was empty or
+the lifecycle was `SessionStart`. That is wrong: opencode switches back to an
+existing session without a `SessionStart` (§3.3), so the gate would freeze the
+record on the old conversation, and it would also stop a frame that learnt its
+id from a `cwd`-less event from ever acquiring a `cwd`. Every event from the
+sender's own frame contributes; only a **non-empty** extracted value is
+written, so a payload that carries neither clears nothing.
+
+**Reading the identity cheaply.** cc `PostToolUse` payloads embed whole tool
+inputs, so a full `map[string]any` unmarshal per event is not acceptable. The
+extractor unmarshals into `map[string]json.RawMessage`, which parses only the
+top-level key structure, and then decodes just `session_id` and `cwd`:
 
 ```go
 // internal/agent/provider.go
@@ -433,14 +493,8 @@ type SessionIdentifier interface {
 }
 ```
 
-Implemented by cc, codex and opencode over the shared `session_id` / `cwd` keys
-(§3.1). A provider that does not implement it never contributes.
-
-**When it runs.** Only when the stored `session_id` is empty, or the lifecycle
-is `SessionStart`. So the extra JSON parse costs once per frame, not once per
-event, and a `/clear` still replaces the id (cc emits `SessionStart` for it;
-the `source == "compact"` early-return is untouched because a compact keeps the
-same id). This is the whole of the hot-path cost of Phase 1.
+Implemented by cc, codex and opencode over the shared keys (§3.1). A provider
+that does not implement it never contributes.
 
 **OpenCode plugin change.** `plugin_template.go` adds `cwd: pdxCwd()` to the
 `PdxStop` and `PdxUserPromptSubmit` emits (§3.3). The existing `parentID`
@@ -449,9 +503,8 @@ ownership invariant for opencode.
 
 ### 5.3 Daemon — the ownership query
 
-`GET /api/sessions/{code}/provenance`, in the agent module, alongside the
-existing `/api/sessions/{code}/cwd` shape (`session/module.go:72`) — same
-response convention, including the generation stamp.
+`GET /api/sessions/{code}/provenance`, mirroring `/api/sessions/{code}/cwd`
+(`session/module.go:72`) including its two-sided generation sampling.
 
 ```json
 { "found": true,
@@ -460,60 +513,105 @@ response convention, including the generation stamp.
   "cwd": "/Users/wake/Workspace/wake/purdex",
   "tmux_pane_id": "%12",
   "tmux_instance": "4465:1788754497",
-  "updated_at": 1788800000000 }
+  "last_seen_at": 1788800000000 }
 ```
 
-`{ "found": false, "tmux_instance": "…" }` when there is no answer. The
-generation is always present when the daemon could read it, and `""` when it
-could not — the SPA treats `""` exactly as `cwd-probe.ts` does (§5.4).
+`{ "found": false, "tmux_instance": "…" }` when there is no answer.
+`tmux_instance` is sampled **before and after** the frame work, exactly as the
+cwd handler does, and reported as `""` if the two samples disagree or the read
+fails — `""` authorises nothing on the SPA side (§5.4).
 
-Resolution, entirely over existing machinery:
+Resolution:
 
 1. Resolve `{code}` to the tmux session and its panes.
-2. For each pane, `frames.ListByPane`, keeping only frames that are **live and
-   identity-verified** — `isPidAliveFn` plus a `processStartTime` match, the
-   same gating `classifyAncestor` applies.
-3. A surviving frame is a **root** iff walking its own PPID chain (capped at
-   `proxyMaxDepth`) finds no other live, identity-verified frame of that pane.
-   This is `classifyAncestor`'s loop with the starting PID as its parameter;
-   the traversal is **extracted into one shared function** so there is exactly
-   one implementation, and `classifyAncestor` becomes its first caller.
-4. A walk that cannot complete excludes that frame rather than promoting it:
+2. Resolve each pane's **current** process (`resolvePanePIDFn`). A pane whose
+   PID cannot be resolved contributes nothing.
+3. For each frame from `frames.ListByPane`, keep it only if **all** hold:
+   alive; `processStartTime` matches the stored value; and
+   `pidAncestorIncludesFn(frame.PID, panePID)` — the pane-tree check every
+   accepted event passes (`verify.go:60-65`). The third is what stops a
+   surviving agent from a previous tmux generation being handed back under a
+   reused pane id.
+4. A surviving frame is a **root** iff walking its own PPID chain (capped at
+   `proxyMaxDepth`) finds no other surviving frame of that pane. This is
+   `classifyAncestor`'s loop with the starting PID as a parameter; the
+   traversal is **extracted into one shared function** and `classifyAncestor`
+   becomes its first caller, so there is one implementation of the depth cap,
+   the self-parent guard and the unreadable-process rule. The walk needs only
+   a boolean here — "something framed is above me" — so
+   `VerdictSameTypeAbove`'s hard stop is correct for this use as well; the
+   ancestor it returns is *not* claimed to be the outermost one.
+5. A walk that cannot complete excludes that frame rather than promoting it:
    no evidence, no action.
-5. Among roots with a non-empty `session_id`: none → `found: false`; one → that
-   one; several → the most recently seen (`last_seen_at`), carrying its
-   `tmux_pane_id`, which is v1 §4.4's "most recent wins" rule for a multi-pane
-   tmux session, unchanged.
+6. Among roots with a non-empty `session_id`: none → `found: false`; one → that
+   one; several → the largest `last_seen_at`, ties broken by `frame_id`, and
+   the answer carries its `tmux_pane_id`.
 
-Read-only, no store writes, no envelope, no state between calls. The nesting
-cases resolve without anything new: a nested same-type child finds the parent's
-live frame above it and is not a root; a proxy-collapsed cross-type child has
-no frame of its own at all. Because the query runs at attach time rather than
-inside an event, there is no child-before-parent ordering to lose to.
+**The multi-root tie-break is a new rule, not the old one.** v1 §4.4 chose the
+most recent qualifying `SessionStart`; `last_seen_at` is advanced by any hook
+or status update, so with two root agents in two panes of one tmux session the
+two writers can disagree (A started first but acted last: the `SessionStart`
+writer picks B, this query picks A). Both answers name a real root agent of the
+session; this spec accepts the divergence rather than adding a column to
+paper over it, and §9 states it.
+
+**Cost.** §3.4: one process read is four `ps` forks on darwin, and this walks
+every frame in the pane. So the handler builds **one memoizing process reader
+per request** — each PID is read at most once across every walk — and runs
+under a request deadline (5 s), answering `found: false` if it expires. The
+memo is per-request, never shared, so it cannot serve stale ancestry to a later
+call. Read-only: no store writes, no envelope, no state between calls.
 
 ### 5.4 SPA — the probe
 
-`spa/src/lib/rebuild/provenance-probe.ts`, written as a **sibling of
-`cwd-probe.ts` and following it rule for rule**, because every hazard that file
-documents applies identically here:
+`spa/src/lib/rebuild/provenance-probe.ts`, a sibling of `cwd-probe.ts` reusing
+its named helpers rather than paraphrasing its rules:
 
-- The host's attach gate (`canAttachTerminal`) must be open first.
+- The host's attach gate (`canAttachTerminal`) must be open first; empty
+  `hostId` / `sessionCode` return immediately.
 - One request per `(hostId, sessionCode, tmuxInstance)` binding at a time
-  (`inFlight`).
-- A **positive** generation match is required to write: the answered
-  `tmux_instance` must be non-empty and equal to the one asked with. A
-  different non-empty generation marks the binding `disowned`; `''` blocks the
-  write but stays retryable.
+  (`inFlight`), cleared in `finally`.
+- **Pane eligibility** uses `generationMatchesLegacy` (`binding.ts:46`), which
+  is deliberately one-way: a pane whose recorded instance is `''` matches a
+  known expected generation.
+- **Authorising the write** is the stricter, separate test the cwd probe
+  applies: the answered generation must be non-empty **and** equal to the one
+  asked with. These two are not the same test and the implementation must not
+  merge them.
+- **`disowned`** is recorded only when the requested and answered generations
+  are **both non-empty and different** — proof the code was reused. An answered
+  `''`, or a requested `''`, blocks the write but stays retryable.
 - The pane set is re-read when the request resolves, and the per-pane decision
   is made inside the store's `set`.
 
-Two triggers, the same two, for the same reasons: the reconciled `sessions`
-payload in `useMultiHostEventWs`, and pane attach in `SessionPaneContent`.
-
 **A pane wants a provenance probe when** it is live, terminal-mode, its
 generation matches, and either `rebuild.agent` is absent **or**
-`rebuild.unverified` is true. The second clause is the correction path: a
-record the daemon has contradicted asks again instead of staying wrong.
+`rebuild.unverified` is true.
+
+**Three triggers**, because two are not enough:
+
+1. The reconciled `sessions` payload in `useMultiHostEventWs` — sweeps every
+   pane on the host, but only fires when the session list changes.
+2. Pane attach in `SessionPaneContent` — covers a pane opened after the list
+   settled.
+3. **A hook broadcast for a session whose pane still wants provenance.** This
+   is the trigger v2 lacked, and without it the common case fails: the first
+   probe runs before any event has filled the frame's `session_id`, gets
+   `found: false`, and nothing ever asks again — the session list has not
+   changed and the pane is not re-attached. The hook stream is exactly the
+   signal that the daemon now knows more than it did.
+
+**Stop conditions**, so trigger 3 cannot become a poll:
+
+- A binding that answered `found: false` is not re-asked for **30 s**, and the
+  timer resets only on a hook broadcast for that session — so an idle session
+  is asked once, and a busy one at most twice a minute.
+- A binding that answered with an identity **equal to what the record already
+  holds** is not re-asked for 30 s either. This is the oscillation guard for the
+  `unverified` clause: the projection's `TopFrame` type can legitimately
+  disagree with the ancestry root indefinitely (§3.2), and without this the
+  pane would ask on every broadcast forever.
+- `disowned` remains permanent, as in `cwd-probe`.
 
 ### 5.5 SPA — the write
 
@@ -523,28 +621,33 @@ New `RebuildPatch` arm, applied in `useTabStore.setPaneRebuild`:
 | { kind: 'agent-backfill'; record: { tmuxInstance, agent, cwd?, resumeCommand? } }
 ```
 
-- **No-op** when `prev.agent` exists and `prev.unverified` is not set. This is
-  the "有了就跳過" policy, and it lives on the SPA because only the SPA knows
-  what the record holds.
-- Writes `agent` (type, sessionId, tmuxPaneId, updatedAt), clears `unverified`,
-  sets `capturedAt`.
-- **Never clears a field it does not carry.** Unlike `agent-group`, this is a
-  fill: `cwd` is written only when the answer has one *and* the existing `cwd`
-  is absent or `cwdSource === 'pane-probe'`. A user-edited cwd
-  (`cwdSource: 'user'`) and an agent-reported one are both left alone.
-- Sets `cwdSource: 'agent-backfill'` when it does write a cwd — distinct from
-  `'agent-session-start'`, so the provenance of the value stays honest.
-- Does **not** touch `resumeCommandOverride` (§4.3).
+The generation guard is unchanged: the write matches panes on
+`(hostId, sessionCode, tmuxInstance)`.
+
+Three modes, chosen by comparing the answer's identity with the record's:
+
+| Record state | Mode | Effect |
+|---|---|---|
+| no `agent` | **fill** | writes `agent`; writes `cwd` only if the answer has one and the existing `cwd` is absent or `cwdSource === 'pane-probe'`; sets `cwdSource: 'agent-backfill'` when it writes one; leaves `resumeCommandOverride` alone |
+| `agent` with the **same** type and sessionId | **refresh** | fills only fields the record lacks (typically a `cwd` that arrived late, §5.2). Never clears, never touches the override |
+| `agent` present, `unverified`, **different** type or sessionId | **replace** | writes the whole agent group as one unit, exactly as `agent-group` does: new `agent`, the answer's `cwd` (or none), `unverified` cleared, **and `resumeCommandOverride` cleared** (§4.3). A `cwdSource: 'user'` cwd is the one thing kept |
+| `agent` present, not `unverified` | **no-op** | the "有了就跳過" policy |
+
+The **replace** mode is why the fill-only rule of v2 was not enough: correcting
+the agent while leaving the previous agent's `cwd` and override attached would
+recreate exactly the cross-identity mixture v1 §4.1 introduced whole-group
+writes to prevent.
 
 **Phase 1 additionally writes `resumeCommand`** through the existing
-`composeResumeCommand`, exactly as the `agent-group` writer does today.
-Otherwise Phase 1 would record an agent that no consumer can act on and the
-pane would still rebuild as a shell. Phase 2 removes that write together with
-the field.
+`composeResumeCommand` — but **only when the record's `resumeCommand` is
+empty**, so a command the user typed by hand into an agent-less record is not
+overwritten by a composed default. (In **replace** mode the composed command
+replaces the old one along with the rest of the group.) Phase 2 removes this
+write together with the field.
 
-**A user cwd edit now sets `cwdSource: 'user'`** (`useTabStore.ts:209`'s
-`field` arm). Without it a hand-typed cwd keeps whatever source it inherited —
-typically `'pane-probe'` — and this fill would overwrite it.
+**A user cwd edit now sets `cwdSource: 'user'`** (`useTabStore.ts:209`'s `field`
+arm). Without it a hand-typed cwd keeps whatever source it inherited —
+typically `'pane-probe'` — and **fill** would overwrite it.
 
 ### 5.6 What this replaces
 
@@ -553,10 +656,8 @@ that section is rewritten to say so. None of its four objections apply to a
 read-only query over frames: there is no row to upsert, no `SetMeta` writer to
 teach, no nil-means-no-change ambiguity, no orphan cleanup to fire.
 
-The other §9.1 degradations stand: a pane whose agent is no longer running has
-no frame, so the query answers `found: false` and the pane rebuilds as a shell;
-and `unverified` still marks a record the projection disagrees with — now with
-a repair path (§5.4) instead of only a warning.
+`unverified` keeps its existing meaning and gains a repair path (§5.4, §5.5)
+instead of only a warning.
 
 ---
 
@@ -564,89 +665,98 @@ a repair path (§5.4) instead of only a warning.
 
 | Phase | Content |
 |---|---|
-| **1** | B. Daemon: two `agent_frames` columns + migration, `SessionIdentifier` for the three agents, the shared ancestry traversal extracted from `classifyAncestor`, `GET /api/sessions/{code}/provenance`, opencode `cwd` emits. SPA: `provenance-probe.ts` + its two triggers, the `agent-backfill` patch (writing `resumeCommand` via the existing composer), `cwdSource: 'user'` on manual cwd edits. |
+| **1** | B. Daemon: two `agent_frames` columns + migration + the write contract of §5.2, `UpdateSessionIdentity`, `SessionIdentifier` for the three agents, the shared ancestry traversal extracted from `classifyAncestor`, `GET /api/sessions/{code}/provenance` with pane-tree verification and per-request memoization, opencode `cwd` emits. SPA: `provenance-probe.ts` + its three triggers and stop conditions, the `agent-backfill` patch with its three modes, `cwdSource: 'user'` on manual cwd edits. |
 | **2** | A. `useResumeTemplateStore`, `resolveResumeCommand`, the `resumeCommand` → `resumeCommandOverride` rename across every site in §4.2, the identity-scoped override clear, operation-pinned display, `POST /api/shell/resolve-command`, `ResumeTemplateSettings.tsx`, i18n. |
 
-Phase 1 first: it is the coverage bug the user has actually seen, and it is
-independently useful — after Phase 1 a pre-deploy session rebuilds its agent
-with the built-in command shapes.
+Phase 1 first: it is the coverage bug the user has actually seen, and after it a
+pre-deploy session rebuilds its agent with the built-in command shapes.
 
 The two phases **do** overlap in `spa/src/types/tab.ts`,
 `spa/src/stores/useTabStore.ts` and `spa/src/stores/useAgentStore.ts`. Phase 2
 rewrites lines Phase 1 touched; that is a rebase concern, not a design one, and
-it is called out here because v1 of this spec wrongly claimed otherwise.
+it is called out because v1 of this spec wrongly claimed otherwise.
 
 ---
 
 ## 7. Testing strategy
 
-**Go — identity on the frame (Phase 1).**
-An event with a session id fills the column; a later event without one does not
-clear it; a `SessionStart` with a new id replaces it; a `SessionStart` with
-`source == "compact"` does not; the extractor is **not** invoked when the
-column is already populated and the lifecycle is not `SessionStart` (asserted
-through a counting stub on the provider).
+**Go — identity on the frame (Phase 1).** An ordinary hook event on an existing
+frame (the `UpdateHookPath` path) writes the id; an event carrying no id does
+not clear it; a **different** id from an ordinary event replaces it (the
+opencode session-switch case, §3.3); a `cwd` arriving later than the id fills
+in; a `SessionStart` with `source == "compact"` changes nothing. Concurrency: a
+proxy attach retry loop interleaved with an identity write leaves both the
+merged subagents list and the new id intact — pinning the §5.2 table.
 
 **Go — the ownership query (Phase 1).** Table-driven over frame layouts, using
-the `isPidAliveFn` / `processStartTimeFn` / `readProcessInfoFn` seams the
-existing frame tests already use:
+the `isPidAliveFn` / `processStartTimeFn` / `readProcessInfoFn` /
+`resolvePanePIDFn` / `pidAncestorIncludesFn` seams the existing frame tests use:
 
 - one live root with an id → returned;
 - root with an empty `session_id` → `found: false`;
-- nested same-type (child's ancestry hits the parent's live frame) → the parent
-  is returned, never the child;
-- proxy-collapsed cross-type (child has no frame) → the parent is returned;
-- a stale frame (PID reused, start time mismatch) does not shadow a live root;
+- **pane id reused, old agent process still alive, old row not yet swept** →
+  `found: false`, because the pane-tree check fails. This is the Blocker case
+  from review round 2 and gets its own test;
+- nested same-type → the parent, never the child;
+- proxy-collapsed cross-type (child has no frame) → the parent;
+- a stale frame (PID reused, start-time mismatch) does not shadow a live root;
 - a walk that cannot complete excludes that frame instead of promoting it;
-- two roots in different panes of one tmux session → the more recent
-  `last_seen_at`, with the right `tmux_pane_id`;
-- no live frames → `found: false`;
-- the response's `tmux_instance` matches what `/cwd` reports for the same
-  session, and is `''` when the daemon cannot read it.
+- two roots in two panes of one tmux session → the larger `last_seen_at`, with
+  the right `tmux_pane_id`; equal `last_seen_at` → the `frame_id` tie-break;
+- generation sampling: two disagreeing samples → `tmux_instance: ""`;
+- **process reads are memoized**: a layout with a shared ancestor chain asserts
+  `readProcessInfoFn` is called once per distinct PID for the whole request.
 
-The existing `provenance_test.go` assertions are **unchanged and must stay
-green** — including `TestProvenance_NonSessionStart_NoEnvelope`, which remains
-correct precisely because Phase 1 adds no new envelope.
+The existing `provenance_test.go` assertions are unchanged and must stay green,
+including `TestProvenance_NonSessionStart_NoEnvelope` — correct precisely
+because Phase 1 adds no new envelope.
 
 **Go — probe (Phase 2).** `resolve-command`: metacharacter and oversize
-rejection without exec; a malformed body → 400; timeout → 200 `unverifiable`;
-exit 0 → `resolved: true`; exit 1 → `not-found`. The shell invocation sits
-behind a function variable so tests substitute a stub. Two integration tests
-run the real shell: one resolving a builtin, and one where the rc file spawns a
-long-lived descendant holding the output pipe, asserting the request still
-returns within the deadline and the process group is gone.
+rejection without exec; malformed body → 400; timeout → 200 `unverifiable`;
+exit 0 with a `/`-prefixed last line → `kind: "file"`; exit 0 with a bare word →
+`kind: "shell-word"`; exit 1 → `not-found`; rc chatter before the answer is
+ignored because only the last non-empty line is read. The shell invocation sits
+behind a function variable so tests substitute a stub. Two integration tests run
+the real shell: one resolving a builtin, and one where the rc file spawns a
+long-lived descendant holding the output pipe, asserting the request returns
+within the deadline and the process group is gone.
 
 **Bun.** `plugin_template_bun_integration_test.go` gains an assertion that
 `PdxStop` and `PdxUserPromptSubmit` emit `cwd`, alongside the existing
 assertion pinning the `parentID` child filter.
 
-**Vitest — probe client (Phase 1).** Mirrors `cwd-probe`'s existing suite:
-attach gate closed → no request; in-flight dedup; a different non-empty
-generation disowns the binding; `''` blocks the write but stays retryable; a
-pane re-pointed mid-flight takes nothing; a pane with `unverified` asks even
-though it has an agent.
+**Vitest — probe client (Phase 1).** Attach gate closed → no request;
+in-flight dedup; both-non-empty-and-different disowns, and neither an answered
+`''` nor a requested `''` does; a pane re-pointed mid-flight takes nothing; a
+pane with `unverified` asks even though it has an agent; **`found: false`
+followed by a hook broadcast re-asks after the cooldown and not before**; an
+answer identical to the record does not re-ask on the next broadcast.
 
-**Vitest — store (Phase 1).** `agent-backfill` no-ops when `agent` exists and
-`unverified` is unset; fills when it does not; replaces a `'pane-probe'` cwd;
-leaves a `'user'` cwd alone; leaves an `'agent-session-start'` cwd alone;
-obeys the generation guard; a later `agent-group` overwrites it wholesale; a
-manual cwd edit sets `cwdSource: 'user'`.
+**Vitest — store (Phase 1).** The four modes of §5.5 in a table: fill on an
+empty record; refresh filling only a missing `cwd`; replace on an `unverified`
+identity change writing the whole group and clearing the override; no-op on a
+verified record. Plus: a `'user'` cwd survives fill and replace; a
+`'pane-probe'` cwd is replaced; the generation guard; a later `agent-group`
+overwrites; a manual cwd edit sets `cwdSource: 'user'`; **a hand-typed
+`resumeCommand` on an agent-less record survives a fill**.
 
-**Vitest — resolution (Phase 2).** `resolveResumeCommand` across the three
-layers × (usable id / unusable id / no id) × (override / no override); `{id}`
-replaced at every occurrence; an unsafe id degrades to `fallback` and is never
-interpolated; a `fallback` containing `{id}` keeps it literal; an unknown agent
-yields `''`.
+**Vitest — resolution (Phase 2).** Three layers × (usable id / unusable id / no
+id) × (override / no override); `{id}` replaced at every occurrence; an unsafe
+id degrades to `fallback` and is never interpolated; a `fallback` containing
+`{id}` keeps it literal; an unknown agent yields `''`.
 
-**Vitest — override lifecycle (Phase 2).** A `SessionStart` with the same
-`agent.type` + `sessionId` keeps the override; a different id clears it; a
-different type clears it.
+**Vitest — override lifecycle (Phase 2).** Same identity keeps the override; a
+different sessionId clears it; a different type clears it; the replace-mode
+backfill clears it.
 
 **Vitest — UI (Phase 2).** The panel renders the composed string, not the
-template; a pane with an in-flight or failed operation renders
-`op.resumeCommand` even after a template changes in another window; editing
-writes an override; clearing restores the template; the Test button renders
-each of the four verdicts; IME composition does not commit.
+template; an in-flight operation and one with `op.created` render
+`op.resumeCommand` even after a template changes in another window; **an
+operation that failed before creating anything goes back to the live
+resolution, and the next Rebuild sends what the panel shows**; editing writes
+an override; clearing restores the template; the Test button renders each
+verdict; a result is dropped when the host picker changes; IME composition does
+not commit.
 
 **Not covered by tests, done by hand.** The reboot path (`tmux kill-server` →
 rebuild all three agents, including "uncheck the resume row → expect a bare
@@ -657,48 +767,62 @@ shell"). The user runs this themselves.
 ## 8. Compatibility
 
 Phase 1 adds an endpoint and two columns; it changes no broadcast payload, so
-an SPA and a daemon at different versions behave exactly as they do today —
-the older side simply never asks, or answers 404. This is a deliberate
-difference from v1 of this spec, whose new envelope field an older SPA would
-have read as an authoritative overwrite.
-
-Phase 2 is SPA-only apart from the probe endpoint, which the UI treats as
-optional: a 404 renders as `unverifiable`.
+an SPA and a daemon at different versions behave exactly as they do today — the
+older side never asks, or answers 404. Phase 2 is SPA-only apart from the probe
+endpoint, whose 404 renders as `unverifiable`.
 
 ---
 
-## 9. Limits (surface in UI copy)
+## 9. Limits (surface in UI copy where the user can see the consequence)
 
+- **An agent that has never sent a hook is invisible.** If a nested child has a
+  frame and its parent does not, the query names the child. This is the same
+  frameless-ancestor acceptance the shipped design makes (v1 §4.3), and it is
+  narrower here — the query runs at attach time and on hook broadcasts, by
+  which point a parent that is running normally has emitted events of its own —
+  but it is **not eliminated**. A wrong record is visible in the panel and
+  editable.
 - **Templates are global, hosts are not.** One set applies to every host; only
-  the *test* is per-host. A wrapper that exists on one machine and not another
-  resolves on one and fails on the other, and the Test button is how the user
-  finds out.
-- **The test verifies the command word, in an approximation of the pane's
-  shell.** Not the arguments, not `{id}`, and not with a tty or tmux's
-  `default-command`. A resolvable command can still fail at run time.
+  the *test* is per-host.
+- **The test approximates the pane's shell; it does not reproduce it.** No tty,
+  no tmux `default-command`, and it runs on the host the user picked rather than
+  in the pane the rebuild will create. Note for bash users: a login shell reads
+  `.bash_profile` / `.bash_login` / `.profile` and **not** `.bashrc`, so a
+  function defined only in `.bashrc` will fail the probe — and will equally be
+  missing from the tmux pane, which is why the probe uses a login shell rather
+  than papering over it.
 - **A pane whose agent has exited gets no answer.** The query reads live
-  frames; a dead agent leaves none, and the pane rebuilds as a shell.
-- **One agent group per record** (v1 §4.4) — unchanged. A tmux session running
-  two root agents in two panes records the more recent.
+  frames; the pane rebuilds as a shell.
+- **Two root agents in one tmux session:** the `SessionStart` writer records the
+  most recent `SessionStart`, the query returns the most recently *seen* frame.
+  They can name different agents; both are real roots of the session (§5.3).
 
 ---
 
-## 10. Review disposition — codex `task-mtre55dl-hnlmvd` on v1
+## 10. Review disposition
+
+### 10.1 Round 2 — codex `task-mtrggpct-ub3biv` on v2
 
 | # | Finding | Disposition |
 |---|---|---|
-| 1 | Blocker — child-first mis-attribution could not self-correct under a fill-only push | **Accepted.** Structural: a query runs after ancestry has settled, and `unverified` re-asks (§5.3, §5.4) |
-| 2 | Blocker — daemon "granted" ≠ SPA "written"; the grant could be consumed with no pane bound | **Accepted.** Structural: the answer is a response to the asker (§5.1) |
-| 3 | Important — a new daemon's backfill envelope would be read as an overwrite by an alpha.332 SPA | **Moot.** No new envelope (§8) |
-| 4 | Important — Phase 1 alone produced an agent no consumer could act on; the "no shared files" claim was false | **Accepted.** Phase 1 writes `resumeCommand` via the existing composer; the overlap is stated (§5.5, §6) |
-| 5 | Important — arming map: unstable reset rate, marked only on success, unspecified lock | **Moot.** No arming map (§5.1) |
-| 6 | Important — `exec.CommandContext` kills only the direct child; unbounded capture | **Accepted** (§4.4 process hygiene) |
-| 7 | Important — `-i` is not login; `$SHELL` is not tmux's `default-shell`; an rc-defined `type` | **Accepted**: ask tmux, `-l -i`, `builtin type` (§4.4) |
-| 8 | Important — "the override is necessarily stale" does not hold | **Accepted.** Cleared only on an agent identity change (§4.3) |
-| 9 | Important — a user-edited cwd is indistinguishable from a probed one | **Accepted.** `cwdSource: 'user'` (§4.1, §5.5) |
-| 10 | Important — a retry would send a command the panel no longer shows | **Accepted.** An operation pins the displayed string (§4.3) |
-| 11 | Important — the rename list was incomplete | **Accepted.** Full list, and `useRebuildStore`'s field is explicitly excluded (§4.2). Their finding that a stale JSON key is inert is adopted as the justification for no migration (§4.1) |
-| 12 | Minor — contradictory HTTP contract, a false "all existing tests pass" claim, undefined template-violation behaviour | **Accepted** (§4.2, §4.4, §4.5, §7) |
+| 1 | Blocker — no guarantee the query runs after ancestry settles, and no reliable re-query | **Split.** The re-query half is accepted and fixed: a third trigger on hook broadcasts, with cooldowns (§5.4) — this was the likely everyday failure. The ancestry half is **not claimed as solved**; it is the frameless-ancestor limit, now stated as such (§9) instead of being marked resolved |
+| 2 | Blocker — only alive + start-time; misses the pane-tree descendant check every event passes | **Accepted.** Step 3 of §5.3 reuses `resolvePanePIDFn` + `pidAncestorIncludesFn`, with the reused-pane-id case as its own test (§7) |
+| 3 | Important — the parse gate freezes an old conversation and blocks a late `cwd` | **Accepted.** Gate removed; every own-frame event contributes a non-empty value, made affordable by a `map[string]json.RawMessage` extraction (§5.2) |
+| 4 | Important — ordinary events go through `UpdateHookPath`, not `Upsert`; CAS re-application | **Accepted.** A per-method write contract, and a dedicated `UpdateSessionIdentity` so identity never rides a read-modify-write (§5.2) |
+| 5 | Important — correcting the agent while keeping the old agent's cwd | **Accepted.** The **replace** mode writes the whole group (§5.5) |
+| 6 | Important — override policy incomplete; Phase 1 overwrites a hand-typed command | **Accepted.** Replace-mode clears the override; Phase 1 writes a composed command only into an empty field; the policy is stated as policy, not proof (§4.3, §5.5) |
+| 7 | Important — a create-failed operation still pinned the display | **Accepted.** Pinning applies only in flight or once `op.created` exists (§4.3) |
+| 8 | Important — "most recent wins" silently changed meaning | **Accepted.** Stated as a new rule with the divergence spelled out (§5.3, §9) |
+| 9 | Important — re-ask cost and stop conditions undefined; 4 `ps` forks per process read | **Accepted.** Per-request memoization + deadline (§5.3), cooldowns and an oscillation guard (§5.4), measured cost recorded (§3.4) |
+| 10 | Important — no implementable `kind` contract; `type` output differs per shell | **Accepted.** `command -v`, last non-empty line, two structural kinds (§4.4) |
+| 11 | Minor — imprecise summary of `disowned` and the generation comparisons | **Accepted.** §5.4 names the helpers and separates eligibility from write authorisation |
+| 12 | Minor — a test result survived a host switch | **Accepted.** Keyed by `(hostId, commandWord)` (§4.5) |
+
+### 10.2 Round 1 — codex `task-mtre55dl-hnlmvd` on v1
+
+Findings 1 and 2 (Blockers) drove the switch from a pushed envelope to a query
+(§5.1); 3 and 5 became moot with the envelope and the arming map; 4, 6, 7, 8,
+9, 10, 11 and 12 were adopted and survive in v3 as the corresponding sections.
 
 ---
 
@@ -709,3 +833,7 @@ optional: a 404 renders as `unverifiable`.
 - **Unifying the two identity readers** — `result.Detail` for the `SessionStart`
   envelope, `SessionIdentifier` for the frame column. Two readers of one fact,
   kept apart so Phase 1 does not perturb shipped `SessionStart` behaviour.
+- **A cheaper process reader.** The ancestry walk needs only PPID, and
+  `readProcessPPID` already exists at one `ps` instead of four; switching
+  `classifyAncestor` to it would cut the hot path too, but it moves a shipped
+  test seam and belongs in its own change.
