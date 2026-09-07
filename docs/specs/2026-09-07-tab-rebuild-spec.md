@@ -854,6 +854,12 @@ Codex's sandbox has no network, so the main session runs these itself
 - An agent started while Purdex was closed leaves no agent record, and Rebuild
   recreates a **shell** in the right directory rather than guessing an agent
   (§9.1). Type a command into the resume row to change that.
+- **OpenCode only announces itself on its first submitted prompt.** Observed
+  during Task 3's verification: `session.created` does not fire when the TUI
+  launches, nor when a session is created from the command palette — only when
+  a prompt is sent. An opencode pane you have opened but not yet prompted
+  therefore has no agent record and rebuilds as a shell. cc and codex both fire
+  at startup.
 - A record whose agent no longer matches what the session is running is shown
   as **unverified**: still visible, unchecked by default, skipped by
   "Rebuild all" (§9.1).
