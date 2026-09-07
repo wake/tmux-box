@@ -280,6 +280,87 @@ describe('rebuildPane — production transport', () => {
     expect(report.steps.create.status).toBe('failed')
     expect(report.repointed).toBe(false)
   })
+
+  // --- send-keys generation precondition (spec §4.6.2) ---
+  //
+  // The local session cache cannot prove what a code points at, so the
+  // expectation travels with the request and the daemon decides.
+
+  /** The parsed body of the one send-keys request the operation made. */
+  function sendKeysBody(fetchMock: ReturnType<typeof vi.fn>): Record<string, unknown> {
+    const call = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/send-keys'))
+    if (!call) throw new Error('no send-keys request was made')
+    return JSON.parse(String((call[1] as RequestInit).body))
+  }
+
+  it('states the created session generation on the resume', async () => {
+    seedHost('h1')
+    seedPane('h1', 't1', 'p1', { sessionName: 'dev', cwd: '/w', resumeCommand: 'claude -c' })
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('/api/sessions')) {
+        return new Response(JSON.stringify({ code: 'new1', name: 'dev', tmux_instance: '222:2000' }), { status: 200 })
+      }
+      return new Response(null, { status: 204 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const report = await rebuildPane('h1', 't1', 'p1', plan)
+    expect(report.steps.resume.status).toBe('ok')
+    expect(sendKeysBody(fetchMock)).toEqual({
+      keys: 'claude -c\n', expected_tmux_instance: '222:2000',
+    })
+  })
+
+  it('reports a 409 from the generation precondition as a refusal, and does not re-point', async () => {
+    seedHost('h1')
+    seedPane('h1', 't1', 'p1', { sessionName: 'dev', cwd: '/w', resumeCommand: 'claude -c' })
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('/api/sessions')) {
+        return new Response(JSON.stringify({ code: 'new1', name: 'dev', tmux_instance: '222:2000' }), { status: 200 })
+      }
+      return new Response('session new1 belongs to another tmux generation', { status: 409, statusText: 'Conflict' })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const report = await rebuildPane('h1', 't1', 'p1', plan)
+    expect(report.steps.resume.status).toBe('failed')
+    expect(report.steps.resume.error).toMatch(/generation/i)
+    // The refusal is final, not a transient failure to grind against.
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/send-keys'))).toHaveLength(1)
+    expect(report.repointed).toBe(false)
+    expect(paneContent('t1', 'p1')).toMatchObject({ sessionCode: 'old111' })
+  })
+
+  it('states the pane binding generation when the resume goes to the pane own session', async () => {
+    seedHost('h1')
+    seedPane('h1', 't1', 'p1', { sessionName: 'dev', resumeCommand: 'claude -c' })
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    // `seedPane` binds the pane to old111 @ 111:1000.
+    await rebuildPane('h1', 't1', 'p1', { createSession: false, applyCwd: false, runResume: true })
+    expect(sendKeysBody(fetchMock)).toEqual({
+      keys: 'claude -c\n', expected_tmux_instance: '111:1000',
+    })
+  })
+
+  it('states no expectation when the generation it would assert is unknown', async () => {
+    seedHost('h1')
+    seedPane('h1', 't1', 'p1', { sessionName: 'dev', resumeCommand: 'claude -c' })
+    // A legacy pane that never learnt its generation asserts nothing — the
+    // same request Quick Commands sends.
+    const tab = useTabStore.getState().tabs.t1
+    const layout = tab.layout
+    if (layout.type !== 'leaf') throw new Error('fixture is a leaf')
+    useTabStore.setState({ tabs: { t1: { ...tab, layout: { ...layout, pane: { ...layout.pane,
+      content: { ...layout.pane.content, tmuxInstance: '' } as never } } } } })
+
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await rebuildPane('h1', 't1', 'p1', { createSession: false, applyCwd: false, runResume: true })
+    expect(sendKeysBody(fetchMock)).toEqual({ keys: 'claude -c\n' })
+  })
 })
 
 describe('retryResume / attachAnyway', () => {
@@ -302,7 +383,7 @@ describe('retryResume / attachAnyway', () => {
     await failedResumeOperation()
     const sendKeys = vi.fn()
     const report = await retryResume('p1', { sendKeys })
-    expect(sendKeys).toHaveBeenCalledWith('h1', 'new1', 'claude --resume S1')
+    expect(sendKeys).toHaveBeenCalledWith('h1', 'new1', 'claude --resume S1', '222:2000')
     expect(report.steps.create.status).toBe('ok')
     expect(report.steps.resume.status).toBe('ok')
     expect(report.repointed).toBe(true)
@@ -471,7 +552,7 @@ describe('retryResume / attachAnyway — target identity', () => {
     seedSessions(session({ code: 'new1', name: 'dev-2', tmux_instance: '222:2000' }))
     const sendKeys = vi.fn()
     const report = await retryResume('p1', { sendKeys })
-    expect(sendKeys).toHaveBeenCalledWith('h1', 'new1', 'claude --resume S1')
+    expect(sendKeys).toHaveBeenCalledWith('h1', 'new1', 'claude --resume S1', '222:2000')
     expect(report.repointed).toBe(true)
   })
 
@@ -479,7 +560,7 @@ describe('retryResume / attachAnyway — target identity', () => {
     await failedResumeOperation()
     const sendKeys = vi.fn()
     const report = await retryResume('p1', { sendKeys })
-    expect(sendKeys).toHaveBeenCalledWith('h1', 'new1', 'claude --resume S1')
+    expect(sendKeys).toHaveBeenCalledWith('h1', 'new1', 'claude --resume S1', '222:2000')
     expect(report.repointed).toBe(true)
   })
 })

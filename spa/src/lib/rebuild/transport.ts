@@ -26,7 +26,33 @@ export interface PinnedTransport {
   /** Throws if the host's ip/port/token changed (or vanished) since the pin. */
   assertUnchanged(): void
   createSession(name: string, cwd: string, mode: string): Promise<Session>
-  sendKeys(sessionCode: string, command: string): Promise<void>
+  /**
+   * `expectedTmuxInstance` is the tmux generation the caller believes the code
+   * belongs to (spec §4.6.2). The daemon refuses with 409 and sends nothing
+   * when it does not hold — the only authoritative check there is, because
+   * only the daemon knows the generation at the moment it acts. An empty or
+   * omitted value states no expectation, which is what every non-rebuild
+   * caller of send-keys does.
+   */
+  sendKeys(sessionCode: string, command: string, expectedTmuxInstance?: string): Promise<void>
+}
+
+/**
+ * The daemon refused the keystroke: the code no longer belongs to the
+ * generation the caller named. Not a transient failure — re-sending the same
+ * request can only be refused again — so it is surfaced as a reason the panel
+ * shows, never retried automatically.
+ *
+ * Deliberately not a `HostApiError` subclass: `extends` is evaluated when this
+ * module loads, which would make every suite that partially mocks `host-api`
+ * fail at import time rather than at call time.
+ */
+export class GenerationConflictError extends Error {
+  readonly status = 409
+  constructor(sessionCode: string, expected: string) {
+    super(`session ${sessionCode} no longer belongs to tmux generation ${expected}`)
+    this.name = 'GenerationConflictError'
+  }
 }
 
 /** Two host configurations are the same machine, credentials included. */
@@ -80,8 +106,17 @@ export function pinHost(hostId: string, expected?: HostIdentity): PinnedTranspor
       if (!res.ok) throw new HostApiError(res.status, res.statusText)
       return res.json()
     },
-    async sendKeys(sessionCode, command) {
-      const res = await request(`/api/sessions/${sessionCode}/send-keys`, { keys: command + '\n' })
+    async sendKeys(sessionCode, command, expectedTmuxInstance) {
+      // Omitted rather than sent empty when unknown: "" is the daemon's
+      // "no expectation", and spelling that out on the wire would read as an
+      // assertion the caller cannot actually make.
+      const body = expectedTmuxInstance
+        ? { keys: command + '\n', expected_tmux_instance: expectedTmuxInstance }
+        : { keys: command + '\n' }
+      const res = await request(`/api/sessions/${sessionCode}/send-keys`, body)
+      if (res.status === 409 && expectedTmuxInstance) {
+        throw new GenerationConflictError(sessionCode, expectedTmuxInstance)
+      }
       if (!res.ok) throw new HostApiError(res.status, res.statusText)
     },
   }

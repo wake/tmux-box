@@ -294,6 +294,20 @@ func (m *SessionModule) handleSwitchMode(w http.ResponseWriter, r *http.Request)
 
 type sendKeysRequest struct {
 	Keys string `json:"keys"`
+
+	// ExpectedTmuxInstance is the tmux generation the caller believes this
+	// session code belongs to (spec §4.6.2). Optional: absent or "" means the
+	// caller states no expectation and the keys go to whatever the code
+	// resolves to now — which is what Quick Commands and `executeCommand`
+	// do, and their behaviour is unchanged.
+	//
+	// When it IS stated, the daemon checks it. Codes are a reversible encoding
+	// of the tmux id `$N`, so after a tmux server restart `$0` mints the same
+	// code and a caller holding a recorded code can address a session it has
+	// never seen. Only the daemon knows the current generation at the moment
+	// it acts, so this is the only place the check can be authoritative — a
+	// client-side cache comparison is a hint, not a precondition.
+	ExpectedTmuxInstance string `json:"expected_tmux_instance"`
 }
 
 func (m *SessionModule) handleSendKeys(w http.ResponseWriter, r *http.Request) {
@@ -317,6 +331,15 @@ func (m *SessionModule) handleSendKeys(w http.ResponseWriter, r *http.Request) {
 	}
 	if info == nil {
 		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	// A stated expectation must be met exactly. An unknown current generation
+	// ("" — the probe failed or timed out) can never satisfy one: unknown
+	// authorises nothing, the same direction §4.6 takes when it refuses to
+	// declare a pane dead without evidence.
+	if req.ExpectedTmuxInstance != "" && req.ExpectedTmuxInstance != info.TmuxInstance {
+		http.Error(w, "session "+code+" belongs to another tmux generation", http.StatusConflict)
 		return
 	}
 

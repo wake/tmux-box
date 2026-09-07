@@ -47,7 +47,11 @@ export interface RebuildReport {
 
 export interface RebuildDeps {
   createSession?: (hostId: string, name: string, cwd: string, mode: string) => Promise<Session>
-  sendKeys?: (hostId: string, code: string, command: string) => Promise<void>
+  /**
+   * `expectedTmuxInstance` is the generation the resume is authorised against
+   * — the daemon refuses the keystroke when it does not hold (spec §4.6.2).
+   */
+  sendKeys?: (hostId: string, code: string, command: string, expectedTmuxInstance: string) => Promise<void>
   repoint?: (tabId: string, paneId: string, session: Session) => void
   /**
    * A lock the CALLER already holds (spec §4.11). "Rebuild all" takes the
@@ -262,10 +266,20 @@ async function runResumeStep(ctx: StepContext, enabled: boolean): Promise<void> 
     ctx.report.steps.resume = skipped('no resume command recorded')
     return
   }
+  // The generation the keystroke is authorised against (spec §4.6.2). For a
+  // session this operation created, that is the stamp the create response
+  // carried; for the pane's own session, the generation its binding records.
+  // Either can be '' — a daemon that could not read its own generation, or a
+  // pane that never learnt one — and '' states no expectation, exactly as
+  // every non-rebuild send-keys caller does. `useSessionStore` is deliberately
+  // NOT consulted: a cache cannot prove what a code points at.
   const code = ctx.created?.code ?? ctx.fallbackCode
+  const expectedTmuxInstance = ctx.created
+    ? (ctx.created.tmux_instance ?? '')
+    : ctx.binding.tmuxInstance
   try {
     ctx.pinned.assertUnchanged()
-    await ctx.sendKeys(ctx.hostId, code, ctx.resumeCommand)
+    await ctx.sendKeys(ctx.hostId, code, ctx.resumeCommand, expectedTmuxInstance)
     ctx.report.steps.resume = { status: 'ok' }
   } catch (err) {
     ctx.report.steps.resume = failed(err)
@@ -388,7 +402,7 @@ async function runRebuild(
   const createSession = deps.createSession
     ?? ((_hostId: string, name: string, dir: string, mode: string) => pinned.createSession(name, dir, mode))
   const sendKeys = deps.sendKeys
-    ?? ((_hostId: string, code: string, command: string) => pinned.sendKeys(code, command))
+    ?? ((_hostId: string, code: string, command: string, expected: string) => pinned.sendKeys(code, command, expected))
   const repoint = deps.repoint ?? defaultRepoint
 
   let created: Session | undefined
@@ -537,7 +551,7 @@ async function runResumeTail(paneId: string, withResume: boolean, deps: RebuildD
     fallbackCode: op.binding.sessionCode,
     report,
     sendKeys: deps.sendKeys
-      ?? ((_hostId: string, code: string, command: string) => pinned.sendKeys(code, command)),
+      ?? ((_hostId: string, code: string, command: string, expected: string) => pinned.sendKeys(code, command, expected)),
     repoint: deps.repoint ?? defaultRepoint,
   }
   await runResumeStep(ctx, withResume)

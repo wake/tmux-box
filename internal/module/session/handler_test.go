@@ -725,6 +725,115 @@ func TestHandlerSendKeysNotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
+// --- send-keys generation precondition (spec §4.6.2) ---
+
+// sendKeysTo posts a send-keys request built from the given JSON body and
+// returns the recorder, so each precondition case reads as one line.
+func sendKeysTo(t *testing.T, mux *http.ServeMux, code, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+code+"/send-keys", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	return w
+}
+
+// A caller that states the generation it believes it is talking to gets that
+// belief checked. Matching generation → the keys go through as before.
+func TestHandlerSendKeys_ExpectedInstanceMatches_Sends(t *testing.T) {
+	mod, _, fake := newTestModule(t)
+	mod.tmuxInstanceFn = func() string { return "111:1000" }
+	mux := http.NewServeMux()
+	mod.RegisterRoutes(mux)
+
+	fake.AddSession("target", "/tmp")
+	sessions, err := mod.ListSessions()
+	require.NoError(t, err)
+	code := sessions[0].Code
+
+	w := sendKeysTo(t, mux, code, `{"keys":"echo hello\n","expected_tmux_instance":"111:1000"}`)
+
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	require.Len(t, fake.RawKeysSent(), 1)
+}
+
+// The whole point: a session code is a reversible encoding of `$N`, so after a
+// tmux restart the code the caller recorded can belong to a stranger. The
+// daemon refuses and sends NOTHING.
+func TestHandlerSendKeys_ExpectedInstanceMismatch_Refuses409(t *testing.T) {
+	mod, _, fake := newTestModule(t)
+	mod.tmuxInstanceFn = func() string { return "222:2000" }
+	mux := http.NewServeMux()
+	mod.RegisterRoutes(mux)
+
+	fake.AddSession("target", "/tmp")
+	sessions, err := mod.ListSessions()
+	require.NoError(t, err)
+	code := sessions[0].Code
+
+	w := sendKeysTo(t, mux, code, `{"keys":"rm -rf /\n","expected_tmux_instance":"111:1000"}`)
+
+	assert.Equal(t, http.StatusConflict, w.Code)
+	assert.Empty(t, fake.RawKeysSent(), "a refused send-keys must send nothing at all")
+}
+
+// Unknown never authorises a keystroke (spec §4.6.2). A daemon that cannot
+// read its own generation cannot confirm the caller's expectation either.
+func TestHandlerSendKeys_ExpectedInstanceAgainstUnknown_Refuses409(t *testing.T) {
+	mod, _, fake := newTestModule(t)
+	mod.tmuxInstanceFn = func() string { return "" }
+	mux := http.NewServeMux()
+	mod.RegisterRoutes(mux)
+
+	fake.AddSession("target", "/tmp")
+	sessions, err := mod.ListSessions()
+	require.NoError(t, err)
+	code := sessions[0].Code
+
+	w := sendKeysTo(t, mux, code, `{"keys":"echo hello\n","expected_tmux_instance":"111:1000"}`)
+
+	assert.Equal(t, http.StatusConflict, w.Code)
+	assert.Empty(t, fake.RawKeysSent())
+}
+
+// Absent means "no expectation", so Quick Commands and `executeCommand` —
+// which post `{"keys":…}` and nothing else — are unaffected.
+func TestHandlerSendKeys_NoExpectation_SendsWhateverTheGeneration(t *testing.T) {
+	mod, _, fake := newTestModule(t)
+	mod.tmuxInstanceFn = func() string { return "999:9000" }
+	mux := http.NewServeMux()
+	mod.RegisterRoutes(mux)
+
+	fake.AddSession("target", "/tmp")
+	sessions, err := mod.ListSessions()
+	require.NoError(t, err)
+	code := sessions[0].Code
+
+	w := sendKeysTo(t, mux, code, `{"keys":"echo hello\n"}`)
+
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	require.Len(t, fake.RawKeysSent(), 1)
+}
+
+// An explicitly empty expectation is the same as none: "" is the unknown
+// value, and a caller cannot assert that a session's generation is unknown.
+func TestHandlerSendKeys_EmptyExpectation_IsNoExpectation(t *testing.T) {
+	mod, _, fake := newTestModule(t)
+	mod.tmuxInstanceFn = func() string { return "999:9000" }
+	mux := http.NewServeMux()
+	mod.RegisterRoutes(mux)
+
+	fake.AddSession("target", "/tmp")
+	sessions, err := mod.ListSessions()
+	require.NoError(t, err)
+	code := sessions[0].Code
+
+	w := sendKeysTo(t, mux, code, `{"keys":"echo hello\n","expected_tmux_instance":""}`)
+
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	require.Len(t, fake.RawKeysSent(), 1)
+}
+
 func TestHandleList_CacheDebounce(t *testing.T) {
 	mod, _, fake := newTestModule(t)
 
