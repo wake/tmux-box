@@ -100,9 +100,23 @@ export type TmuxSessionContent = Extract<PaneContent, { kind: 'tmux-session' }>
  * - `probe-cwd` — the pane cwd probe. Fills `cwd` only when it is unset;
  *   never promoted to agent provenance.
  * - `unverified` — the reconnect projection disagrees with `agent.type`.
+ * - `agent-backfill` — the daemon's answer to "who owns this pane" (spec §5.5).
+ *   Ranks BELOW `agent-group`, which is a first-hand SessionStart: this one is
+ *   inferred from a process tree, so it fills a gap, corrects a record already
+ *   flagged `unverified`, or confirms one — and otherwise does nothing.
  */
 export type RebuildPatch =
   | { kind: 'agent-group'; record: Omit<PaneRebuildRecord, 'sessionName'> }
+  | {
+      kind: 'agent-backfill'
+      record: {
+        tmuxInstance: string
+        agent: NonNullable<PaneRebuildRecord['agent']>
+        cwd?: string
+        /** Optional pin; omitted, the store composes one from the agent. */
+        resumeCommand?: string
+      }
+    }
   | { kind: 'field'; field: 'cwd' | 'resumeCommand' | 'sessionName'; value: string }
   | { kind: 'probe-cwd'; cwd: string }
   | { kind: 'unverified'; unverified: boolean }

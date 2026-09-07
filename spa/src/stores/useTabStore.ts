@@ -6,6 +6,7 @@ import { createTab } from '../types/tab'
 import { getPrimaryPane, findPane, updatePaneInLayout, splitAtPane, removePane, applyLayoutPattern, remountLeaf } from '../lib/pane-tree'
 import { contentMatches, isFilePaneContent } from '../lib/pane-utils'
 import { bindingMatchesLegacy, generationMatchesLegacy } from '../lib/rebuild/binding'
+import { composeResumeCommand } from '../lib/rebuild/composer'
 import { purdexStorage, STORAGE_KEYS, syncManager } from '../lib/storage'
 import type { UntitledDocumentState } from '../types/tab'
 
@@ -201,6 +202,67 @@ function applyRebuildPatch(c: TmuxSessionContent, patch: RebuildPatch): TmuxSess
         capturedAt: now,
       }
       break
+    }
+    case 'agent-backfill': {
+      // The daemon's ownership answer, applied under FOUR ORDERED modes: the
+      // first match wins (spec §5.5). The order is the whole policy — an
+      // unordered table let one state match two rows.
+      const { record } = patch
+      const composed = () =>
+        record.resumeCommand ?? (composeResumeCommand(record.agent.type, record.agent.sessionId) || undefined)
+
+      // Mode 1 — FILL. Nothing was known, so take the answer, but never step on
+      // provenance that outranks a process-tree inference: a cwd the user typed
+      // or a SessionStart reported stays, and only a probe's cwd is upgraded.
+      if (!prev.agent) {
+        const takesCwd = record.cwd !== undefined && (prev.cwd === undefined || prev.cwdSource === 'pane-probe')
+        next = {
+          ...prev,
+          tmuxInstance: record.tmuxInstance || prev.tmuxInstance,
+          agent: record.agent,
+          ...(takesCwd ? { cwd: record.cwd, cwdSource: 'agent-backfill' as const } : {}),
+          // Only when empty, so a command hand-typed into an agent-less record
+          // is not replaced by a composed default.
+          resumeCommand: prev.resumeCommand || composed(),
+          capturedAt: now,
+        }
+        break
+      }
+
+      const identityMatches =
+        prev.agent.type === record.agent.type &&
+        (prev.agent.sessionId ?? '') === (record.agent.sessionId ?? '')
+
+      // Mode 2 — REPLACE. The record is flagged and the answer names someone
+      // else, so the whole group goes as one unit exactly like `agent-group`:
+      // correcting the agent while leaving the previous agent's cwd and command
+      // attached is the cross-identity mixture whole-group writes exist to
+      // prevent. A `cwdSource: 'user'` cwd is the one thing kept.
+      if (prev.unverified && !identityMatches) {
+        const keepsUserCwd = prev.cwd !== undefined && prev.cwdSource === 'user'
+        next = {
+          sessionName: prev.sessionName,
+          tmuxInstance: record.tmuxInstance || prev.tmuxInstance,
+          cwd: keepsUserCwd ? prev.cwd : record.cwd,
+          cwdSource: keepsUserCwd ? 'user' : record.cwd === undefined ? undefined : 'agent-backfill',
+          agent: record.agent,
+          resumeCommand: composed(),
+          capturedAt: now,
+        }
+        break
+      }
+
+      // Mode 3 — CONFIRM. The daemon agrees, which is positive evidence the
+      // record is right. This is what makes the probe terminate: without it an
+      // agreeing answer would leave the pane eligible and re-asking forever,
+      // since the projection's TopFrame can legitimately differ indefinitely.
+      if (prev.unverified) {
+        next = { ...prev, unverified: undefined, capturedAt: now }
+        break
+      }
+
+      // Mode 4 — NO-OP. An agent is present and verified: "有了就跳過".
+      return c
     }
     case 'field': {
       // A cwd edit also stamps `cwdSource: 'user'`, so retyping the directory a

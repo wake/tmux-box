@@ -3,7 +3,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { useTabStore } from './useTabStore'
 import { createTab } from '../types/tab'
-import type { Tab } from '../types/tab'
+import type { PaneRebuildRecord, Tab } from '../types/tab'
 import { getPrimaryPane, findPane } from '../lib/pane-tree'
 
 function seed(tmuxInstance = '111:1000') {
@@ -284,6 +284,236 @@ describe('setPaneRebuild', () => {
       kind: 'field', field: 'cwd', value: '/nope',
     })
     expect(rec(tab.id)).toBeUndefined()
+  })
+})
+
+// The `agent-backfill` patch (spec §5.5): the daemon's ownership answer, applied
+// under four ORDERED, mutually exclusive modes — fill, replace, confirm, no-op.
+// Phase 3 predates `resumeCommandOverride`, so every mode here works on the old
+// `resumeCommand` field; Task 13 migrates it.
+describe('setPaneRebuild — agent-backfill', () => {
+  beforeEach(() => useTabStore.setState({ tabs: {}, tabOrder: [], activeTabId: null }))
+
+  const backfill = (record: {
+    tmuxInstance: string
+    agent: NonNullable<PaneRebuildRecord['agent']>
+    cwd?: string
+    resumeCommand?: string
+  }) => useTabStore.getState().setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'agent-backfill', record })
+
+  const seedAgentGroup = (record: Omit<PaneRebuildRecord, 'sessionName'>) =>
+    useTabStore.getState().setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'agent-group', record })
+
+  const answer = { type: 'cc', sessionId: 'S1', tmuxPaneId: '%3', updatedAt: 42 }
+
+  it('mode 1 (fill): an agent-less record takes the whole answer', () => {
+    const tab = seed()
+    backfill({ tmuxInstance: '111:1000', agent: answer, cwd: '/w/answer' })
+    expect(rec(tab.id)?.agent).toEqual(answer)
+    expect(rec(tab.id)?.cwd).toBe('/w/answer')
+    expect(rec(tab.id)?.cwdSource).toBe('agent-backfill')
+    expect(rec(tab.id)?.resumeCommand).toBe('claude --resume S1')
+  })
+
+  it('mode 1 (fill): a probe cwd is upgraded to the answer', () => {
+    const tab = seed()
+    useTabStore.getState().setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'probe-cwd', cwd: '/probe' })
+    backfill({ tmuxInstance: '111:1000', agent: answer, cwd: '/w/answer' })
+    expect(rec(tab.id)?.cwd).toBe('/w/answer')
+    expect(rec(tab.id)?.cwdSource).toBe('agent-backfill')
+  })
+
+  it('mode 1 (fill): a user-typed cwd is not overwritten', () => {
+    const tab = seed()
+    useTabStore.getState().setPaneRebuild('h1', 'abc123', '111:1000', {
+      kind: 'field', field: 'cwd', value: '/typed',
+    })
+    backfill({ tmuxInstance: '111:1000', agent: answer, cwd: '/w/answer' })
+    expect(rec(tab.id)?.cwd).toBe('/typed')
+    expect(rec(tab.id)?.cwdSource).toBe('user')
+    expect(rec(tab.id)?.agent).toEqual(answer)   // the agent still lands
+  })
+
+  it('mode 1 (fill): a SessionStart cwd is not overwritten', () => {
+    // An agent-less record can still hold an 'agent-session-start' cwd — the
+    // agent group and the directory are written together, and only the agent
+    // half is guaranteed to have survived into a persisted record.
+    const tab = seed()
+    useTabStore.setState((state) => {
+      const l = state.tabs[tab.id].layout
+      if (l.type !== 'leaf' || l.pane.content.kind !== 'tmux-session') throw new Error('bad fixture')
+      const content = {
+        ...l.pane.content,
+        rebuild: {
+          sessionName: 'dev', tmuxInstance: '111:1000',
+          cwd: '/w/start', cwdSource: 'agent-session-start' as const, capturedAt: 1,
+        },
+      }
+      return { tabs: { [tab.id]: { ...state.tabs[tab.id], layout: { ...l, pane: { ...l.pane, content } } } } }
+    })
+    backfill({ tmuxInstance: '111:1000', agent: answer, cwd: '/w/answer' })
+    expect(rec(tab.id)?.cwd).toBe('/w/start')
+    expect(rec(tab.id)?.cwdSource).toBe('agent-session-start')
+  })
+
+  it('mode 1 (fill): an answer with no cwd leaves the recorded one alone', () => {
+    const tab = seed()
+    useTabStore.getState().setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'probe-cwd', cwd: '/probe' })
+    backfill({ tmuxInstance: '111:1000', agent: answer })
+    expect(rec(tab.id)?.cwd).toBe('/probe')
+    expect(rec(tab.id)?.cwdSource).toBe('pane-probe')
+  })
+
+  it('mode 1 (fill): a hand-typed resume command survives', () => {
+    const tab = seed()
+    useTabStore.getState().setPaneRebuild('h1', 'abc123', '111:1000', {
+      kind: 'field', field: 'resumeCommand', value: 'cld-yolo -c',
+    })
+    backfill({ tmuxInstance: '111:1000', agent: answer, cwd: '/w/answer' })
+    expect(rec(tab.id)?.resumeCommand).toBe('cld-yolo -c')
+  })
+
+  it('mode 1 (fill): the answer may carry its own resume command', () => {
+    const tab = seed()
+    backfill({ tmuxInstance: '111:1000', agent: answer, resumeCommand: 'claude --resume PINNED' })
+    expect(rec(tab.id)?.resumeCommand).toBe('claude --resume PINNED')
+  })
+
+  it('mode 2 (replace): an unverified record with a different agent type is replaced whole', () => {
+    const tab = seed()
+    seedAgentGroup({
+      tmuxInstance: '111:1000', cwd: '/w/old', cwdSource: 'agent-session-start',
+      agent: { type: 'codex', sessionId: 'OLD', updatedAt: 1 },
+      resumeCommand: 'codex resume OLD', capturedAt: 1,
+    })
+    useTabStore.getState().setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'unverified', unverified: true })
+
+    backfill({ tmuxInstance: '111:1000', agent: answer, cwd: '/w/answer' })
+    expect(rec(tab.id)?.agent).toEqual(answer)
+    expect(rec(tab.id)?.cwd).toBe('/w/answer')
+    expect(rec(tab.id)?.cwdSource).toBe('agent-backfill')
+    expect(rec(tab.id)?.resumeCommand).toBe('claude --resume S1')
+    expect(rec(tab.id)?.unverified).toBeUndefined()
+  })
+
+  it('mode 2 (replace): a different session id of the same type also replaces', () => {
+    const tab = seed()
+    seedAgentGroup({
+      tmuxInstance: '111:1000', cwd: '/w/old', cwdSource: 'agent-session-start',
+      agent: { type: 'cc', sessionId: 'OLD', updatedAt: 1 },
+      resumeCommand: 'claude --resume OLD', capturedAt: 1,
+    })
+    useTabStore.getState().setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'unverified', unverified: true })
+
+    backfill({ tmuxInstance: '111:1000', agent: answer })
+    expect(rec(tab.id)?.agent?.sessionId).toBe('S1')
+    expect(rec(tab.id)?.cwd).toBeUndefined()          // whole group, so the old cwd goes
+    expect(rec(tab.id)?.cwdSource).toBeUndefined()
+    expect(rec(tab.id)?.unverified).toBeUndefined()
+  })
+
+  it('mode 2 (replace): a user-typed cwd is the one thing kept', () => {
+    const tab = seed()
+    seedAgentGroup({
+      tmuxInstance: '111:1000',
+      agent: { type: 'codex', sessionId: 'OLD', updatedAt: 1 },
+      resumeCommand: 'codex resume OLD', capturedAt: 1,
+    })
+    const store = useTabStore.getState()
+    store.setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'field', field: 'cwd', value: '/typed' })
+    store.setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'unverified', unverified: true })
+
+    backfill({ tmuxInstance: '111:1000', agent: answer, cwd: '/w/answer' })
+    expect(rec(tab.id)?.cwd).toBe('/typed')
+    expect(rec(tab.id)?.cwdSource).toBe('user')
+    expect(rec(tab.id)?.agent).toEqual(answer)
+  })
+
+  it('mode 2 (replace): a hand-typed resume command does NOT survive', () => {
+    const tab = seed()
+    seedAgentGroup({
+      tmuxInstance: '111:1000',
+      agent: { type: 'codex', sessionId: 'OLD', updatedAt: 1 },
+      resumeCommand: 'codex resume OLD', capturedAt: 1,
+    })
+    const store = useTabStore.getState()
+    store.setPaneRebuild('h1', 'abc123', '111:1000', {
+      kind: 'field', field: 'resumeCommand', value: 'cld-yolo -c',
+    })
+    store.setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'unverified', unverified: true })
+
+    backfill({ tmuxInstance: '111:1000', agent: answer })
+    expect(rec(tab.id)?.resumeCommand).toBe('claude --resume S1')
+  })
+
+  it('mode 3 (confirm): an agreeing answer clears unverified and changes nothing else', () => {
+    // This is what makes the probe TERMINATE: without it a record the daemon
+    // agrees with stays flagged, stays eligible, and re-asks every 30 s forever.
+    const tab = seed()
+    seedAgentGroup({
+      tmuxInstance: '111:1000', cwd: '/w/old', cwdSource: 'agent-session-start',
+      agent: { type: 'cc', sessionId: 'S1', tmuxPaneId: '%9', updatedAt: 1 },
+      resumeCommand: 'cld-yolo -c', capturedAt: 1,
+    })
+    useTabStore.getState().setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'unverified', unverified: true })
+
+    backfill({ tmuxInstance: '111:1000', agent: answer, cwd: '/w/answer' })
+    expect(rec(tab.id)?.unverified).toBeUndefined()
+    expect(rec(tab.id)?.agent).toEqual({ type: 'cc', sessionId: 'S1', tmuxPaneId: '%9', updatedAt: 1 })
+    expect(rec(tab.id)?.cwd).toBe('/w/old')
+    expect(rec(tab.id)?.cwdSource).toBe('agent-session-start')
+    expect(rec(tab.id)?.resumeCommand).toBe('cld-yolo -c')
+  })
+
+  it('mode 4 (no-op): an agent present and verified is left alone, same identity', () => {
+    // The case v3's unordered table let match two rows at once.
+    const tab = seed()
+    const paneId = getPrimaryPane(tab.layout).id
+    seedAgentGroup({
+      tmuxInstance: '111:1000', cwd: '/w/old', cwdSource: 'agent-session-start',
+      agent: { type: 'cc', sessionId: 'S1', updatedAt: 1 },
+      resumeCommand: 'claude --resume S1', capturedAt: 1,
+    })
+    const before = paneContentOf(tab.id, paneId)
+    backfill({ tmuxInstance: '111:1000', agent: answer, cwd: '/w/answer' })
+    expect(paneContentOf(tab.id, paneId)).toBe(before)
+  })
+
+  it('mode 4 (no-op): a verified record is left alone even when the answer disagrees', () => {
+    // "有了就跳過": only `unverified` licenses a correction.
+    const tab = seed()
+    const paneId = getPrimaryPane(tab.layout).id
+    seedAgentGroup({
+      tmuxInstance: '111:1000', cwd: '/w/old', cwdSource: 'agent-session-start',
+      agent: { type: 'codex', sessionId: 'OLD', updatedAt: 1 },
+      resumeCommand: 'codex resume OLD', capturedAt: 1,
+    })
+    const before = paneContentOf(tab.id, paneId)
+    backfill({ tmuxInstance: '111:1000', agent: answer, cwd: '/w/answer' })
+    expect(paneContentOf(tab.id, paneId)).toBe(before)
+  })
+
+  it('the generation guard rejects a mismatched instance', () => {
+    const tab = seed('111:1000')
+    useTabStore.getState().setPaneRebuild('h1', 'abc123', '222:2000', {
+      kind: 'agent-backfill',
+      record: { tmuxInstance: '222:2000', agent: answer, cwd: '/w/answer' },
+    })
+    expect(rec(tab.id)).toBeUndefined()
+  })
+
+  it('a later agent-group still overwrites everything the backfill wrote', () => {
+    const tab = seed()
+    backfill({ tmuxInstance: '111:1000', agent: answer, cwd: '/w/answer' })
+    seedAgentGroup({
+      tmuxInstance: '111:1000', cwd: '/w/fresh', cwdSource: 'agent-session-start',
+      agent: { type: 'opencode', sessionId: 'ses_x', updatedAt: 9 },
+      resumeCommand: 'opencode -s ses_x', capturedAt: 9,
+    })
+    expect(rec(tab.id)?.agent?.type).toBe('opencode')
+    expect(rec(tab.id)?.cwd).toBe('/w/fresh')
+    expect(rec(tab.id)?.cwdSource).toBe('agent-session-start')
+    expect(rec(tab.id)?.resumeCommand).toBe('opencode -s ses_x')
   })
 })
 
