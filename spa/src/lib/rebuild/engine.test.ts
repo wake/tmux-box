@@ -351,22 +351,49 @@ describe('rebuildPane — production transport', () => {
     })
   })
 
-  it('states no expectation when the generation it would assert is unknown', async () => {
+  it('refuses the resume when the pane binding states no generation', async () => {
     seedHost('h1')
     seedPane('h1', 't1', 'p1', { sessionName: 'dev', resumeCommand: 'claude -c' })
-    // A legacy pane that never learnt its generation asserts nothing — the
-    // same request Quick Commands sends.
+    // A legacy pane that never learnt its generation can assert nothing, so a
+    // rebuild resume has no authority to send at all (spec §4.6.2). Sending
+    // without an expectation is Quick Commands' behaviour, not a rebuild's.
     const tab = useTabStore.getState().tabs.t1
     const layout = tab.layout
     if (layout.type !== 'leaf') throw new Error('fixture is a leaf')
     useTabStore.setState({ tabs: { t1: { ...tab, layout: { ...layout, pane: { ...layout.pane,
       content: { ...layout.pane.content, tmuxInstance: '' } as never } } } } })
 
-    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }))
+    const fetchMock = vi.fn(async (_url: string) => new Response(null, { status: 204 }))
     vi.stubGlobal('fetch', fetchMock)
 
-    await rebuildPane('h1', 't1', 'p1', { createSession: false, applyCwd: false, runResume: true })
-    expect(sendKeysBody(fetchMock)).toEqual({ keys: 'claude -c\n' })
+    const report = await rebuildPane('h1', 't1', 'p1', { createSession: false, applyCwd: false, runResume: true })
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/send-keys'))).toHaveLength(0)
+    expect(report.steps.resume.status).toBe('failed')
+    expect(report.steps.resume.error).toMatch(/generation/i)
+    expect(report.repointed).toBe(false)
+  })
+
+  it('refuses the resume when the create response carried no generation, keeping the session', async () => {
+    seedHost('h1')
+    seedPane('h1', 't1', 'p1', { sessionName: 'dev', cwd: '/w', resumeCommand: 'claude -c' })
+    // The daemon's own instance probe failed or timed out. An unknown
+    // generation authorises nothing — but the session it just made is real.
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('/api/sessions')) {
+        return new Response(JSON.stringify({ code: 'new1', name: 'dev', tmux_instance: '' }), { status: 200 })
+      }
+      return new Response(null, { status: 204 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const report = await rebuildPane('h1', 't1', 'p1', plan)
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/send-keys'))).toHaveLength(0)
+    expect(report.created).toEqual({ code: 'new1', name: 'dev', tmuxInstance: '' })
+    expect(report.steps.create.status).toBe('ok')
+    expect(report.steps.resume.status).toBe('failed')
+    expect(report.steps.resume.error).toMatch(/generation/i)
+    expect(report.repointed).toBe(false)
+    expect(paneContent('t1', 'p1')).toMatchObject({ sessionCode: 'old111' })
   })
 })
 

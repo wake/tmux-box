@@ -82,10 +82,12 @@ function wantsProbe(
  *
  * Two generation preconditions sit either side of the request (spec §4.6.2):
  * the host's attach gate must be open before it is sent, and the generation
- * stamped on the answer must equal the one the probe asked with before it is
- * written. Anything else — a different generation, or an unknown one — is
- * discarded, because a cwd that cannot be attributed to this binding would
- * become the directory a rebuild launches the agent in.
+ * stamped on the answer must be non-empty AND equal to the one the probe asked
+ * with before it is written. Anything else — a different generation, or an
+ * unknown one on either side — is discarded, because a cwd that cannot be
+ * attributed to this binding would become the directory a rebuild launches the
+ * agent in. A pane carrying no generation therefore records no probed cwd
+ * until it adopts one from a `sessions` payload (`reconcile.ts`).
  */
 export function probeSessionCwd(hostId: string, sessionCode: string, tmuxInstance: string): void {
   if (!hostId || !sessionCode) return
@@ -100,9 +102,15 @@ export function probeSessionCwd(hostId: string, sessionCode: string, tmuxInstanc
   inFlight.add(key)
   fetchSessionCwd(hostId, sessionCode)
     .then(({ cwd, tmuxInstance: answered }) => {
-      if (answered !== tmuxInstance) {
-        // A different non-empty generation is proof the code was reused: stop
-        // asking. Unknown ('') is not proof, so it only skips this write.
+      if (answered === '' || answered !== tmuxInstance) {
+        // The write needs a POSITIVE match: a non-empty answered generation
+        // equal to the one asked with. '' on the answer is the daemon's "I
+        // could not tell" — its two-sided sampling disagreed, or
+        // `tmux display-message` timed out — and an unknown generation
+        // authorises nothing, not even for a pane that has none of its own.
+        //
+        // Only a different NON-EMPTY generation is proof the code was reused,
+        // so only that stops the asking; unknown stays retryable.
         if (answered !== '' && tmuxInstance !== '') disowned.add(key)
         return
       }

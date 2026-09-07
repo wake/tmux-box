@@ -208,11 +208,26 @@ describe('probeSessionCwd', () => {
     expect(fetchSessionCwd).toHaveBeenCalledTimes(2)
   })
 
-  it('writes when a generation-less pane gets a generation-less answer', async () => {
+  it('refuses to write when a generation-less pane gets a generation-less answer', async () => {
+    // Two unknowns are not a match: "" is the answer the daemon gives when its
+    // own two-sided sampling disagreed — the "I could not tell" signal — and an
+    // unknown generation never authorises a write (spec §4.6.2). The pane
+    // adopts a real generation from the next `sessions` payload
+    // (`reconcile.ts`), and the probe succeeds from there.
     const tab = seed({ tmuxInstance: '' })
     vi.mocked(fetchSessionCwd).mockResolvedValue(answer('/w/legacy', ''))
     probeSessionCwd('h1', 'abc123', '')
-    await vi.waitFor(() => expect(recordOf(tab.id)?.cwd).toBe('/w/legacy'))
+    await flush()
+    expect(fetchSessionCwd).toHaveBeenCalledTimes(1)
+    expect(recordOf(tab.id)?.cwd).toBeUndefined()
+  })
+
+  it('refuses to write when a known-generation pane gets a generation-less answer', async () => {
+    const tab = seed()
+    vi.mocked(fetchSessionCwd).mockResolvedValue(answer('/w/unknown', ''))
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    await flush()
+    expect(recordOf(tab.id)?.cwd).toBeUndefined()
   })
 
   it('does not ask while the host attach gate is closed', () => {

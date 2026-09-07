@@ -30,11 +30,14 @@ export interface PinnedTransport {
    * `expectedTmuxInstance` is the tmux generation the caller believes the code
    * belongs to (spec §4.6.2). The daemon refuses with 409 and sends nothing
    * when it does not hold — the only authoritative check there is, because
-   * only the daemon knows the generation at the moment it acts. An empty or
-   * omitted value states no expectation, which is what every non-rebuild
-   * caller of send-keys does.
+   * only the daemon knows the generation at the moment it acts.
+   *
+   * Required and non-empty on THIS transport, which exists only to carry a
+   * rebuild. "No expectation" is a legitimate request — Quick Commands has no
+   * generation to state — but it is not one a rebuild may make, so it is not
+   * representable here: an empty value throws rather than sending.
    */
-  sendKeys(sessionCode: string, command: string, expectedTmuxInstance?: string): Promise<void>
+  sendKeys(sessionCode: string, command: string, expectedTmuxInstance: string): Promise<void>
 }
 
 /**
@@ -107,14 +110,14 @@ export function pinHost(hostId: string, expected?: HostIdentity): PinnedTranspor
       return res.json()
     },
     async sendKeys(sessionCode, command, expectedTmuxInstance) {
-      // Omitted rather than sent empty when unknown: "" is the daemon's
-      // "no expectation", and spelling that out on the wire would read as an
-      // assertion the caller cannot actually make.
-      const body = expectedTmuxInstance
-        ? { keys: command + '\n', expected_tmux_instance: expectedTmuxInstance }
-        : { keys: command + '\n' }
-      const res = await request(`/api/sessions/${sessionCode}/send-keys`, body)
-      if (res.status === 409 && expectedTmuxInstance) {
+      if (!expectedTmuxInstance) {
+        throw new Error(`refusing to send keys to ${sessionCode} without a tmux generation to assert`)
+      }
+      const res = await request(`/api/sessions/${sessionCode}/send-keys`, {
+        keys: command + '\n',
+        expected_tmux_instance: expectedTmuxInstance,
+      })
+      if (res.status === 409) {
         throw new GenerationConflictError(sessionCode, expectedTmuxInstance)
       }
       if (!res.ok) throw new HostApiError(res.status, res.statusText)

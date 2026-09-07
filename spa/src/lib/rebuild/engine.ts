@@ -303,14 +303,27 @@ async function runResumeStep(ctx: StepContext, enabled: boolean): Promise<void> 
   // The generation the keystroke is authorised against (spec §4.6.2). For a
   // session this operation created, that is the stamp the create response
   // carried; for the pane's own session, the generation its binding records.
-  // Either can be '' — a daemon that could not read its own generation, or a
-  // pane that never learnt one — and '' states no expectation, exactly as
-  // every non-rebuild send-keys caller does. `useSessionStore` is deliberately
-  // NOT consulted: a cache cannot prove what a code points at.
+  // `useSessionStore` is deliberately NOT consulted: a cache cannot prove what
+  // a code points at.
   const code = ctx.created?.code ?? ctx.fallbackCode
   const expectedTmuxInstance = ctx.created
     ? (ctx.created.tmux_instance ?? '')
     : ctx.binding.tmuxInstance
+  if (!expectedTmuxInstance) {
+    // Either the daemon could not read its own generation when it answered the
+    // create, or the pane never learnt one. Both mean the same thing: there is
+    // nothing to assert, so nothing authorises the keystroke. Omitting the
+    // precondition — which is what Quick Commands legitimately does, having no
+    // generation to state — would let a retry after a tmux restart type the
+    // resume command into a stranger's session at the same code.
+    ctx.report.steps.resume = {
+      status: 'failed',
+      error: ctx.created
+        ? `the daemon did not report a tmux generation for the session it created (${code}), so the resume cannot be authorised`
+        : `pane ${ctx.paneId} records no tmux generation, so the resume cannot be authorised`,
+    }
+    return
+  }
   try {
     ctx.pinned.assertUnchanged()
     await ctx.sendKeys(ctx.hostId, code, ctx.resumeCommand, expectedTmuxInstance)
