@@ -82,6 +82,7 @@ export function TerminatedPane({ content, tabId, paneId }: Props) {
             paneId={paneId}
             record={record}
             terminated={reason}
+            binding={{ hostId: content.hostId, sessionCode: content.sessionCode, tmuxInstance: content.tmuxInstance }}
             onRebuild={handleRebuild}
             onEdit={handleEdit}
           />

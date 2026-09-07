@@ -5,6 +5,7 @@ import { useTabStore } from '../stores/useTabStore'
 import { useHostStore } from '../stores/useHostStore'
 import { useSessionStore } from '../stores/useSessionStore'
 import { useWorkspaceStore } from '../stores/useWorkspaceStore'
+import { useRebuildStore } from '../stores/useRebuildStore'
 import { findPane } from '../lib/pane-tree'
 import type { PaneContent, Tab } from '../types/tab'
 
@@ -222,5 +223,80 @@ describe('TerminatedPane rebuild action set', () => {
 
     expect(paneRebuild(PANE_ID)?.cwd).toBe('/w/edited')
     expect(paneRebuild('pane-2')?.cwd).toBe('/w/p')
+  })
+})
+
+// A finished operation belongs to the rebuild cycle it started from. When the
+// pane dies again under a NEW binding, the panel must start clean — otherwise
+// every field stays frozen on the previous cycle's created session and neither
+// Rebuild nor Retry nor Attach is reachable (only an app reload clears it).
+describe('TerminatedPane rebuild operation scope', () => {
+  const previousCycle = {
+    paneId: PANE_ID,
+    tabId: TAB_ID,
+    hostId: 'host-1',
+    plan: { createSession: true, applyCwd: true, runResume: true },
+    binding: { hostId: 'host-1', sessionCode: 'dev001', tmuxInstance: '123:456' },
+    resumeCommand: 'claude --resume S1',
+    createdSession: {
+      code: 'new001', name: 'my-session-2', cwd: '/w/p', mode: 'terminal',
+      cc_session_id: '', cc_model: '', has_relay: false, tmux_instance: '222:2000',
+    },
+    status: 'done' as const,
+    report: {
+      hostId: 'host-1',
+      created: { code: 'new001', name: 'my-session-2', tmuxInstance: '222:2000' },
+      steps: {
+        create: { status: 'ok' as const },
+        resume: { status: 'ok' as const },
+        repoint: { status: 'ok' as const },
+      },
+      repointed: true,
+    },
+    startedAt: 1,
+  }
+
+  it('offers Rebuild again when the pane died under a new binding', () => {
+    useRebuildStore.setState({ operations: { [PANE_ID]: previousCycle }, lockedBy: null })
+    // The pane now sits on the session that rebuild created, and that one died.
+    const content = {
+      ...makeContent('tmux-restarted'),
+      sessionCode: 'new001',
+      tmuxInstance: '222:2000',
+      rebuild: { sessionName: 'my-session-2', tmuxInstance: '222:2000', cwd: '/w/p', capturedAt: 2 },
+    }
+    setupTab(content)
+    render(<TerminatedPane content={content} tabId={TAB_ID} paneId={PANE_ID} />)
+
+    expect(screen.getByRole('button', { name: 'Rebuild' })).toBeEnabled()
+    expect(screen.queryByTestId('rebuild-created-name')).toBeNull()
+    // The rows describe nothing that already happened, so they stay editable.
+    expect(screen.getByRole('checkbox', { name: 'Working directory' })).toBeEnabled()
+  })
+
+  it('still shows the operation that belongs to the pane binding it started from', () => {
+    useRebuildStore.setState({
+      operations: {
+        [PANE_ID]: {
+          ...previousCycle,
+          report: {
+            ...previousCycle.report,
+            steps: {
+              create: { status: 'ok' as const },
+              resume: { status: 'failed' as const, error: 'send-keys failed: 500' },
+              repoint: { status: 'skipped' as const },
+            },
+            repointed: false,
+          },
+        },
+      },
+      lockedBy: null,
+    })
+    const content = makeContent('tmux-restarted')
+    setupTab(content)
+    render(<TerminatedPane content={content} tabId={TAB_ID} paneId={PANE_ID} />)
+
+    expect(screen.getByRole('button', { name: 'Retry resume' })).toBeEnabled()
+    expect(screen.getByTestId('rebuild-created-name')).toHaveTextContent('my-session-2')
   })
 })

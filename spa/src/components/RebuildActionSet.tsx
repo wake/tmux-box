@@ -9,7 +9,7 @@
 // causes (spec §4.8) — component state could not.
 import { useEffect, useRef, useState } from 'react'
 import { useI18nStore } from '../stores/useI18nStore'
-import { useRebuildStore } from '../stores/useRebuildStore'
+import { usePaneOperation, type RebuildBinding } from '../stores/useRebuildStore'
 import { retryResume, attachAnyway, type RebuildPlan, type StepResult } from '../lib/rebuild/engine'
 import { AGENT_NAMES } from '../lib/agent-metadata'
 import type { PaneRebuildRecord, TerminatedReason } from '../types/tab'
@@ -38,6 +38,14 @@ interface Props {
   record: PaneRebuildRecord
   /** Set on a dead pane; drives the create-row lock and the host-removed copy. */
   terminated?: TerminatedReason
+  /**
+   * The pane's current binding. A stored operation belongs to the binding it
+   * started from, so this is what tells a finished operation apart from one
+   * that still describes the pane in front of the user: after a rebuild the
+   * pane sits on the session that operation created, and if THAT dies the
+   * panel has to start over rather than stay frozen on the old report.
+   */
+  binding?: RebuildBinding
   /** Overrides the store lookup — used by the popover and by tests. */
   operation?: RebuildOperationView
   onRebuild: (plan: RebuildPlan) => void
@@ -187,6 +195,7 @@ export function RebuildActionSet({
   paneId,
   record,
   terminated,
+  binding,
   operation,
   onRebuild,
   onEdit,
@@ -194,7 +203,7 @@ export function RebuildActionSet({
   onAttachAnyway,
 }: Props) {
   const t = useI18nStore((s) => s.t)
-  const storedOperation = useRebuildStore((s) => s.operations[paneId])
+  const storedOperation = usePaneOperation(paneId, binding)
   const op: RebuildOperationView | undefined = operation ?? storedOperation
 
   // Per-row overrides on top of the derived defaults, so a value that arrives

@@ -60,7 +60,6 @@ interface RebuildState {
   beginOperation: (op: Omit<RebuildOperation, 'status' | 'startedAt' | 'finishedAt'>) => void
   patchOperation: (paneId: string, patch: Partial<RebuildOperation>) => void
   finishOperation: (paneId: string, patch: Partial<RebuildOperation>) => void
-  clearOperation: (paneId: string) => void
 
   /** A token when granted, `null` when a DIFFERENT owner already holds it. */
   acquireOperationLock: (owner: string) => OperationLockToken | null
@@ -99,13 +98,6 @@ export const useRebuildStore = create<RebuildState>()((set, get) => ({
       }
     }),
 
-  clearOperation: (paneId) =>
-    set((state) => {
-      if (!state.operations[paneId]) return state
-      const { [paneId]: _dropped, ...rest } = state.operations
-      return { operations: rest }
-    }),
-
   acquireOperationLock: (owner) => {
     const held = get().lockedBy
     if (held === null) {
@@ -127,6 +119,35 @@ export const useRebuildStore = create<RebuildState>()((set, get) => ({
     set((state) => (state.lockedBy === token.owner ? { lockedBy: null } : state))
   },
 }))
+
+/** Two bindings describe the same session under the same tmux generation. */
+export function sameBinding(a: RebuildBinding, b: RebuildBinding): boolean {
+  return a.hostId === b.hostId && a.sessionCode === b.sessionCode && a.tmuxInstance === b.tmuxInstance
+}
+
+/**
+ * The pane's operation, scoped to the rebuild cycle it started from.
+ *
+ * An operation is stored per pane — `retryResume` / `attachAnyway` are
+ * pane-addressed and the entry has to outlive the panel's remount — but it
+ * describes ONE binding: the `(hostId, sessionCode, tmuxInstance)` the pane
+ * held when the operation began. Once the pane moves off that binding (a
+ * successful re-point, the session picker, a later reconciliation), the
+ * operation no longer describes the pane in front of the user, and a pane that
+ * dies again must present a clean panel rather than the previous cycle's
+ * frozen rows.
+ *
+ * Scoping on the READ rather than clearing on an event is deliberate:
+ * staleness is a property of the data — the binding no longer matches — not of
+ * an event some lifecycle hook has to be watching for and can miss.
+ */
+export function usePaneOperation(paneId: string, binding?: RebuildBinding): RebuildOperation | undefined {
+  return useRebuildStore((s) => {
+    const op = s.operations[paneId]
+    if (!op) return undefined
+    return !binding || sameBinding(op.binding, binding) ? op : undefined
+  })
+}
 
 /**
  * Run `body` while holding the operation lock for `owner`, releasing it however
