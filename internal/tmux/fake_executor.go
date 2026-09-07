@@ -53,6 +53,7 @@ type FakeExecutor struct {
 	panePIDs             map[string]string   // target → pane pid
 	activePanePIDs       map[string]string   // target → active pane pid
 	paneSessions         map[string]string   // target → session name
+	paneSessionIDs       map[string]string   // target → session id ("$N")
 	paneCwds             map[string]string   // target → pane_current_path
 	paneSizes            map[string][2]int   // target → [cols, rows]
 	rawKeysCalls         []RawKeysCall
@@ -84,6 +85,7 @@ func NewFakeExecutor() *FakeExecutor {
 		panePIDs:             make(map[string]string),
 		activePanePIDs:       make(map[string]string),
 		paneSessions:         make(map[string]string),
+		paneSessionIDs:       make(map[string]string),
 		paneCwds:             make(map[string]string),
 		paneSizes:            make(map[string][2]int),
 		windowOptions:        make(map[string]string),
@@ -401,6 +403,26 @@ func (f *FakeExecutor) PaneSessionName(target string) (string, error) {
 		return session, nil
 	}
 	return "", fmt.Errorf("pane session not configured for %s", target)
+}
+
+// SetPaneSessionID is a seam of its own, not a side effect of
+// SetPaneSessionName: the id and the name are separate facts about a pane, a
+// session keeps its id across a rename, and RenameSession (which preserves ids)
+// touches neither map. A test can therefore make the two disagree, which is
+// what a rename swap looks like from a pane's point of view.
+func (f *FakeExecutor) SetPaneSessionID(target, sessionID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.paneSessionIDs[target] = sessionID
+}
+
+func (f *FakeExecutor) PaneSessionID(target string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if id, ok := f.paneSessionIDs[target]; ok {
+		return id, nil
+	}
+	return "", fmt.Errorf("pane session id not configured for %s", target)
 }
 
 func (f *FakeExecutor) PanePID(target string) (string, error) {

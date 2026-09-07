@@ -58,6 +58,10 @@ type Executor interface {
 	PasteText(target, text string) error
 	PaneCurrentPath(target string) (string, error)
 	PaneSessionName(target string) (string, error)
+	// PaneSessionID returns the tmux session ID ("$N") the pane belongs to.
+	// Unlike the session name it is immutable for the life of the session, so
+	// a caller that must not be confused by a rename asks for this instead.
+	PaneSessionID(target string) (string, error)
 	PanePID(target string) (string, error)
 	ActivePanePID(target string) (string, error)
 	PaneChildCommands(target string) ([]string, error)
@@ -292,6 +296,14 @@ func (r *RealExecutor) PaneSessionName(target string) (string, error) {
 	out, err := exec.Command("tmux", "display-message", "-p", "-t", target, "#{session_name}").Output()
 	if err != nil {
 		return "", fmt.Errorf("tmux display-message session_name: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (r *RealExecutor) PaneSessionID(target string) (string, error) {
+	out, err := exec.Command("tmux", "display-message", "-p", "-t", target, "#{session_id}").Output()
+	if err != nil {
+		return "", fmt.Errorf("tmux display-message session_id: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
