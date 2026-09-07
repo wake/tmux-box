@@ -11,13 +11,13 @@
 //     by code alone — that is exactly the merge-two-different-sessions
 //     mistake the key exists to prevent. Those panes are surfaced as "needs
 //     attention" and rebuilt one at a time.
-//  3. **The lock is taken once**, as `rebuild:batch`, and its token is passed
-//     down to every group's engine call (`RebuildDeps.lockToken`). The lock is
-//     re-entrant per owner and `rebuild:<paneId>` is a different owner, so a
-//     group acquiring its own would simply be refused.
+//  3. **The lock is taken once**, as `rebuild:batch`, and its GRANT is passed
+//     down to every group's engine call (`RebuildDeps.lockGrant`). Re-entry is
+//     granted on the strength of that grant alone, never on the owner name —
+//     two independent batches share the name and must not interleave.
 import { collectLeaves } from '../pane-tree'
 import { useTabStore } from '../../stores/useTabStore'
-import { useRebuildStore, type OperationLockToken, type RebuildBinding } from '../../stores/useRebuildStore'
+import { useRebuildStore, type OperationLockGrant, type RebuildBinding } from '../../stores/useRebuildStore'
 import { rebuildPane, repointMember, type RebuildDeps, type RebuildPlan, type RebuildReport } from './engine'
 import { pinHost } from './transport'
 import type { PaneRebuildRecord, Tab, TerminatedReason } from '../../types/tab'
@@ -206,25 +206,25 @@ export async function runBatchRebuild(deps: RebuildDeps = {}): Promise<BatchRepo
   const { groups, excluded } = groupForBatch(candidates)
   const tabOfPane = new Map(candidates.map((c) => [c.paneId, c.tabId]))
 
-  const token = useRebuildStore.getState().acquireOperationLock(BATCH_LOCK_OWNER)
-  if (!token) {
+  const grant = useRebuildStore.getState().acquireOperationLock(BATCH_LOCK_OWNER)
+  if (!grant) {
     return { status: 'blocked', blockedBy: useRebuildStore.getState().lockedBy ?? '', groups: [], excluded }
   }
   try {
     const results: BatchGroupResult[] = []
     for (const group of groups) {
-      results.push(await runGroup(group, tabOfPane, token, deps))
+      results.push(await runGroup(group, tabOfPane, grant, deps))
     }
     return { status: 'ok', groups: results, excluded }
   } finally {
-    useRebuildStore.getState().releaseOperationLock(token)
+    useRebuildStore.getState().releaseOperationLock(grant)
   }
 }
 
 async function runGroup(
   group: BatchGroup,
   tabOfPane: Map<string, string>,
-  token: OperationLockToken,
+  grant: OperationLockGrant,
   deps: RebuildDeps,
 ): Promise<BatchGroupResult> {
   // Every group was planned before the first one ran, so by the time this one
@@ -238,7 +238,7 @@ async function runGroup(
   }
   const report = await rebuildPane(group.hostId, group.tabId, group.sourcePaneId, group.plan, {
     ...deps,
-    lockToken: token,
+    lockGrant: grant,
     expectedBinding: binding,
   })
   // The full `Session` the engine created — `report.created` is only its

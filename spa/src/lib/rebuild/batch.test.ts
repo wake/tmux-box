@@ -13,6 +13,8 @@ import { useHostStore } from '../../stores/useHostStore'
 import { useTabStore } from '../../stores/useTabStore'
 import { useSessionStore } from '../../stores/useSessionStore'
 import { rebuildPane } from './engine'
+import { restoreAll } from '../snapshot/restore'
+import type { WorkspaceSnapshot } from '../snapshot/types'
 import type { Session } from '../host-api'
 import type { PaneRebuildRecord, Tab, TmuxSessionContent } from '../../types/tab'
 
@@ -141,6 +143,13 @@ function rebindPane(tabId: string, _paneId: string, sessionCode: string) {
       [tabId]: { ...tab, layout: { ...layout, pane: { ...layout.pane, content: { ...layout.pane.content, sessionCode } as never } } },
     },
   })
+}
+
+function emptySnapshot(): WorkspaceSnapshot {
+  return {
+    version: 1, capturedAt: 0, tabs: {}, tabOrder: [], activeTabId: null,
+    workspaces: [], activeWorkspaceId: null, sessionMeta: {},
+  }
 }
 
 function deferred<T = void>() {
@@ -365,6 +374,103 @@ describe('runBatchRebuild', () => {
     expect(member.reason).toMatch(/host/)
   })
 
+  it('refuses a second batch while the first is still running', async () => {
+    // Both batches take the lock under the SAME owner name. Owner equality is
+    // not identity: admitting the second would let it finish first and release
+    // the lock out from under the batch that is still awaiting its create.
+    seedPane('h1', 't1', 'p1', { sessionName: 'dev' })
+    const creating = deferred<void>()
+    const finishCreate = deferred<void>()
+    const firstCreate = vi.fn(async () => {
+      creating.resolve()
+      await finishCreate.promise
+      return session({ code: 'new1', name: 'dev', tmux_instance: '222:2000' })
+    })
+
+    const first = runBatchRebuild({ createSession: firstCreate, sendKeys: vi.fn() })
+    await creating.promise
+
+    const secondCreate = vi.fn()
+    const second = await runBatchRebuild({ createSession: secondCreate, sendKeys: vi.fn() })
+    expect(second.status).toBe('blocked')
+    expect(second.blockedBy).toBe(BATCH_LOCK_OWNER)
+    expect(secondCreate).not.toHaveBeenCalled()
+    // The refused batch must not have dropped the running batch's lock.
+    expect(useRebuildStore.getState().lockedBy).toBe(BATCH_LOCK_OWNER)
+
+    finishCreate.resolve()
+    await first
+    expect(useRebuildStore.getState().lockedBy).toBeNull()
+  })
+
+  it('keeps a legacy snapshot restore out for as long as a batch holds the lock', async () => {
+    seedPane('h1', 't1', 'p1', { sessionName: 'dev' })
+    const creating = deferred<void>()
+    const finishCreate = deferred<void>()
+    const first = runBatchRebuild({
+      createSession: vi.fn(async () => {
+        creating.resolve()
+        await finishCreate.promise
+        return session({ code: 'new1', name: 'dev', tmux_instance: '222:2000' })
+      }),
+      sendKeys: vi.fn(),
+    })
+    await creating.promise
+
+    await expect(
+      restoreAll(emptySnapshot(), { now: 1, buildSnapshotFn: async () => emptySnapshot() }),
+    ).rejects.toThrow(new RegExp(BATCH_LOCK_OWNER))
+    expect(Object.keys(useTabStore.getState().tabs)).toEqual(['t1'])
+
+    finishCreate.resolve()
+    await first
+  })
+
+  it('does not release the lock while a second batch is still running', async () => {
+    // Two groups, and both batches run under the same owner name. Pre-fix the
+    // second batch was admitted on owner equality, and the FIRST one's release
+    // then freed the lock while the second was still awaiting its own create —
+    // at which point a legacy restore could replace the whole tab tree.
+    seedPane('h1', 't1', 'p1', { sessionName: 'dev' })
+    seedPane('h1', 't2', 'p2', { sessionName: 'other' }, { sessionCode: 'old222' })
+
+    const firstEntered = deferred<void>()
+    const releaseFirst = deferred<void>()
+    const releaseSecond = deferred<void>()
+    const first = runBatchRebuild({
+      createSession: vi.fn(async () => {
+        firstEntered.resolve()
+        await releaseFirst.promise
+        return session({ code: 'new1', name: 'dev', tmux_instance: '222:2000' })
+      }),
+      sendKeys: vi.fn(),
+    })
+    await firstEntered.promise
+
+    let secondRunning = true
+    const second = runBatchRebuild({
+      // Only reached if the second batch is admitted at all.
+      createSession: vi.fn(async () => {
+        await releaseSecond.promise
+        return session({ code: 'new2', name: 'other', tmux_instance: '222:2000' })
+      }),
+      sendKeys: vi.fn(),
+    }).finally(() => { secondRunning = false })
+
+    releaseFirst.resolve()
+    await first
+
+    expect(secondRunning).toBe(false)
+    expect(useRebuildStore.getState().lockedBy).toBeNull()
+    // Nothing is in flight, so the lock really did hand over rather than leak.
+    await expect(
+      restoreAll(emptySnapshot(), { now: 1, buildSnapshotFn: async () => emptySnapshot() }),
+    ).resolves.toBeTruthy()
+
+    releaseSecond.resolve()
+    expect((await second).status).toBe('blocked')
+  })
+
   it('reports an empty run without taking the lock hostage', async () => {
     const report = await runBatchRebuild({ createSession: vi.fn(), sendKeys: vi.fn() })
     expect(report.status).toBe('ok')
@@ -373,34 +479,48 @@ describe('runBatchRebuild', () => {
   })
 })
 
-describe('rebuildPane — a caller-supplied lock token', () => {
+describe('rebuildPane — a caller-supplied lock grant', () => {
   beforeEach(() => {
     resetStores()
     seedHost('h1')
     seedPane('h1', 't1', 'p1', { sessionName: 'dev' })
   })
 
-  it('refuses a token that is no longer the current holder', async () => {
-    const token = useRebuildStore.getState().acquireOperationLock(BATCH_LOCK_OWNER)!
-    useRebuildStore.getState().releaseOperationLock(token)
+  it('refuses a grant that is no longer the current holder', async () => {
+    const grant = useRebuildStore.getState().acquireOperationLock(BATCH_LOCK_OWNER)!
+    useRebuildStore.getState().releaseOperationLock(grant)
     useRebuildStore.getState().acquireOperationLock('snapshot:restoreAll')
     const create = vi.fn()
     const report = await rebuildPane('h1', 't1', 'p1', { createSession: true, applyCwd: true, runResume: false },
-      { createSession: create, sendKeys: vi.fn(), lockToken: token })
+      { createSession: create, sendKeys: vi.fn(), lockGrant: grant })
     expect(create).not.toHaveBeenCalled()
     expect(report.steps.create.status).toBe('failed')
     expect(useRebuildStore.getState().lockedBy).toBe('snapshot:restoreAll')
   })
 
   it('does not release the caller lock when the borrowed run ends', async () => {
-    const token = useRebuildStore.getState().acquireOperationLock(BATCH_LOCK_OWNER)!
+    const grant = useRebuildStore.getState().acquireOperationLock(BATCH_LOCK_OWNER)!
     await rebuildPane('h1', 't1', 'p1', { createSession: true, applyCwd: true, runResume: false }, {
       createSession: vi.fn(async () => session({ code: 'new1', name: 'dev', tmux_instance: '222:2000' })),
       sendKeys: vi.fn(),
-      lockToken: token,
+      lockGrant: grant,
     })
     expect(useRebuildStore.getState().lockedBy).toBe(BATCH_LOCK_OWNER)
-    useRebuildStore.getState().releaseOperationLock(token)
+    useRebuildStore.getState().releaseOperationLock(grant)
     expect(useRebuildStore.getState().lockedBy).toBeNull()
+  })
+
+  it('refuses a stale grant even when the holder carries the same owner name', async () => {
+    // Owner equality used to be enough. Two batches share `rebuild:batch`, so
+    // a grant left over from a finished one must not open the running one.
+    const stale = useRebuildStore.getState().acquireOperationLock(BATCH_LOCK_OWNER)!
+    useRebuildStore.getState().releaseOperationLock(stale)
+    useRebuildStore.getState().acquireOperationLock(BATCH_LOCK_OWNER)
+    const create = vi.fn()
+    const report = await rebuildPane('h1', 't1', 'p1', { createSession: true, applyCwd: true, runResume: false },
+      { createSession: create, sendKeys: vi.fn(), lockGrant: stale })
+    expect(create).not.toHaveBeenCalled()
+    expect(report.steps.create.status).toBe('failed')
+    expect(useRebuildStore.getState().lockedBy).toBe(BATCH_LOCK_OWNER)
   })
 })

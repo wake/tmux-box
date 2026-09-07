@@ -48,13 +48,24 @@ export interface RebuildOperation {
 /**
  * A grant from {@link RebuildState.acquireOperationLock}.
  *
- * `outermost` is the whole model: a nested acquire by the SAME owner hands
- * back a re-entry token whose release is a no-op, so an inner call
- * (`undoLastRestore` → `restoreAll`) can never unlock the world underneath the
- * caller that is still relying on it. Only the outermost token releases.
+ * `id` is the whole model. Owner names are not identities: two independent
+ * `runBatchRebuild` calls both name themselves `rebuild:batch`, so admitting a
+ * second acquire on a name match let them interleave — and the first to finish
+ * then dropped the lock while the second was still awaiting, opening the door
+ * to a legacy snapshot restore. So a grant is identified by an unforgeable
+ * symbol minted at the moment the lock was taken, and both nesting and release
+ * compare THAT.
+ *
+ * Nesting is asked for, never inferred: a caller that already holds a grant
+ * passes it back in, and gets a grant sharing the holder's `id` with
+ * `outermost: false`, whose release is a no-op. That is what lets
+ * `undoLastRestore` → `restoreAll` nest without the inner call unlocking the
+ * world underneath the caller still relying on it.
  */
-export interface OperationLockToken {
+export interface OperationLockGrant {
   readonly owner: string
+  /** Identity of the grant chain that holds the lock. */
+  readonly id: symbol
   readonly outermost: boolean
 }
 
@@ -67,20 +78,30 @@ interface RebuildState {
    * replace the tab snapshot underneath an in-flight rebuild's re-point.
    */
   lockedBy: string | null
+  /**
+   * The grant that actually took the lock. `lockedBy` is its owner name, kept
+   * as its own field because the UI subscribes to it; this is the identity.
+   */
+  lockGrant: OperationLockGrant | null
 
   beginOperation: (op: Omit<RebuildOperation, 'status' | 'startedAt' | 'finishedAt'>) => void
   patchOperation: (paneId: string, patch: Partial<RebuildOperation>) => void
   finishOperation: (paneId: string, patch: Partial<RebuildOperation>) => void
 
-  /** A token when granted, `null` when a DIFFERENT owner already holds it. */
-  acquireOperationLock: (owner: string) => OperationLockToken | null
-  /** No-op unless the token is the outermost grant of the current holder. */
-  releaseOperationLock: (token: OperationLockToken | null) => void
+  /**
+   * A grant when the lock was free, or when `parent` is the grant currently
+   * holding it (a nested acquire). `null` in every other case — including a
+   * second top-level acquire by an owner of the same name.
+   */
+  acquireOperationLock: (owner: string, parent?: OperationLockGrant | null) => OperationLockGrant | null
+  /** No-op unless the grant is the outermost one the current holder was issued. */
+  releaseOperationLock: (grant: OperationLockGrant | null) => void
 }
 
 export const useRebuildStore = create<RebuildState>()((set, get) => ({
   operations: {},
   lockedBy: null,
+  lockGrant: null,
 
   beginOperation: (op) =>
     set((state) => ({
@@ -109,25 +130,28 @@ export const useRebuildStore = create<RebuildState>()((set, get) => ({
       }
     }),
 
-  acquireOperationLock: (owner) => {
-    const held = get().lockedBy
-    if (held === null) {
-      set({ lockedBy: owner })
-      return { owner, outermost: true }
+  acquireOperationLock: (owner, parent) => {
+    if (get().lockedBy === null) {
+      const grant: OperationLockGrant = { owner, id: Symbol(owner), outermost: true }
+      set({ lockedBy: owner, lockGrant: grant })
+      return grant
     }
-    // Same owner → re-entry. NOTE for the engine: `rebuild:<paneId>` is
-    // pane-specific, so re-entry alone would let two operations on one pane
-    // both proceed. The engine refuses that on `operations[paneId].status`
-    // BEFORE it ever gets here.
-    if (held === owner) return { owner, outermost: false }
+    // Held. The only way in is to already be inside it: the caller hands back
+    // the grant it is holding, and gets a re-entry grant on the same chain.
+    // A name match is NOT enough — that is what let two batches interleave.
+    const held = get().lockGrant
+    if (parent && held && parent.id === held.id) {
+      return { owner, id: held.id, outermost: false }
+    }
     return null
   },
 
-  releaseOperationLock: (token) => {
-    if (!token || !token.outermost) return
-    // A token that is not the current holder's (forged, or left over from an
-    // earlier operation) must never unlock somebody else's work.
-    set((state) => (state.lockedBy === token.owner ? { lockedBy: null } : state))
+  releaseOperationLock: (grant) => {
+    if (!grant || !grant.outermost) return
+    // A grant that is not the current holder's (forged, or left over from an
+    // earlier operation under the same name) must never unlock somebody
+    // else's work.
+    set((state) => (state.lockGrant?.id === grant.id ? { lockedBy: null, lockGrant: null } : state))
   },
 }))
 
@@ -162,19 +186,22 @@ export function usePaneOperation(paneId: string, binding?: RebuildBinding): Rebu
 
 /**
  * Run `body` while holding the operation lock for `owner`, releasing it however
- * the body settles. When another owner holds it, `onRefused` is called with the
- * holder's name and the body never runs.
+ * the body settles. `body` is handed the grant, so a nested call can thread it
+ * on as its own `parent` — the only way into a lock somebody already holds.
+ * When the lock is held and `parent` is not that holder's grant, `onRefused` is
+ * called with the holder's name and the body never runs.
  */
 export async function withOperationLock<T>(
   owner: string,
-  body: () => Promise<T>,
+  body: (grant: OperationLockGrant) => Promise<T>,
   onRefused: (holder: string) => T,
+  parent?: OperationLockGrant | null,
 ): Promise<T> {
-  const token = useRebuildStore.getState().acquireOperationLock(owner)
-  if (!token) return onRefused(useRebuildStore.getState().lockedBy ?? '')
+  const grant = useRebuildStore.getState().acquireOperationLock(owner, parent)
+  if (!grant) return onRefused(useRebuildStore.getState().lockedBy ?? '')
   try {
-    return await body()
+    return await body(grant)
   } finally {
-    useRebuildStore.getState().releaseOperationLock(token)
+    useRebuildStore.getState().releaseOperationLock(grant)
   }
 }

@@ -5,7 +5,7 @@ import type { PaneContent, PaneLayout, Tab } from '../../types/tab'
 import { useTabStore } from '../../stores/useTabStore'
 import { useWorkspaceStore } from '../../features/workspace/store'
 import { useSessionStore } from '../../stores/useSessionStore'
-import { withOperationLock } from '../../stores/useRebuildStore'
+import { withOperationLock, type OperationLockGrant } from '../../stores/useRebuildStore'
 import { buildSnapshot } from './capture'
 import { readPrevSnapshot, writePrevSnapshot } from './storage'
 import { RestoreError } from './types'
@@ -323,11 +323,13 @@ export interface RestoreDeps {
   now?: number
   buildSnapshotFn?: typeof buildSnapshot
   /**
-   * Internal: the operation-lock owner the CALLER already holds. Only
+   * Internal: the operation-lock grant the CALLER already holds. Only
    * {@link undoLastRestore} sets it, so the {@link restoreAll} it delegates to
-   * re-enters the undo's own lock instead of being refused by it.
+   * re-enters the undo's own lock instead of being refused by it. The grant
+   * itself, not its owner name: names are not identities, and re-entry granted
+   * on a name match would let two unrelated callers interleave.
    */
-  lockOwner?: string
+  lockGrant?: OperationLockGrant
 }
 
 /**
@@ -459,11 +461,12 @@ export async function restoreTabLayout(
   snap: WorkspaceSnapshot,
   deps?: RestoreDeps,
 ): Promise<RestoreReport> {
-  const owner = deps?.lockOwner ?? SNAPSHOT_LOCK_OWNER.restoreLayout
+  const owner = SNAPSHOT_LOCK_OWNER.restoreLayout
   return withOperationLock(
     owner,
     () => applySnapshotRestore(snap, { rebuild: false }, deps),
     (holder) => lockRefused(owner, holder),
+    deps?.lockGrant,
   )
 }
 
@@ -476,11 +479,12 @@ export async function restoreAll(
   snap: WorkspaceSnapshot,
   deps?: RestoreDeps,
 ): Promise<RestoreReport> {
-  const owner = deps?.lockOwner ?? SNAPSHOT_LOCK_OWNER.restoreAll
+  const owner = SNAPSHOT_LOCK_OWNER.restoreAll
   return withOperationLock(
     owner,
     () => applySnapshotRestore(snap, { rebuild: true }, deps),
     (holder) => lockRefused(owner, holder),
+    deps?.lockGrant,
   )
 }
 
@@ -523,17 +527,18 @@ async function applySnapshotRestore(
  * Undo the most recent restore by replaying the `-prev` backup through
  * {@link restoreAll}. Returns `null` when there is no backup to undo.
  *
- * The nested {@link restoreAll} is told to run under THIS action's lock owner,
- * so its acquire is a re-entry that cannot drop the lock when it returns — the
- * undo owns the lock from its first line to its last.
+ * The nested {@link restoreAll} is handed THIS action's lock grant, so its
+ * acquire is a re-entry that cannot drop the lock when it returns — the undo
+ * owns the lock from its first line to its last.
  */
 export async function undoLastRestore(deps?: RestoreDeps): Promise<RestoreReport | null> {
   const prev = readPrevSnapshot()
   if (!prev) return null
-  const owner = deps?.lockOwner ?? SNAPSHOT_LOCK_OWNER.undo
+  const owner = SNAPSHOT_LOCK_OWNER.undo
   return withOperationLock(
     owner,
-    () => restoreAll(prev, { ...deps, lockOwner: owner }),
+    (grant) => restoreAll(prev, { ...deps, lockGrant: grant }),
     (holder) => lockRefused(owner, holder),
+    deps?.lockGrant,
   )
 }

@@ -17,7 +17,7 @@ import {
   sameBinding,
   useRebuildStore,
   withOperationLock,
-  type OperationLockToken,
+  type OperationLockGrant,
   type RebuildBinding,
 } from '../../stores/useRebuildStore'
 import { useTabStore } from '../../stores/useTabStore'
@@ -56,13 +56,13 @@ export interface RebuildDeps {
   repoint?: (tabId: string, paneId: string, session: Session) => void
   /**
    * A lock the CALLER already holds (spec §4.11). "Rebuild all" takes the
-   * operation lock once as `rebuild:batch` and hands its token to every group
-   * it runs, because the lock is re-entrant per *owner* and `rebuild:<paneId>`
-   * is a different owner — each group acquiring its own would simply be
-   * refused. The token is verified against the current holder before it is
-   * honoured, so a stale one cannot smuggle an operation past the lock.
+   * operation lock once as `rebuild:batch` and hands its grant to every group
+   * it runs; a group acquiring its own would simply be refused, because the
+   * lock only ever has one holder. The grant is what proves the caller is
+   * genuinely inside that lock — a name would not, and a stale grant is
+   * refused, so neither can smuggle an operation past it.
    */
-  lockToken?: OperationLockToken
+  lockGrant?: OperationLockGrant
   /**
    * The binding the CALLER planned this operation from (spec §4.11).
    *
@@ -388,15 +388,17 @@ export async function rebuildPane(
   if (paneBusy(paneId)) {
     return refuse(`a rebuild is already running for pane ${paneId}`)
   }
-  const borrowed = deps.lockToken
+  const borrowed = deps.lockGrant
   if (borrowed) {
-    const holder = useRebuildStore.getState().lockedBy
-    if (holder !== borrowed.owner) {
-      return refuse(`the caller's operation lock (${borrowed.owner}) is no longer held`)
-    }
-    // Run inside the caller's lock — and never release it: the batch is not
-    // finished when one group is.
-    return runRebuild(hostId, tabId, paneId, plan, deps)
+    // Re-enter the caller's lock, which only its own grant can open. The
+    // re-entry grant's release is a no-op, so a finished group never drops the
+    // lock the batch around it is still relying on.
+    return withOperationLock(
+      paneOwner(paneId),
+      () => runRebuild(hostId, tabId, paneId, plan, deps),
+      () => refuse(`the caller's operation lock (${borrowed.owner}) is no longer held`),
+      borrowed,
+    )
   }
   return withOperationLock(
     paneOwner(paneId),
