@@ -1,6 +1,6 @@
 # Resume Templates & Provenance Backfill — Implementation Plan
 
-**Status:** v3 — revised after codex plan reviews `task-mtrhhdht-bl382f` (1 Blocker, 11 Important, 1 Minor) and `task-mtrhv4kc-507pse` (2 Blocker, 2 Important); dispositions at the end.
+**Status:** v4 — revised after codex plan reviews `task-mtrhhdht-bl382f` (1 Blocker, 11 Important, 1 Minor) and `task-mtrhv4kc-507pse` (2 Blocker, 2 Important) and `task-mtri4jku-kvcoe5` (1 Blocker, 1 Important, 1 Minor); dispositions at the end.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -260,7 +260,7 @@ Placement matters:
 - A provider that does not implement `SessionIdentifier` skips the call.
 
 **`applyFrameEvent` has several success returns and only the general one is
-obvious. Wire all three own-frame returns, and neither proxy return:**
+obvious. Wire all four own-frame returns, and none of the parent-frame ones:**
 
 **The governing rule** — write the identity exactly when the frame being
 returned is the frame of the process that sent the event. Judge every return by
@@ -470,9 +470,15 @@ so it can never on its own justify keeping a frame. v2 of this plan had a row
 that said a hit at the last allowed depth should be kept, and that was wrong for
 exactly this reason.
 
-The table below is by **termination reason** — one row fires per walk, so the
-rows are exhaustive and mutually exclusive. `SawPanePID` is an independent bit
-that may be true or false in any of them.
+The table below is by **termination reason**, over the walks that end with
+`err == nil` — one row fires per walk, so within that scope the rows are
+exhaustive and mutually exclusive. `SawPanePID` is an independent bit that may
+be true or false in any of them.
+
+Two paths end with a **non-nil error** and are outside the table: a
+`FindByPanePID` failure (`ancestor.go:60`) and context cancellation. Both
+exclude the frame and propagate to the handler, which answers `found: false`
+(Task 7). They are never treated as a verdict.
 
 | The walk ended because… | Verdict | Frame kept? |
 |---|---|---|
@@ -483,10 +489,16 @@ that may be true or false in any of them.
 | the self-parent guard fired (`ancestorInfo.PPID == ppid`) | `Indeterminate` | no |
 | identity of a candidate frame was unverifiable | `Indeterminate` | no |
 
-One thing happens before the loop: **if `frame.PID == panePID`, set
-`SawPanePID` immediately**, then walk from the PPID as normal. The loop starts
-one level up and would otherwise never see the frame itself, and
-`PidAncestorIncludes` counts that case as inside the tree.
+**Where `SawPanePID` is set — two places, both load-bearing:**
+
+1. **Before the loop**, if `frame.PID == panePID`. The loop starts one level up
+   and would otherwise never see the frame itself, and `PidAncestorIncludes`
+   counts that case as inside the tree.
+2. **At the top of every iteration, against the current `ppid`, before the
+   candidate lookup and before any early return.** Checking only after reading
+   `ancestorInfo` would miss the commonest case of all — the first parent *is*
+   the pane shell (measured depth 1) — whenever that same iteration also hits an
+   early return.
 
 **Is a completed walk actually reachable?** Measured on this machine
 (2026-09-08, `ps -axo pid,ppid,comm`), for every pane currently running an
@@ -528,10 +540,18 @@ created per request in Task 7, never package-level.
   - a stale frame (start-time mismatch) does not shadow a live root;
   - an unreadable process mid-walk → that frame excluded, others unaffected;
   - a chain longer than `proxyMaxDepth` → excluded;
-  - **`panePID` seen but the cap exhausted before `ppid <= 1` → excluded**, and
-    **`panePID` seen at the last allowed depth with `ppid <= 1` on the next
-    read → kept**: together these pin that `SawPanePID` never rescues an
-    incomplete walk, and that a complete one is not rejected for being long;
+  - **`panePID` seen but the cap exhausted → excluded.** `SawPanePID` never
+    rescues an incomplete walk;
+  - **the deepest walk that still completes → kept.** Mind where the root check
+    lives: `ancestor.go:56` tests `ppid <= 1` at the **top of an iteration**, and
+    a loop that runs out of iterations falls through to `Indeterminate`
+    (`ancestor.go:112`). So the last *useful* read is the one taken in iteration
+    `proxyMaxDepth-1`; if it yields PPID 1, no further iteration exists to
+    observe it. Write the fixture as an exact PID sequence over `depth = 0…4`
+    where the read in the **second-to-last** iteration returns PPID 1, so the
+    final iteration's entry check returns `Root`. **Do not move or add a root
+    check outside the loop to make a deeper fixture pass** — that would change
+    `classifyAncestor`'s behaviour, which Task 5 froze;
   - **`ppid == 0` appears on the chain while `CheckPane: false`** → no pane
     match is recorded and the verdict is unchanged from today, pinning that the
     options struct replaced a `0` sentinel that would have been unsound;
@@ -561,6 +581,19 @@ created per request in Task 7, never package-level.
 **Files:**
 - Create: `internal/module/agent/provenance_handler.go`, `..._test.go`
 - Modify: `internal/module/agent/module.go` (route registration)
+- Modify: `internal/tmux/executor.go` — add `PaneSessionID(target string)
+  (string, error)` to the `Executor` interface and to `RealExecutor`. It mirrors
+  `PaneSessionName` (`executor.go:291-297`) with `#{session_id}` instead of
+  `#{session_name}` — a five-line method.
+- **Modify: `internal/tmux/fake_executor.go`** — the matching method and a
+  `SetPaneSessionID` seam **independent of** `SetPaneSessionName`
+  (`fake_executor.go:391`), so a test can make the two disagree. Note
+  `FakeExecutor.RenameSession` (`fake_executor.go:235`) preserves ids but does
+  not touch `paneSessions`, which is what makes the rename-swap fixture
+  expressible. The three test wrappers that embed `*tmux.FakeExecutor`
+  (`probe/activity_test.go:21`, `codex/probe_intent_screen_change_test.go:602`,
+  `module/agent/probe_orchestrator_test.go:53`) inherit the new method and need
+  no edit.
 
 **Response:**
 ```json
@@ -575,19 +608,31 @@ after the frame work and report `""` when the samples disagree or a read fails.
 `""` authorises nothing on the SPA side, so this is the safety property, not a
 nicety.
 
-**How to enumerate the session's panes — no new `Executor` method.** The
-interface has no way to list a session's panes (`ActivePaneMetadata` is the
-active pane only), and widening it would drag `FakeExecutor` and every existing
-test along. Instead, go through the frames, which are the only panes that can
-possibly answer:
+**How to enumerate the session's panes — through the frames, and through the
+session *id*, never the name.** The `Executor` interface cannot list a session's
+panes (`ActivePaneMetadata` is the active pane only), so go through the frames,
+which are the only panes that can possibly answer:
 
 1. `frames.ListAll()` → the distinct `pane_id`s that have any frame;
-2. for each, `m.resolvePaneSession(paneID)` (`module.go:644`, already
-   pane → `(sessionName, sessionCode)` via `PaneSessionName`) and keep the ones
-   whose code equals `{code}`;
+2. for each, `m.tmux.PaneSessionID(paneID)` → the tmux session id (`$N`), then
+   `session.EncodeSessionID(id)` (`codec.go:22`, pure, returns
+   `(string, error)`), and keep the panes whose code equals `{code}`. **Any
+   error at either step excludes that pane** — no fallback to a name lookup;
 3. run `resolvePaneOwners` on those.
 
 A pane with no frame has no agent to report, so skipping it costs nothing.
+
+**Do not use `m.resolvePaneSession` (`module.go:644`) here**, even though it
+looks like exactly this function. It resolves pane → session *name* → code
+through `LookupCodeByName`, whose cache is deliberately stale for up to 250 ms
+after an external mutation (`session/lookup.go:12,23`). That is fine on the hook
+hot path it was built for, and wrong here: rename session1 away and session2
+into its name inside that window, and a query for session1's code can be
+answered with session2's agent — same tmux server, so the generation stamp
+matches and the pane-tree check passes too. A tmux session id is immutable for
+the life of the session and `EncodeSessionID` is a pure function of it, so this
+route has no such window. It is the same reason `handler.go` prefers
+`TmuxSessionID` over the name whenever a hook carries one.
 
 Build **one** memoized reader and **one** 5 s context for the whole request, and
 pass them to `resolvePaneOwners` for every pane. Collect owners with a non-empty `session_id`; none →
@@ -606,7 +651,11 @@ treats "no answer" uniformly and a dead code is a normal race.
   session is not considered; **the rename-swap case** — the fake reports session
   ids that encode to the right codes while the *names* have been swapped between
   two live sessions, so an implementation routed through `PaneSessionName` fails
-  here and only here; unknown code → `found: false` with a 200; a
+  here and only here. The fixture must be complete or a name-based
+  implementation passes by accident: perform the swap through a temporary name
+  (A→tmp, B→A, tmp→B), then `SetPaneSessionName` both panes to their new names
+  while leaving the id mapping untouched, and prime the name cache with the
+  pre-swap mapping. A swap with no stale cache entry proves nothing; unknown code → `found: false` with a 200; a
   disagreeing generation sample → `tmux_instance: ""`; the deadline expiring →
   `found: false`; and **memoization across two panes**, asserted the same
   positive way as Task 6 — the exact PID set, once each, including the ancestor
@@ -1162,7 +1211,7 @@ themselves** — do not schedule it, and do not kill any tmux server.
 | B1 | `PaneOwner` had no `FrameID` for Task 7's tie-break; the walker's pane-membership handoff and its boundaries were undefined | Task 6: `FrameID`, the `ancestor.go` modification, the boundary matrix, the last-allowed-depth and early-stop tests |
 | I1 | Task 3 named only the general return; two own-frame early returns were missing | Task 3's return-point table + per-path tests |
 | I2 | Tasks 9/12/13 referenced fields that did not exist yet | Task 12 *adds* the override, Task 13 *removes* the old field; Phase 3 uses only the old one; a build step per task |
-| I3 | No way to enumerate a session's panes — `Executor` has none | Task 7 goes through `frames.ListAll()` + `resolvePaneSession`, no interface change |
+| I3 | No way to enumerate a session's panes — `Executor` has none | Task 7 goes through `frames.ListAll()` + a per-pane session-id lookup (superseded by round 2 finding 1 below, which replaced the name-based lookup) |
 | I4 | "batch skips a pane that resolves to `''`" would have been a regression | Task 13: an empty command turns off `runResume` only |
 | I5 | `op.created` does not exist | Task 14 uses `status` / `report.created`, and extends `RebuildOperationView` |
 | I6 | Fixture list incomplete; two files mix record and operation fields; no reactivity test | Task 13's fixture table and the template-change re-render test |
@@ -1183,6 +1232,24 @@ themselves** — do not schedule it, and do not kill any tmux server.
 | 2b | `panePID == 0` is not a safe "disabled" sentinel — a PPID of 0 is representable | an `ancestryOpts{PanePID, CheckPane}` struct, plus a `ppid == 0` test |
 | 3 | Task 3 missed a fourth own-frame return (`subagent_id_missing`), mislabelled the `StopFailure` detach as proxy, and implied the parent list was exhaustive | Task 3's table is rewritten around the governing rule, with the fourth return and its test |
 | 4 | Task 11b's tests could not catch scheduling *before* normalization | the ordering test, using an event that *causes* the transition |
+
+**From the third plan review** (codex `task-mtri4jku-kvcoe5`, 1 Blocker,
+1 Important, 1 Minor):
+
+| # | Finding | Where it landed |
+|---|---|---|
+| 1 | **Blocker** — round 2's Task 7 fix existed only in the disposition table; the task body still specified `resolvePaneSession`. (A revision script aborted on an assertion before writing, and the commit message claimed the fix anyway.) | Task 7's Files and Context now specify `PaneSessionID` + `EncodeSessionID` with its error handling, and the rename-swap fixture is spelled out |
+| 2 | Important — "a hit at the last allowed depth, with `ppid <= 1` on the next read" cannot happen: the root check is at the top of an iteration and an exhausted loop falls through to `Indeterminate` | the test is restated as an exact PID sequence whose second-to-last read yields PPID 1, with an explicit ban on moving the root check |
+| 2b | `SawPanePID` must also be accumulated at the top of each iteration, before the candidate lookup — otherwise the commonest case (the first parent *is* the pane) is missed whenever that iteration returns early | the two-places rule in Task 6 |
+| 3 | Minor — the six rows are exhaustive only over `err == nil` terminations | the table's scope is stated, and the two error paths are named |
+
+Confirmed by that round and needing no change: no fifth own-frame return exists
+(`frame_ops.go:121` carries the sender's frame id but its row was already
+deleted at `:117`, so it must not write); `ancestryOpts` with `CheckPane:false`
+adds no process read and changes no ordering; every `tmux.Executor`
+implementation outside the two real ones embeds `*tmux.FakeExecutor` and
+inherits new methods; and Task 11b's ordering test is expressible against the
+existing `FakeSocket` without stubbing normalization.
 
 Also adopted from the first review: **do not memoize `classifyAncestor`**
 (`provenance_test.go:170` depends on successive reads differing), and **a green
