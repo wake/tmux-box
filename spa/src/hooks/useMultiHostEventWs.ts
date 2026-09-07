@@ -13,6 +13,7 @@ import { debugStatuslineTest } from '../lib/statusline-test-debug'
 import { scanPaneTree } from '../lib/pane-tree'
 import { reconcileSessionsPayload, type ReconcilePane } from '../lib/rebuild/reconcile'
 import { closeAttachGate, openAttachGate } from '../lib/rebuild/attach-gate'
+import { probeMissingCwds } from '../lib/rebuild/cwd-probe'
 import { hostWsUrl, fetchWsTicket, fetchHistory, type Session } from '../lib/host-api'
 import { checkHealth, type HealthResult } from '../lib/host-connection'
 import { ConnectionStateMachine } from '../lib/connection-state-machine'
@@ -155,6 +156,11 @@ export function useMultiHostEventWs() {
               // this host may attach (spec §4.6). A payload we could not parse
               // is no evidence, so this stays inside the try.
               openAttachGate(hostId)
+
+              // First of the two cwd-probe triggers (spec §4.4). Runs after
+              // reconciliation so a pane about to be marked dead, or one that
+              // just adopted this generation, is judged on its final binding.
+              probeMissingCwds(hostId)
             } catch { /* ignore */ }
             return
           }

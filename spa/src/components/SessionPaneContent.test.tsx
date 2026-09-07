@@ -8,6 +8,7 @@ import { useConfigStore } from '../stores/useConfigStore'
 import { useWorkspaceStore } from '../features/workspace/store'
 import type { Pane, Tab, Workspace } from '../types/tab'
 import type { ConfigData } from '../lib/host-api'
+import { probeSessionCwd } from '../lib/rebuild/cwd-probe'
 
 const terminalViewProps = vi.hoisted(() => ({ last: undefined as Record<string, unknown> | undefined }))
 
@@ -27,6 +28,8 @@ vi.mock('./TerminatedPane', () => ({
     <div data-testid="terminated-pane">Terminated: {content.terminated}</div>
   ),
 }))
+
+vi.mock('../lib/rebuild/cwd-probe', () => ({ probeSessionCwd: vi.fn() }))
 
 const HOST_ID = 'test-host'
 
@@ -69,6 +72,7 @@ function makeWorkspace(id: string, tabs: string[]): Workspace {
 
 beforeEach(() => {
   cleanup()
+  vi.mocked(probeSessionCwd).mockClear()
   terminalViewProps.last = undefined
   useHostStore.setState({
     hosts: { [HOST_ID]: { id: HOST_ID, name: 'mlab', ip: '100.64.0.2', port: 7860, order: 0 } },
@@ -160,6 +164,44 @@ describe('SessionPaneContent', () => {
       })
       render(<SessionPaneContent pane={pane} isActive={true} />)
       expect(terminalViewProps.last?.workspaceId).toBe('wsB')
+    })
+  })
+
+  // A pane opened after the session list has settled gets no further
+  // broadcast, so attach is the second cwd-probe trigger (spec §4.4).
+  describe('cwd probe on attach', () => {
+    it('probes the pane binding once when a terminal pane attaches', () => {
+      const pane = makePane({
+        content: {
+          kind: 'tmux-session', hostId: HOST_ID, sessionCode: 'dev001',
+          mode: 'terminal', cachedName: '', tmuxInstance: '222:2000',
+        },
+      })
+      setupTabStore(pane)
+      const view = render(<SessionPaneContent pane={pane} isActive={true} />)
+      view.rerender(<SessionPaneContent pane={pane} isActive={false} />)
+      expect(probeSessionCwd).toHaveBeenCalledTimes(1)
+      expect(probeSessionCwd).toHaveBeenCalledWith(HOST_ID, 'dev001', '222:2000')
+    })
+
+    it('does not probe a stream-mode or terminated pane', () => {
+      const stream = makePane({
+        content: { kind: 'tmux-session', hostId: HOST_ID, sessionCode: 'dev001', mode: 'stream', cachedName: '', tmuxInstance: '222:2000' },
+      })
+      setupTabStore(stream)
+      render(<SessionPaneContent pane={stream} isActive={true} />)
+
+      const dead = makePane({
+        content: {
+          kind: 'tmux-session', hostId: HOST_ID, sessionCode: 'dev001',
+          mode: 'terminal', cachedName: '', tmuxInstance: '222:2000',
+          terminated: 'session-closed',
+        },
+      })
+      setupTabStore(dead)
+      render(<SessionPaneContent pane={dead} isActive={true} />)
+
+      expect(probeSessionCwd).not.toHaveBeenCalled()
     })
   })
 

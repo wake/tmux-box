@@ -1,4 +1,4 @@
-import { useCallback } from 'react'
+import { useCallback, useEffect } from 'react'
 import TerminalView from './TerminalView'
 import ConversationView from './ConversationView'
 import { TerminatedPane } from './TerminatedPane'
@@ -10,6 +10,7 @@ import { useWorkspaceStore } from '../features/workspace/store'
 import { handoff, fetchWsTicket } from '../lib/host-api'
 import { useHostStore } from '../stores/useHostStore'
 import { findPane } from '../lib/pane-tree'
+import { probeSessionCwd } from '../lib/rebuild/cwd-probe'
 import type { PaneRendererProps } from '../lib/module-registry'
 
 const EMPTY_PRESETS: Array<{ name: string; command: string }> = []
@@ -19,6 +20,8 @@ export function SessionPaneContent({ pane, isActive }: PaneRendererProps) {
   const sessionCode = content.kind === 'tmux-session' ? content.sessionCode : ''
   const hostId = content.kind === 'tmux-session' ? content.hostId : ''
   const mode = content.kind === 'tmux-session' ? content.mode : 'terminal'
+  const tmuxInstance = content.kind === 'tmux-session' ? content.tmuxInstance : ''
+  const terminated = content.kind === 'tmux-session' ? content.terminated : undefined
 
   const wsBase = useHostStore((s) => s.getWsBase(hostId))
   const fetchHost = useSessionStore((s) => s.fetchHost)
@@ -52,6 +55,15 @@ export function SessionPaneContent({ pane, isActive }: PaneRendererProps) {
       useStreamStore.getState().setHandoffProgress(hostId, session.code, '')
     }
   }, [session, hostId, fetchHost])
+
+  // Second of the two cwd-probe triggers (spec §4.4): a pane opened after the
+  // session list has settled gets no further `sessions` broadcast, so it would
+  // otherwise never learn its own directory. Once per binding — the probe
+  // itself deduplicates against the sessions-branch sweep.
+  useEffect(() => {
+    if (mode !== 'terminal' || terminated) return
+    probeSessionCwd(hostId, sessionCode, tmuxInstance)
+  }, [hostId, sessionCode, tmuxInstance, mode, terminated])
 
   // Look up tabId from store (pane renderers don't receive tabId as a prop)
   const tabId = useTabStore((s) => {
