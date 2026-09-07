@@ -97,8 +97,9 @@ export async function ensureSessions(
  *
  * Per-pane behaviour (keyed by the composite `[hostId][sessionCode]`):
  * - `reattached` / `rebuilt` → adopt `entry.newCode`, refresh `cachedName` from
- *   `entry.session.name`, and clear any `terminated` marker (the session is now
- *   attachable again).
+ *   `entry.session.name`, stamp `entry.session.tmux_instance` (falling back to
+ *   the pane's current instance when the payload has none), and clear any
+ *   `terminated` marker (the session is now attachable again).
  * - `failed` → keep the pane's code but mark `terminated: 'tmux-restarted'`.
  *   The reason is FIXED for the restore path (codex plan-review): restore never
  *   guesses `'session-closed'` / `'host-removed'`.
@@ -135,12 +136,22 @@ export function remapLayoutSessions(
       return
     }
 
-    // reattached | rebuilt — adopt new code/name, clear terminated marker.
+    // reattached | rebuilt — adopt new code/name/generation, clear terminated
+    // marker. Stamping the generation is mandatory (spec §4.6.1): the session we
+    // re-point to may live on a NEW tmux server, and keeping the pane's old
+    // instance would make the next reconciliation mark it dead again. When the
+    // payload carries no instance (older daemon / probe failure) keep the one we
+    // already know — never downgrade it to ''.
     const { terminated: _cleared, ...rest } = content
     void _cleared
     updates.push({
       paneId: pane.id,
-      content: { ...rest, sessionCode: entry.newCode, cachedName: entry.session.name },
+      content: {
+        ...rest,
+        sessionCode: entry.newCode,
+        cachedName: entry.session.name,
+        tmuxInstance: entry.session.tmux_instance ?? content.tmuxInstance,
+      },
     })
   })
 
