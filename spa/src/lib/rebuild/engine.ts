@@ -22,6 +22,8 @@ import {
 } from '../../stores/useRebuildStore'
 import { useTabStore } from '../../stores/useTabStore'
 import { useSessionStore } from '../../stores/useSessionStore'
+import { liveResumeTemplates } from '../../stores/useResumeTemplateStore'
+import { resolveResumeCommand } from './composer'
 import { findPane } from '../pane-tree'
 import type { Session } from '../host-api'
 import type { TmuxSessionContent } from '../../types/tab'
@@ -161,7 +163,7 @@ function publishRefusal(
     binding: content
       ? { hostId: content.hostId, sessionCode: content.sessionCode, tmuxInstance: content.tmuxInstance }
       : { hostId, sessionCode: '', tmuxInstance: '' },
-    resumeCommand: content?.rebuild?.resumeCommand ?? '',
+    resumeCommand: resolveResumeCommand(content?.rebuild, liveResumeTemplates),
     report,
   })
   useRebuildStore.getState().finishOperation(paneId, { report })
@@ -495,7 +497,10 @@ async function runRebuild(
   }
   const record = content.rebuild
   const baseName = record?.sessionName || content.cachedName
-  const resumeCommand = record?.resumeCommand ?? ''
+  // Resolved ONCE, here, and pinned into the operation below: a retry acts on
+  // the session this run created and must re-send the string it already sent,
+  // not one a template edited in the meantime would now produce (spec §4.3).
+  const resumeCommand = resolveResumeCommand(record, liveResumeTemplates)
   const cwd = plan.applyCwd ? (record?.cwd ?? '') : ''
 
   useRebuildStore.getState().beginOperation({

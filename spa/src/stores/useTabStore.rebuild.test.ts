@@ -5,6 +5,12 @@ import { useTabStore } from './useTabStore'
 import { createTab } from '../types/tab'
 import type { PaneRebuildRecord, Tab } from '../types/tab'
 import { getPrimaryPane, findPane } from '../lib/pane-tree'
+import { resolveResumeCommand } from '../lib/rebuild/composer'
+import { useResumeTemplateStore, type ResumeTemplateLookup } from './useResumeTemplateStore'
+
+/** The shipped templates: the store answers from `DEFAULT_RESUME_TEMPLATES`. */
+const defaultTemplates: ResumeTemplateLookup = (agentType) =>
+  useResumeTemplateStore.getState().getTemplates(agentType)
 
 function seed(tmuxInstance = '111:1000') {
   const tab = createTab({
@@ -57,7 +63,7 @@ describe('setPaneRebuild', () => {
       record: {
         tmuxInstance: '111:1000', cwd: '/w/p', cwdSource: 'agent-session-start',
         agent: { type: 'codex', sessionId: 'S1', tmuxPaneId: '%2', updatedAt: 5 },
-        resumeCommand: 'codex resume S1', capturedAt: 5,
+        capturedAt: 5,
       },
     })
     expect(rec(tab.id)?.agent?.sessionId).toBe('S1')
@@ -74,14 +80,14 @@ describe('setPaneRebuild', () => {
       kind: 'agent-group',
       record: {
         tmuxInstance: '111:1000', cwd: '/w/p', cwdSource: 'agent-session-start',
-        agent: { type: 'codex', sessionId: 'S1', updatedAt: 5 }, resumeCommand: 'codex resume S1', capturedAt: 5,
+        agent: { type: 'codex', sessionId: 'S1', updatedAt: 5 }, capturedAt: 5,
       },
     })
     store.setPaneRebuild('h1', 'abc123', '111:1000', {
       kind: 'agent-group',
       record: {
         tmuxInstance: '111:1000', agent: { type: 'codex', sessionId: 'S2', updatedAt: 6 },
-        resumeCommand: 'codex resume S2', capturedAt: 6,
+        capturedAt: 6,
       },
     })
     expect(rec(tab.id)?.agent?.sessionId).toBe('S2')
@@ -116,7 +122,7 @@ describe('setPaneRebuild', () => {
       kind: 'agent-group',
       record: {
         tmuxInstance: '111:1000', cwd: '/agent', cwdSource: 'agent-session-start',
-        agent: { type: 'cc', updatedAt: 7 }, resumeCommand: 'claude -c', capturedAt: 7,
+        agent: { type: 'cc', updatedAt: 7 }, capturedAt: 7,
       },
     })
     store.setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'probe-cwd', cwd: '/probe2' })
@@ -201,12 +207,15 @@ describe('setPaneRebuild', () => {
       kind: 'agent-group',
       record: {
         tmuxInstance: '111:1000', cwd: '/w/p', cwdSource: 'agent-session-start',
-        agent: { type: 'cc', sessionId: 'S1', updatedAt: 5 }, resumeCommand: 'claude --resume S1', capturedAt: 5,
+        agent: { type: 'cc', sessionId: 'S1', updatedAt: 5 }, capturedAt: 5,
       },
+    })
+    store.setPaneRebuild('h1', 'abc123', '111:1000', {
+      kind: 'field', field: 'resumeCommandOverride', value: 'cld-yolo --resume S1',
     })
     store.setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'field', field: 'cwd', value: '/edited' })
     expect(rec(tab.id)?.cwd).toBe('/edited')
-    expect(rec(tab.id)?.resumeCommand).toBe('claude --resume S1')
+    expect(rec(tab.id)?.resumeCommandOverride).toBe('cld-yolo --resume S1')
     expect(rec(tab.id)?.agent?.sessionId).toBe('S1')
   })
 
@@ -217,7 +226,7 @@ describe('setPaneRebuild', () => {
       kind: 'agent-group',
       record: {
         tmuxInstance: '111:1000', agent: { type: 'cc', updatedAt: 1 },
-        resumeCommand: 'claude -c', capturedAt: 1,   // stale stamp from the payload
+        capturedAt: 1,   // stale stamp from the payload
       },
     })
     expect(rec(tab.id)!.capturedAt).toBeGreaterThanOrEqual(before)
@@ -232,10 +241,68 @@ describe('setPaneRebuild', () => {
       kind: 'agent-group',
       record: {
         tmuxInstance: '111:1000', agent: { type: 'cc', sessionId: 'S9', updatedAt: 9 },
-        resumeCommand: 'claude --resume S9', capturedAt: 9,
+        capturedAt: 9,
       },
     })
     expect(rec(tab.id)?.unverified).toBeUndefined()
+  })
+
+  // === The override's lifetime is scoped to the agent identity (spec §4.3) ===
+  //
+  // The one hazard that silently does the WRONG thing is a verbatim command
+  // carrying a dead session id, and that is exactly an identity change. An
+  // idle SessionStart re-emit is not, so it must not throw the edit away.
+  describe('resumeCommandOverride and the agent group', () => {
+    const seedOverride = (agent: NonNullable<PaneRebuildRecord['agent']>) => {
+      const store = useTabStore.getState()
+      store.setPaneRebuild('h1', 'abc123', '111:1000', {
+        kind: 'agent-group',
+        record: { tmuxInstance: '111:1000', cwd: '/w/p', agent, capturedAt: 1 },
+      })
+      store.setPaneRebuild('h1', 'abc123', '111:1000', {
+        kind: 'field', field: 'resumeCommandOverride', value: 'cld-yolo -c',
+      })
+    }
+
+    const group = (agent: NonNullable<PaneRebuildRecord['agent']>) =>
+      useTabStore.getState().setPaneRebuild('h1', 'abc123', '111:1000', {
+        kind: 'agent-group',
+        record: { tmuxInstance: '111:1000', cwd: '/w/p', agent, capturedAt: 2 },
+      })
+
+    it('keeps the override when the same identity re-emits', () => {
+      const tab = seed()
+      seedOverride({ type: 'cc', sessionId: 'S1', updatedAt: 1 })
+      group({ type: 'cc', sessionId: 'S1', tmuxPaneId: '%4', updatedAt: 2 })
+      expect(rec(tab.id)?.resumeCommandOverride).toBe('cld-yolo -c')
+    })
+
+    it('clears the override when the session id changes', () => {
+      const tab = seed()
+      seedOverride({ type: 'cc', sessionId: 'S1', updatedAt: 1 })
+      group({ type: 'cc', sessionId: 'S2', updatedAt: 2 })
+      expect(rec(tab.id)?.resumeCommandOverride).toBeUndefined()
+    })
+
+    it('clears the override when the agent type changes', () => {
+      const tab = seed()
+      seedOverride({ type: 'cc', sessionId: 'S1', updatedAt: 1 })
+      group({ type: 'codex', sessionId: 'S1', updatedAt: 2 })
+      expect(rec(tab.id)?.resumeCommandOverride).toBeUndefined()
+    })
+
+    it('keeps an override typed before any agent was ever recorded', () => {
+      // Nothing was invalidated: the override was not written against an
+      // identity, so the first identity to arrive cannot have changed it. This
+      // is the same rule the backfill's fill mode obeys.
+      const tab = seed()
+      useTabStore.getState().setPaneRebuild('h1', 'abc123', '111:1000', {
+        kind: 'field', field: 'resumeCommandOverride', value: 'cld-yolo -c',
+      })
+      group({ type: 'cc', sessionId: 'S1', updatedAt: 2 })
+      expect(rec(tab.id)?.resumeCommandOverride).toBe('cld-yolo -c')
+      expect(rec(tab.id)?.agent?.sessionId).toBe('S1')
+    })
   })
 
   it('survives a view-mode round trip', () => {
@@ -289,8 +356,9 @@ describe('setPaneRebuild', () => {
 
 // The `agent-backfill` patch (spec §5.5): the daemon's ownership answer, applied
 // under four ORDERED, mutually exclusive modes — fill, replace, confirm, no-op.
-// Phase 3 predates `resumeCommandOverride`, so every mode here works on the old
-// `resumeCommand` field; Task 13 migrates it.
+// The answer never carries a command: the record holds an agent identity and
+// the resolver composes from it, so what each mode decides about
+// `resumeCommandOverride` is only whether the user's edit survives.
 describe('setPaneRebuild — agent-backfill', () => {
   beforeEach(() => useTabStore.setState({ tabs: {}, tabOrder: [], activeTabId: null }))
 
@@ -298,7 +366,6 @@ describe('setPaneRebuild — agent-backfill', () => {
     tmuxInstance: string
     agent: NonNullable<PaneRebuildRecord['agent']>
     cwd?: string
-    resumeCommand?: string
   }) => useTabStore.getState().setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'agent-backfill', record })
 
   const seedAgentGroup = (record: Omit<PaneRebuildRecord, 'sessionName'>) =>
@@ -312,7 +379,10 @@ describe('setPaneRebuild — agent-backfill', () => {
     expect(rec(tab.id)?.agent).toEqual(answer)
     expect(rec(tab.id)?.cwd).toBe('/w/answer')
     expect(rec(tab.id)?.cwdSource).toBe('agent-backfill')
-    expect(rec(tab.id)?.resumeCommand).toBe('claude --resume S1')
+    // The identity is all the record needs; nothing is composed into it, and
+    // no override is invented on the user's behalf.
+    expect(rec(tab.id)?.resumeCommandOverride).toBeUndefined()
+    expect(resolveResumeCommand(rec(tab.id), defaultTemplates)).toBe('claude --resume S1')
   })
 
   it('mode 1 (fill): a probe cwd is upgraded to the answer', () => {
@@ -364,19 +434,16 @@ describe('setPaneRebuild — agent-backfill', () => {
     expect(rec(tab.id)?.cwdSource).toBe('pane-probe')
   })
 
-  it('mode 1 (fill): a hand-typed resume command survives', () => {
+  it('mode 1 (fill): a hand-typed override survives', () => {
+    // Nothing was invalidated: the override predates any recorded identity, so
+    // the first one to arrive cannot have made it stale (spec §4.3).
     const tab = seed()
     useTabStore.getState().setPaneRebuild('h1', 'abc123', '111:1000', {
-      kind: 'field', field: 'resumeCommand', value: 'cld-yolo -c',
+      kind: 'field', field: 'resumeCommandOverride', value: 'cld-yolo -c',
     })
     backfill({ tmuxInstance: '111:1000', agent: answer, cwd: '/w/answer' })
-    expect(rec(tab.id)?.resumeCommand).toBe('cld-yolo -c')
-  })
-
-  it('mode 1 (fill): the answer may carry its own resume command', () => {
-    const tab = seed()
-    backfill({ tmuxInstance: '111:1000', agent: answer, resumeCommand: 'claude --resume PINNED' })
-    expect(rec(tab.id)?.resumeCommand).toBe('claude --resume PINNED')
+    expect(rec(tab.id)?.resumeCommandOverride).toBe('cld-yolo -c')
+    expect(resolveResumeCommand(rec(tab.id), defaultTemplates)).toBe('cld-yolo -c')
   })
 
   it('mode 2 (replace): an unverified record with a different agent type is replaced whole', () => {
@@ -384,7 +451,7 @@ describe('setPaneRebuild — agent-backfill', () => {
     seedAgentGroup({
       tmuxInstance: '111:1000', cwd: '/w/old', cwdSource: 'agent-session-start',
       agent: { type: 'codex', sessionId: 'OLD', updatedAt: 1 },
-      resumeCommand: 'codex resume OLD', capturedAt: 1,
+      capturedAt: 1,
     })
     useTabStore.getState().setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'unverified', unverified: true })
 
@@ -392,7 +459,7 @@ describe('setPaneRebuild — agent-backfill', () => {
     expect(rec(tab.id)?.agent).toEqual(answer)
     expect(rec(tab.id)?.cwd).toBe('/w/answer')
     expect(rec(tab.id)?.cwdSource).toBe('agent-backfill')
-    expect(rec(tab.id)?.resumeCommand).toBe('claude --resume S1')
+    expect(resolveResumeCommand(rec(tab.id), defaultTemplates)).toBe('claude --resume S1')
     expect(rec(tab.id)?.unverified).toBeUndefined()
   })
 
@@ -401,7 +468,7 @@ describe('setPaneRebuild — agent-backfill', () => {
     seedAgentGroup({
       tmuxInstance: '111:1000', cwd: '/w/old', cwdSource: 'agent-session-start',
       agent: { type: 'cc', sessionId: 'OLD', updatedAt: 1 },
-      resumeCommand: 'claude --resume OLD', capturedAt: 1,
+      capturedAt: 1,
     })
     useTabStore.getState().setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'unverified', unverified: true })
 
@@ -417,7 +484,7 @@ describe('setPaneRebuild — agent-backfill', () => {
     seedAgentGroup({
       tmuxInstance: '111:1000',
       agent: { type: 'codex', sessionId: 'OLD', updatedAt: 1 },
-      resumeCommand: 'codex resume OLD', capturedAt: 1,
+      capturedAt: 1,
     })
     const store = useTabStore.getState()
     store.setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'field', field: 'cwd', value: '/typed' })
@@ -429,21 +496,24 @@ describe('setPaneRebuild — agent-backfill', () => {
     expect(rec(tab.id)?.agent).toEqual(answer)
   })
 
-  it('mode 2 (replace): a hand-typed resume command does NOT survive', () => {
+  it('mode 2 (replace): a hand-typed override does NOT survive', () => {
+    // The identity it was written against is exactly what the correction
+    // changed, so the command it names is the stale kind (spec §4.3).
     const tab = seed()
     seedAgentGroup({
       tmuxInstance: '111:1000',
       agent: { type: 'codex', sessionId: 'OLD', updatedAt: 1 },
-      resumeCommand: 'codex resume OLD', capturedAt: 1,
+      capturedAt: 1,
     })
     const store = useTabStore.getState()
     store.setPaneRebuild('h1', 'abc123', '111:1000', {
-      kind: 'field', field: 'resumeCommand', value: 'cld-yolo -c',
+      kind: 'field', field: 'resumeCommandOverride', value: 'cld-yolo -c',
     })
     store.setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'unverified', unverified: true })
 
     backfill({ tmuxInstance: '111:1000', agent: answer })
-    expect(rec(tab.id)?.resumeCommand).toBe('claude --resume S1')
+    expect(rec(tab.id)?.resumeCommandOverride).toBeUndefined()
+    expect(resolveResumeCommand(rec(tab.id), defaultTemplates)).toBe('claude --resume S1')
   })
 
   it('mode 3 (confirm): an agreeing answer clears unverified and changes nothing else', () => {
@@ -453,16 +523,21 @@ describe('setPaneRebuild — agent-backfill', () => {
     seedAgentGroup({
       tmuxInstance: '111:1000', cwd: '/w/old', cwdSource: 'agent-session-start',
       agent: { type: 'cc', sessionId: 'S1', tmuxPaneId: '%9', updatedAt: 1 },
-      resumeCommand: 'cld-yolo -c', capturedAt: 1,
+      capturedAt: 1,
     })
-    useTabStore.getState().setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'unverified', unverified: true })
+    const store = useTabStore.getState()
+    store.setPaneRebuild('h1', 'abc123', '111:1000', {
+      kind: 'field', field: 'resumeCommandOverride', value: 'cld-yolo -c',
+    })
+    store.setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'unverified', unverified: true })
 
     backfill({ tmuxInstance: '111:1000', agent: answer, cwd: '/w/answer' })
     expect(rec(tab.id)?.unverified).toBeUndefined()
     expect(rec(tab.id)?.agent).toEqual({ type: 'cc', sessionId: 'S1', tmuxPaneId: '%9', updatedAt: 1 })
     expect(rec(tab.id)?.cwd).toBe('/w/old')
     expect(rec(tab.id)?.cwdSource).toBe('agent-session-start')
-    expect(rec(tab.id)?.resumeCommand).toBe('cld-yolo -c')
+    // Confirm lands the SAME identity, so the user's edit is not stale.
+    expect(rec(tab.id)?.resumeCommandOverride).toBe('cld-yolo -c')
   })
 
   it('mode 4 (no-op): an agent present and verified is left alone, same identity', () => {
@@ -472,7 +547,7 @@ describe('setPaneRebuild — agent-backfill', () => {
     seedAgentGroup({
       tmuxInstance: '111:1000', cwd: '/w/old', cwdSource: 'agent-session-start',
       agent: { type: 'cc', sessionId: 'S1', updatedAt: 1 },
-      resumeCommand: 'claude --resume S1', capturedAt: 1,
+      capturedAt: 1,
     })
     const before = paneContentOf(tab.id, paneId)
     backfill({ tmuxInstance: '111:1000', agent: answer, cwd: '/w/answer' })
@@ -486,7 +561,7 @@ describe('setPaneRebuild — agent-backfill', () => {
     seedAgentGroup({
       tmuxInstance: '111:1000', cwd: '/w/old', cwdSource: 'agent-session-start',
       agent: { type: 'codex', sessionId: 'OLD', updatedAt: 1 },
-      resumeCommand: 'codex resume OLD', capturedAt: 1,
+      capturedAt: 1,
     })
     const before = paneContentOf(tab.id, paneId)
     backfill({ tmuxInstance: '111:1000', agent: answer, cwd: '/w/answer' })
@@ -508,12 +583,12 @@ describe('setPaneRebuild — agent-backfill', () => {
     seedAgentGroup({
       tmuxInstance: '111:1000', cwd: '/w/fresh', cwdSource: 'agent-session-start',
       agent: { type: 'opencode', sessionId: 'ses_x', updatedAt: 9 },
-      resumeCommand: 'opencode -s ses_x', capturedAt: 9,
+      capturedAt: 9,
     })
     expect(rec(tab.id)?.agent?.type).toBe('opencode')
     expect(rec(tab.id)?.cwd).toBe('/w/fresh')
     expect(rec(tab.id)?.cwdSource).toBe('agent-session-start')
-    expect(rec(tab.id)?.resumeCommand).toBe('opencode -s ses_x')
+    expect(resolveResumeCommand(rec(tab.id), defaultTemplates)).toBe('opencode -s ses_x')
   })
 })
 

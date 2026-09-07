@@ -4,6 +4,12 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { useAgentStore, type NormalizedEvent } from './useAgentStore'
 import { useTabStore } from './useTabStore'
 import { createTab } from '../types/tab'
+import { resolveResumeCommand } from '../lib/rebuild/composer'
+import { useResumeTemplateStore, type ResumeTemplateLookup } from './useResumeTemplateStore'
+
+/** The shipped templates: the store answers from `DEFAULT_RESUME_TEMPLATES`. */
+const defaultTemplates: ResumeTemplateLookup = (agentType) =>
+  useResumeTemplateStore.getState().getTemplates(agentType)
 
 /** Seed a single-pane tab bound to (h1, abc123) at the given generation. */
 function seedTerminalPane(tmuxInstance: string) {
@@ -43,7 +49,9 @@ describe('provenance write path', () => {
   it('writes the pane record on an owner session start', () => {
     const tab = seedTerminalPane('222:2000')
     send(event({ detail: { pdx_provenance: envelope() } }))
-    expect(recordOf(tab.id)?.resumeCommand).toBe('codex resume S1')
+    // The record holds the IDENTITY, not a command — the resolver composes.
+    expect(recordOf(tab.id)?.resumeCommandOverride).toBeUndefined()
+    expect(resolveResumeCommand(recordOf(tab.id), defaultTemplates)).toBe('codex resume S1')
     expect(recordOf(tab.id)?.agent).toMatchObject({ type: 'codex', sessionId: 'S1', tmuxPaneId: '%2' })
     expect(recordOf(tab.id)?.cwd).toBe('/w/p')
     expect(recordOf(tab.id)?.cwdSource).toBe('agent-session-start')
@@ -62,7 +70,7 @@ describe('provenance write path', () => {
     const tab = seedTerminalPane('222:2000')
     send(event({ agent_type: 'cc', detail: { pdx_provenance: envelope() } }))
     expect(recordOf(tab.id)?.agent?.type).toBe('codex')
-    expect(recordOf(tab.id)?.resumeCommand).toBe('codex resume S1')
+    expect(resolveResumeCommand(recordOf(tab.id), defaultTemplates)).toBe('codex resume S1')
   })
 
   it('ignores an envelope stamped with another generation', () => {
@@ -75,7 +83,9 @@ describe('provenance write path', () => {
     const tab = seedTerminalPane('222:2000')
     send(event({ detail: { pdx_provenance: envelope({ agent_type: 'aider' }) } }))
     expect(recordOf(tab.id)?.agent?.type).toBe('aider')
-    expect(recordOf(tab.id)?.resumeCommand).toBeUndefined()
+    // No template, no override: the pane rebuilds as a plain shell.
+    expect(recordOf(tab.id)?.resumeCommandOverride).toBeUndefined()
+    expect(resolveResumeCommand(recordOf(tab.id), defaultTemplates)).toBe('')
   })
 
   it('leaves cwd unset when the envelope carries none', () => {
@@ -104,7 +114,7 @@ describe('unverified flagging', () => {
     send(event({ agent_type: 'cc', raw_event_name: 'replay', detail: {} }))
     expect(recordOf(tab.id)?.unverified).toBe(true)
     expect(recordOf(tab.id)?.agent?.type).toBe('codex')
-    expect(recordOf(tab.id)?.resumeCommand).toBe('codex resume S1')
+    expect(resolveResumeCommand(recordOf(tab.id), defaultTemplates)).toBe('codex resume S1')
   })
 
   it('does not flag when the projection agrees', () => {
@@ -134,6 +144,6 @@ describe('unverified flagging', () => {
     expect(recordOf(tab.id)?.unverified).toBe(true)
     send(event({ detail: { pdx_provenance: envelope({ agent_type: 'cc', session_id: 'S9' }) } }))
     expect(recordOf(tab.id)?.unverified).toBeUndefined()
-    expect(recordOf(tab.id)?.resumeCommand).toBe('claude --resume S9')
+    expect(resolveResumeCommand(recordOf(tab.id), defaultTemplates)).toBe('claude --resume S9')
   })
 })

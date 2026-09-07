@@ -6,7 +6,6 @@ import { createTab } from '../types/tab'
 import { getPrimaryPane, findPane, updatePaneInLayout, splitAtPane, removePane, applyLayoutPattern, remountLeaf } from '../lib/pane-tree'
 import { contentMatches, isFilePaneContent } from '../lib/pane-utils'
 import { bindingMatchesLegacy, generationMatchesLegacy } from '../lib/rebuild/binding'
-import { composeResumeCommand } from '../lib/rebuild/composer'
 import { purdexStorage, STORAGE_KEYS, syncManager } from '../lib/storage'
 import type { UntitledDocumentState } from '../types/tab'
 
@@ -168,6 +167,27 @@ function mapTmuxPanesInLayout(
 }
 
 /**
+ * Whether a write landing `next` invalidates an override written while the
+ * record held `prev` (spec §4.3).
+ *
+ * The rule is a product policy, not a proof. It is neither necessary nor
+ * sufficient — `cld-yolo -c` stays valid across an identity change and is
+ * discarded anyway — but the one hazard that silently does the WRONG thing is
+ * a verbatim command carrying a dead session id, and that is exactly an
+ * identity change. A discarded override is visible and retypable; a silently
+ * stale one is not.
+ *
+ * No previous agent means no identity was named, so nothing was invalidated.
+ */
+function identityInvalidates(
+  prev: PaneRebuildRecord['agent'],
+  next: PaneRebuildRecord['agent'],
+): boolean {
+  if (!prev) return false
+  return prev.type !== next?.type || (prev.sessionId ?? '') !== (next?.sessionId ?? '')
+}
+
+/**
  * Apply one `RebuildPatch` to a pane, creating the record on first write.
  *
  * Returns the same content object when the patch changes nothing (a probe
@@ -192,13 +212,22 @@ function applyRebuildPatch(c: TmuxSessionContent, patch: RebuildPatch): TmuxSess
       // directory beside a new session id. `unverified` is cleared too — it
       // only ever meant "this agent group disagrees with the daemon", and this
       // is a fresh, authoritative agent group.
+      //
+      // `resumeCommandOverride` is NOT in the unit. It is a user edit, and it
+      // is discarded only when the identity it was written against changed
+      // (spec §4.3) — an idle SessionStart re-emit carrying the same id must
+      // keep it. A record that held no agent has no identity to have changed,
+      // so nothing invalidated the edit and it stays; that is the same rule
+      // the backfill's fill mode obeys.
       next = {
         sessionName: prev.sessionName,
         tmuxInstance: record.tmuxInstance || prev.tmuxInstance,
         cwd: record.cwd,
         cwdSource: record.cwd === undefined ? undefined : (record.cwdSource ?? 'agent-session-start'),
         agent: record.agent,
-        resumeCommand: record.resumeCommand,
+        ...(identityInvalidates(prev.agent, record.agent)
+          ? {}
+          : { resumeCommandOverride: prev.resumeCommandOverride }),
         capturedAt: now,
       }
       break
@@ -208,8 +237,6 @@ function applyRebuildPatch(c: TmuxSessionContent, patch: RebuildPatch): TmuxSess
       // first match wins (spec §5.5). The order is the whole policy — an
       // unordered table let one state match two rows.
       const { record } = patch
-      const composed = () =>
-        record.resumeCommand ?? (composeResumeCommand(record.agent.type, record.agent.sessionId) || undefined)
 
       // Mode 1 — FILL. Nothing was known, so take the answer, but never step on
       // provenance that outranks a process-tree inference: a cwd the user typed
@@ -221,9 +248,8 @@ function applyRebuildPatch(c: TmuxSessionContent, patch: RebuildPatch): TmuxSess
           tmuxInstance: record.tmuxInstance || prev.tmuxInstance,
           agent: record.agent,
           ...(takesCwd ? { cwd: record.cwd, cwdSource: 'agent-backfill' as const } : {}),
-          // Only when empty, so a command hand-typed into an agent-less record
-          // is not replaced by a composed default.
-          resumeCommand: prev.resumeCommand || composed(),
+          // `resumeCommandOverride` rides through untouched: nothing was
+          // invalidated, because the record held no identity to invalidate.
           capturedAt: now,
         }
         break
@@ -237,7 +263,9 @@ function applyRebuildPatch(c: TmuxSessionContent, patch: RebuildPatch): TmuxSess
       // else, so the whole group goes as one unit exactly like `agent-group`:
       // correcting the agent while leaving the previous agent's cwd and command
       // attached is the cross-identity mixture whole-group writes exist to
-      // prevent. A `cwdSource: 'user'` cwd is the one thing kept.
+      // prevent. A `cwdSource: 'user'` cwd is the one thing kept — the override
+      // is dropped by omission, since the identity it named is the one this
+      // correction just replaced (spec §4.3).
       if (prev.unverified && !identityMatches) {
         const keepsUserCwd = prev.cwd !== undefined && prev.cwdSource === 'user'
         next = {
@@ -246,7 +274,6 @@ function applyRebuildPatch(c: TmuxSessionContent, patch: RebuildPatch): TmuxSess
           cwd: keepsUserCwd ? prev.cwd : record.cwd,
           cwdSource: keepsUserCwd ? 'user' : record.cwd === undefined ? undefined : 'agent-backfill',
           agent: record.agent,
-          resumeCommand: composed(),
           capturedAt: now,
         }
         break
@@ -270,12 +297,16 @@ function applyRebuildPatch(c: TmuxSessionContent, patch: RebuildPatch): TmuxSess
       // unchanged but the provenance is not, and the agent backfill's fill mode
       // reads that provenance to decide whether it may overwrite. Once the
       // source is already 'user' there is nothing left to change, and the early
-      // return still covers `resumeCommand` and `sessionName` unconditionally.
+      // return still covers the override and `sessionName` unconditionally.
       const promotesCwdSource = patch.field === 'cwd' && prev.cwdSource !== 'user'
       if (prev[patch.field] === patch.value && !promotesCwdSource) return c
-      // Spelled out per field so the record keeps its exact shape.
+      // Spelled out per field so the record keeps its exact shape. An emptied
+      // override is DROPPED rather than stored as '': clearing the row is how
+      // the user goes back to the agent's template, so the record has to end
+      // up in the state it was in before they typed anything.
       next = patch.field === 'cwd' ? { ...prev, cwd: patch.value, cwdSource: 'user', capturedAt: now }
-        : patch.field === 'resumeCommand' ? { ...prev, resumeCommand: patch.value, capturedAt: now }
+        : patch.field === 'resumeCommandOverride'
+          ? { ...prev, resumeCommandOverride: patch.value || undefined, capturedAt: now }
           : { ...prev, sessionName: patch.value, capturedAt: now }
       break
     }

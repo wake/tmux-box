@@ -6,6 +6,8 @@ import { useRebuildStore } from '../../stores/useRebuildStore'
 import { useHostStore } from '../../stores/useHostStore'
 import { useTabStore } from '../../stores/useTabStore'
 import { useSessionStore } from '../../stores/useSessionStore'
+import { useResumeTemplateStore } from '../../stores/useResumeTemplateStore'
+import { planForRecord } from './batch'
 import { GenerationConflictError } from './transport'
 import type { Session } from '../host-api'
 import type { PaneRebuildRecord, Tab } from '../../types/tab'
@@ -74,13 +76,18 @@ function paneContent(tabId: string, paneId: string) {
   return layout.pane.content
 }
 
+function readRecord(tabId: string, paneId: string): PaneRebuildRecord {
+  const content = paneContent(tabId, paneId)
+  if (content.kind !== 'tmux-session' || !content.rebuild) throw new Error('fixture has a record')
+  return content.rebuild
+}
+
 describe('rebuildPane', () => {
   beforeEach(() => {
     useRebuildStore.setState({ operations: {}, lockedBy: null })
     useSessionStore.setState({ sessions: {}, activeHostId: null, activeCode: null })
     seedHost('h1')
-    seedPane('h1', 't1', 'p1', { cwd: '/w', resumeCommand: 'claude --resume S1',
-      agent: { type: 'cc', sessionId: 'S1', updatedAt: 1 } })
+    seedPane('h1', 't1', 'p1', { cwd: '/w', agent: { type: 'cc', sessionId: 'S1', updatedAt: 1 } })
     vi.unstubAllGlobals()
   })
 
@@ -241,7 +248,7 @@ describe('rebuildPane — production transport', () => {
 
   it('uses the pinned host and retries only on 409 through the real transport', async () => {
     seedHost('h1', { ip: '10.0.0.9', port: 7860, token: 'tk' })
-    seedPane('h1', 't1', 'p1', { sessionName: 'dev', cwd: '/w', resumeCommand: 'claude -c' })
+    seedPane('h1', 't1', 'p1', { sessionName: 'dev', cwd: '/w', agent: { type: 'cc', updatedAt: 1 } })
     const calls: string[] = []
     const seen: RequestInit[] = []
     vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
@@ -279,7 +286,7 @@ describe('rebuildPane — production transport', () => {
       hosts: { other: { id: 'other', name: 'other', ip: '10.0.0.1', port: 7860, token: null, order: 0 } },
       hostOrder: ['other'], activeHostId: 'other', runtime: {},
     })
-    seedPane('h1', 't1', 'p1', { sessionName: 'dev', resumeCommand: 'claude -c' })
+    seedPane('h1', 't1', 'p1', { sessionName: 'dev', agent: { type: 'cc', updatedAt: 1 } })
     const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
 
@@ -303,7 +310,7 @@ describe('rebuildPane — production transport', () => {
 
   it('states the created session generation on the resume', async () => {
     seedHost('h1')
-    seedPane('h1', 't1', 'p1', { sessionName: 'dev', cwd: '/w', resumeCommand: 'claude -c' })
+    seedPane('h1', 't1', 'p1', { sessionName: 'dev', cwd: '/w', agent: { type: 'cc', updatedAt: 1 } })
     const fetchMock = vi.fn(async (url: string) => {
       if (url.endsWith('/api/sessions')) {
         return new Response(JSON.stringify({ code: 'new1', name: 'dev', tmux_instance: '222:2000' }), { status: 200 })
@@ -321,7 +328,7 @@ describe('rebuildPane — production transport', () => {
 
   it('reports a 409 from the generation precondition as a refusal, and does not re-point', async () => {
     seedHost('h1')
-    seedPane('h1', 't1', 'p1', { sessionName: 'dev', cwd: '/w', resumeCommand: 'claude -c' })
+    seedPane('h1', 't1', 'p1', { sessionName: 'dev', cwd: '/w', agent: { type: 'cc', updatedAt: 1 } })
     const fetchMock = vi.fn(async (url: string) => {
       if (url.endsWith('/api/sessions')) {
         return new Response(JSON.stringify({ code: 'new1', name: 'dev', tmux_instance: '222:2000' }), { status: 200 })
@@ -341,7 +348,7 @@ describe('rebuildPane — production transport', () => {
 
   it('states the pane binding generation when the resume goes to the pane own session', async () => {
     seedHost('h1')
-    seedPane('h1', 't1', 'p1', { sessionName: 'dev', resumeCommand: 'claude -c' })
+    seedPane('h1', 't1', 'p1', { sessionName: 'dev', agent: { type: 'cc', updatedAt: 1 } })
     const fetchMock = vi.fn(async () => new Response(null, { status: 204 }))
     vi.stubGlobal('fetch', fetchMock)
 
@@ -354,7 +361,7 @@ describe('rebuildPane — production transport', () => {
 
   it('refuses the resume when the pane binding states no generation', async () => {
     seedHost('h1')
-    seedPane('h1', 't1', 'p1', { sessionName: 'dev', resumeCommand: 'claude -c' })
+    seedPane('h1', 't1', 'p1', { sessionName: 'dev', agent: { type: 'cc', updatedAt: 1 } })
     // A legacy pane that never learnt its generation can assert nothing, so a
     // rebuild resume has no authority to send at all (spec §4.6.2). Sending
     // without an expectation is Quick Commands' behaviour, not a rebuild's.
@@ -376,7 +383,7 @@ describe('rebuildPane — production transport', () => {
 
   it('refuses the resume when the create response carried no generation, keeping the session', async () => {
     seedHost('h1')
-    seedPane('h1', 't1', 'p1', { sessionName: 'dev', cwd: '/w', resumeCommand: 'claude -c' })
+    seedPane('h1', 't1', 'p1', { sessionName: 'dev', cwd: '/w', agent: { type: 'cc', updatedAt: 1 } })
     // The daemon's own instance probe failed or timed out. An unknown
     // generation authorises nothing — but the session it just made is real.
     const fetchMock = vi.fn(async (url: string) => {
@@ -398,12 +405,70 @@ describe('rebuildPane — production transport', () => {
   })
 })
 
+// The record stores an identity, not a command, so what the engine sends is
+// whatever `resolveResumeCommand` says at operation start (spec §4.2).
+describe('rebuildPane — the command it sends is resolved, not stored', () => {
+  beforeEach(() => {
+    useRebuildStore.setState({ operations: {}, lockedBy: null })
+    useSessionStore.setState({ sessions: {}, activeHostId: null, activeCode: null })
+    useResumeTemplateStore.setState({ agents: {} })
+    seedHost('h1')
+    vi.unstubAllGlobals()
+  })
+
+  const created = (): NonNullable<RebuildDeps['createSession']> =>
+    vi.fn(async () => session({ code: 'new1', name: 'dev', tmux_instance: '222:2000' }))
+
+  it('sends the agent template composed with the recorded session id', async () => {
+    seedPane('h1', 't1', 'p1', { cwd: '/w', agent: { type: 'cc', sessionId: 'S1', updatedAt: 1 } })
+    const sendKeys = vi.fn()
+    await rebuildPane('h1', 't1', 'p1', plan, { createSession: created(), sendKeys })
+    expect(sendKeys).toHaveBeenCalledWith('h1', 'new1', 'claude --resume S1', '222:2000')
+  })
+
+  it('sends the edited template, so a wrapper command reaches tmux', async () => {
+    useResumeTemplateStore.getState().setTemplate('cc', 'exact', 'cld-yolo --resume {id}')
+    seedPane('h1', 't1', 'p1', { cwd: '/w', agent: { type: 'cc', sessionId: 'S1', updatedAt: 1 } })
+    const sendKeys = vi.fn()
+    await rebuildPane('h1', 't1', 'p1', plan, { createSession: created(), sendKeys })
+    expect(sendKeys).toHaveBeenCalledWith('h1', 'new1', 'cld-yolo --resume S1', '222:2000')
+  })
+
+  it('sends the pane override ahead of the template', async () => {
+    seedPane('h1', 't1', 'p1', {
+      cwd: '/w',
+      agent: { type: 'cc', sessionId: 'S1', updatedAt: 1 },
+      resumeCommandOverride: 'cld-yolo -c',
+    })
+    const sendKeys = vi.fn()
+    await rebuildPane('h1', 't1', 'p1', plan, { createSession: created(), sendKeys })
+    expect(sendKeys).toHaveBeenCalledWith('h1', 'new1', 'cld-yolo -c', '222:2000')
+  })
+
+  it('an unknown agent still gets its session and its cwd — only the resume goes', async () => {
+    // Spec §4.2: an unknown agent rebuilds as a plain shell. An empty command
+    // must never turn into "this pane is not rebuilt".
+    seedPane('h1', 't1', 'p1', { cwd: '/w', agent: { type: 'aider', sessionId: 'S1', updatedAt: 1 } })
+    const createSession = created()
+    const sendKeys = vi.fn()
+    const record = readRecord('t1', 'p1')
+    const report = await rebuildPane('h1', 't1', 'p1', planForRecord(record), { createSession, sendKeys })
+    expect(planForRecord(record)).toEqual({ createSession: true, applyCwd: true, runResume: false })
+    expect(createSession).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(createSession).mock.calls[0][2]).toBe('/w')
+    expect(sendKeys).not.toHaveBeenCalled()
+    expect(report.steps.create.status).toBe('ok')
+    expect(report.steps.resume.status).toBe('skipped')
+    expect(report.repointed).toBe(true)
+  })
+})
+
 describe('retryResume / attachAnyway', () => {
   beforeEach(() => {
     useRebuildStore.setState({ operations: {}, lockedBy: null })
     useSessionStore.setState({ sessions: {}, activeHostId: null, activeCode: null })
     seedHost('h1')
-    seedPane('h1', 't1', 'p1', { cwd: '/w', resumeCommand: 'claude --resume S1' })
+    seedPane('h1', 't1', 'p1', { cwd: '/w', agent: { type: 'cc', sessionId: 'S1', updatedAt: 1 } })
     vi.unstubAllGlobals()
   })
 
@@ -459,7 +524,7 @@ describe('rebuildPane — operation lock', () => {
     useRebuildStore.setState({ operations: {}, lockedBy: null })
     useSessionStore.setState({ sessions: {}, activeHostId: null, activeCode: null })
     seedHost('h1')
-    seedPane('h1', 't1', 'p1', { cwd: '/w', resumeCommand: 'claude --resume S1' })
+    seedPane('h1', 't1', 'p1', { cwd: '/w', agent: { type: 'cc', sessionId: 'S1', updatedAt: 1 } })
     vi.unstubAllGlobals()
   })
 
@@ -543,7 +608,7 @@ describe('retryResume / attachAnyway — target identity', () => {
     useRebuildStore.setState({ operations: {}, lockedBy: null })
     useSessionStore.setState({ sessions: {}, activeHostId: null, activeCode: null })
     seedHost('h1', { ip: '10.0.0.9' })
-    seedPane('h1', 't1', 'p1', { cwd: '/w', resumeCommand: 'claude --resume S1' })
+    seedPane('h1', 't1', 'p1', { cwd: '/w', agent: { type: 'cc', sessionId: 'S1', updatedAt: 1 } })
     vi.unstubAllGlobals()
   })
 
@@ -693,7 +758,7 @@ describe('retryResume / attachAnyway — a generation refusal is final', () => {
     useRebuildStore.setState({ operations: {}, lockedBy: null })
     useSessionStore.setState({ sessions: {}, activeHostId: null, activeCode: null })
     seedHost('h1')
-    seedPane('h1', 't1', 'p1', { cwd: '/w', resumeCommand: 'claude --resume S1' })
+    seedPane('h1', 't1', 'p1', { cwd: '/w', agent: { type: 'cc', sessionId: 'S1', updatedAt: 1 } })
     vi.unstubAllGlobals()
   })
 
@@ -747,7 +812,7 @@ describe('rebuildPane — refusals reach the store', () => {
     useRebuildStore.setState({ operations: {}, lockedBy: null })
     useSessionStore.setState({ sessions: {}, activeHostId: null, activeCode: null })
     seedHost('h1')
-    seedPane('h1', 't1', 'p1', { cwd: '/w', resumeCommand: 'claude --resume S1' })
+    seedPane('h1', 't1', 'p1', { cwd: '/w', agent: { type: 'cc', sessionId: 'S1', updatedAt: 1 } })
     vi.unstubAllGlobals()
   })
 
@@ -806,7 +871,7 @@ describe('re-point — the pinned host', () => {
     useRebuildStore.setState({ operations: {}, lockedBy: null })
     useSessionStore.setState({ sessions: {}, activeHostId: null, activeCode: null })
     seedHost('h1')
-    seedPane('h1', 't1', 'p1', { cwd: '/w', resumeCommand: 'claude --resume S1' })
+    seedPane('h1', 't1', 'p1', { cwd: '/w', agent: { type: 'cc', sessionId: 'S1', updatedAt: 1 } })
     vi.unstubAllGlobals()
   })
 

@@ -10,12 +10,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { useI18nStore } from '../stores/useI18nStore'
 import { usePaneOperation, type RebuildBinding } from '../stores/useRebuildStore'
+import { useResumeTemplateLookup } from '../stores/useResumeTemplateStore'
+import { resolveResumeCommand } from '../lib/rebuild/composer'
 import { retryResume, attachAnyway, type RebuildPlan, type StepResult } from '../lib/rebuild/engine'
 import { AGENT_NAMES } from '../lib/agent-metadata'
 import type { PaneRebuildRecord, TerminatedReason } from '../types/tab'
 
 /** The record fields the user may hand-edit (`RebuildPatch` kind `'field'`). */
-export type RebuildEditableField = 'sessionName' | 'cwd' | 'resumeCommand'
+export type RebuildEditableField = 'sessionName' | 'cwd' | 'resumeCommandOverride'
 
 /**
  * What the panel needs out of a rebuild operation. Structurally satisfied by
@@ -205,6 +207,11 @@ export function RebuildActionSet({
   const t = useI18nStore((s) => s.t)
   const storedOperation = usePaneOperation(paneId, binding)
   const op: RebuildOperationView | undefined = operation ?? storedOperation
+  // Subscribed, not read once: the panel shows what the next Rebuild would
+  // send, so a template edited in Settings (or in another window) has to
+  // repaint this row without anything remounting.
+  const templates = useResumeTemplateLookup()
+  const resumeCommand = resolveResumeCommand(record, templates)
 
   // Per-row overrides on top of the derived defaults, so a value that arrives
   // later (a cwd the user just typed in) turns its row back on by itself.
@@ -226,7 +233,7 @@ export function RebuildActionSet({
   const frozen = busy || !!created || hostRemoved
 
   const hasCwd = !!record.cwd
-  const hasResume = !!record.resumeCommand
+  const hasResume = !!resumeCommand
   // A dead pane's session has to be recreated — unchecking is only meaningful
   // when re-pointing at something live, which the session picker does (§4.9).
   const createLocked = !!terminated
@@ -291,11 +298,11 @@ export function RebuildActionSet({
         onToggle={() => setOverride((o) => ({ ...o, runResume: !plan.runResume }))}
       >
         <EditableValue
-          value={record.resumeCommand}
+          value={resumeCommand}
           placeholder="—"
           disabled={frozen}
           testId="rebuild-resume-command"
-          onCommit={edit('resumeCommand')}
+          onCommit={edit('resumeCommandOverride')}
         />
       </ActionRow>
 

@@ -6,8 +6,9 @@
 // block per terminal pane, each editing its own pane's record, and none of it
 // hijacking the Enter that submits a rename).
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react'
 import { useTabStore } from '../stores/useTabStore'
+import { useResumeTemplateStore } from '../stores/useResumeTemplateStore'
 import { useSessionStore } from '../stores/useSessionStore'
 import { useWorkspaceStore } from '../stores/useWorkspaceStore'
 import { useHostStore } from '../stores/useHostStore'
@@ -50,7 +51,6 @@ const record: PaneRebuildRecord = {
   tmuxInstance: '111:1000',
   cwd: '/w/p',
   agent: { type: 'cc', sessionId: 'S1', updatedAt: 1 },
-  resumeCommand: 'claude --resume S1',
   capturedAt: 1,
 }
 
@@ -138,6 +138,7 @@ beforeEach(() => {
   useHostStore.setState({ runtime: {} })
   useAgentStore.setState({ unread: {}, statuses: {}, subagents: {} })
   useTabStore.setState({ tabs: {}, tabOrder: [], activeTabId: null })
+  useResumeTemplateStore.setState({ agents: {} })
 })
 
 afterEach(() => cleanup())
@@ -260,17 +261,27 @@ describe('per-pane detail blocks', () => {
     expect(onRenamePane).not.toHaveBeenCalled()
   })
 
-  it('edits the resume command into the record', () => {
+  it('edits the resume command into the record as an override', () => {
     const onEditRebuildField = vi.fn()
     const tab = seedSplitTab([terminal()])
     render(<RenamePopover {...props} tab={tab} onEditRebuildField={onEditRebuildField} />)
+    // The row shows the RESOLVED command, which for this record is the cc
+    // template composed with S1 — nothing is stored on the record itself.
     fireEvent.doubleClick(screen.getByText('claude --resume S1'))
     const input = screen.getByDisplayValue('claude --resume S1')
-    fireEvent.change(input, { target: { value: 'claude --resume S2' } })
+    fireEvent.change(input, { target: { value: 'cld-yolo --resume S2' } })
     fireEvent.keyDown(input, { key: 'Enter' })
     expect(onEditRebuildField).toHaveBeenCalledWith(
-      expect.objectContaining({ paneId: 'p1' }), 'resumeCommand', 'claude --resume S2',
+      expect.objectContaining({ paneId: 'p1' }), 'resumeCommandOverride', 'cld-yolo --resume S2',
     )
+  })
+
+  it('re-renders the resume row when the template changes, without a remount', () => {
+    const tab = seedSplitTab([terminal()])
+    render(<RenamePopover {...props} tab={tab} onEditRebuildField={vi.fn()} />)
+    expect(screen.getByText('claude --resume S1')).toBeInTheDocument()
+    act(() => { useResumeTemplateStore.getState().setTemplate('cc', 'exact', 'cld-yolo --resume {id}') })
+    expect(screen.getByText('cld-yolo --resume S1')).toBeInTheDocument()
   })
 
   // The popover's own Enter handler sits on the container, so an Enter that

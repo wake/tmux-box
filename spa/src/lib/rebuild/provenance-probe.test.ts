@@ -10,6 +10,12 @@ import { useTabStore } from '../../stores/useTabStore'
 import { useHostStore } from '../../stores/useHostStore'
 import { createTab, type TmuxSessionContent } from '../../types/tab'
 import { fetchSessionProvenance, type SessionProvenance } from '../host-api'
+import { resolveResumeCommand } from './composer'
+import { useResumeTemplateStore, type ResumeTemplateLookup } from '../../stores/useResumeTemplateStore'
+
+/** The shipped templates: the store answers from `DEFAULT_RESUME_TEMPLATES`. */
+const defaultTemplates: ResumeTemplateLookup = (agentType) =>
+  useResumeTemplateStore.getState().getTemplates(agentType)
 
 vi.mock('../host-api', () => ({ fetchSessionProvenance: vi.fn() }))
 
@@ -144,7 +150,8 @@ describe('probeSessionProvenance', () => {
     })
     expect(recordOf(tab.id)?.cwd).toBe('/w/proj')
     expect(recordOf(tab.id)?.cwdSource).toBe('agent-backfill')
-    expect(recordOf(tab.id)?.resumeCommand).toBe('claude --resume sess-1')
+    // The answer carries an identity, never a command: the resolver composes.
+    expect(resolveResumeCommand(recordOf(tab.id), defaultTemplates)).toBe('claude --resume sess-1')
   })
 
   it('writes nothing when the daemon found no owner', async () => {

@@ -221,7 +221,7 @@ describe('TerminatedPane rebuild action set', () => {
       sessionName: 'my-session',
       tmuxInstance: '123:456',
       cwd: '/w/p',
-      resumeCommand: 'claude --resume S1',
+      resumeCommandOverride: 'claude --resume S1',
       capturedAt: 1,
     }
     const content = { ...makeContent('tmux-restarted'), rebuild }

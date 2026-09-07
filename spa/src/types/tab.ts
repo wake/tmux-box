@@ -57,15 +57,19 @@ export interface PaneRebuildRecord {
     tmuxPaneId?: string
     updatedAt: number
   }
-  resumeCommand?: string
   /**
    * User override for this pane only. Absent means "compose from the agent's
-   * templates" (spec §4.2). Never written automatically; cleared when the
-   * agent identity it was written against changes (spec §4.3).
+   * templates" (spec §4.2), which is the normal case: the record stores the
+   * agent IDENTITY and `resolveResumeCommand` composes the command from it, so
+   * a user who retypes a template in Settings changes what every pane resumes
+   * with. Only a hand edit ever writes this, and it is cleared when the agent
+   * identity it was written against changes (spec §4.3).
    *
-   * Added here beside `resumeCommand`, which Task 13 removes — the resolver's
-   * signature names this key, so the field has to exist a commit before the
-   * old one goes.
+   * It replaces the old auto-composed `resumeCommand`, which is gone rather
+   * than renamed: repurposing it would have promoted every already-persisted
+   * composed string into an override and pinned every existing record to the
+   * old shape. Per the alpha convention no migration is written — a stale
+   * `resumeCommand` key in persisted state is inert, because nothing reads it.
    */
   resumeCommandOverride?: string
   /**
@@ -103,9 +107,11 @@ export type TmuxSessionContent = Extract<PaneContent, { kind: 'tmux-session' }>
  * ranking of spec §4.1, and that ranking is the whole concurrency policy:
  *
  * - `agent-group` — a qualifying SessionStart. Replaces `agent`, `cwd`,
- *   `cwdSource`, `resumeCommand` and `capturedAt` **as one unit**; a payload
- *   without `cwd` clears `cwd` rather than leaving the previous agent's
- *   directory attached to a new session id.
+ *   `cwdSource` and `capturedAt` **as one unit**; a payload without `cwd`
+ *   clears `cwd` rather than leaving the previous agent's directory attached
+ *   to a new session id. `resumeCommandOverride` is NOT part of the unit: it
+ *   is a user edit, and survives unless the identity it was written against
+ *   changed (spec §4.3).
  * - `field` — a user edit. Touches only the field named.
  * - `probe-cwd` — the pane cwd probe. Fills `cwd` only when it is unset;
  *   never promoted to agent provenance.
@@ -123,11 +129,9 @@ export type RebuildPatch =
         tmuxInstance: string
         agent: NonNullable<PaneRebuildRecord['agent']>
         cwd?: string
-        /** Optional pin; omitted, the store composes one from the agent. */
-        resumeCommand?: string
       }
     }
-  | { kind: 'field'; field: 'cwd' | 'resumeCommand' | 'sessionName'; value: string }
+  | { kind: 'field'; field: 'cwd' | 'resumeCommandOverride' | 'sessionName'; value: string }
   | { kind: 'probe-cwd'; cwd: string }
   | { kind: 'unverified'; unverified: boolean }
 

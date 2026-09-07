@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
   BATCH_LOCK_OWNER,
   groupForBatch,
+  recordsDisagree,
   runBatchRebuild,
 } from './batch'
 import type { BatchCandidate } from './eligibility'
@@ -24,7 +25,7 @@ const pane = (paneId: string, over: Partial<BatchCandidate> = {}): BatchCandidat
   paneId, tabId: 't1', hostId: 'h1', sessionCode: 'abc', tmuxInstance: '111:1000',
   record: {
     sessionName: 'dev', tmuxInstance: '111:1000', cwd: '/w', capturedAt: 1,
-    agent: { type: 'cc', sessionId: 'S1', updatedAt: 1 }, resumeCommand: 'claude --resume S1',
+    agent: { type: 'cc', sessionId: 'S1', updatedAt: 1 },
   },
   ...over,
 })
@@ -67,6 +68,35 @@ describe('groupForBatch', () => {
     expect(groups[0].plan.runResume).toBe(false)
   })
 
+  it('an agent nobody has a template for turns the resume off, not the pane', () => {
+    // Spec §4.2: an unknown agent rebuilds as a plain shell. Turning an empty
+    // command into an EXCLUSION would lose the session and its directory too.
+    const { groups, excluded } = groupForBatch([
+      pane('p1', { record: { ...pane('p1').record, agent: { type: 'aider', sessionId: 'S1', updatedAt: 1 } } }),
+    ])
+    expect(excluded).toEqual([])
+    expect(groups).toHaveLength(1)
+    expect(groups[0].plan).toEqual({ createSession: true, applyCwd: true, runResume: false })
+  })
+
+  it('an override keeps the resume on for an agent with no template', () => {
+    const { groups } = groupForBatch([
+      pane('p1', { record: {
+        ...pane('p1').record,
+        agent: { type: 'aider', sessionId: 'S1', updatedAt: 1 },
+        resumeCommandOverride: 'aider --restore S1',
+      } }),
+    ])
+    expect(groups[0].plan.runResume).toBe(true)
+  })
+
+  it('a record with an override that disagrees is a conflict', () => {
+    const a = pane('p1').record
+    const b = { ...a, resumeCommandOverride: 'cld-yolo -c' }
+    expect(recordsDisagree(a, b)).toBe(true)
+    expect(recordsDisagree(a, { ...a })).toBe(false)
+  })
+
   it('skips the cwd for a record that never captured one', () => {
     const { groups } = groupForBatch([pane('p1', { record: { ...pane('p1').record, cwd: undefined } })])
     expect(groups[0].plan.applyCwd).toBe(false)
@@ -94,7 +124,7 @@ function content(hostId: string, over: Partial<TmuxSessionContent> = {}): TmuxSe
     kind: 'tmux-session', hostId, sessionCode: 'old111', mode: 'terminal',
     cachedName: 'dev', tmuxInstance: '111:1000', terminated: 'tmux-restarted',
     rebuild: { sessionName: 'dev', tmuxInstance: '111:1000', cwd: '/w', capturedAt: 1,
-      resumeCommand: 'claude --resume S1' },
+      agent: { type: 'cc', sessionId: 'S1', updatedAt: 1 } },
     ...over,
   }
 }

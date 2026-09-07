@@ -1,17 +1,53 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, act } from '@testing-library/react'
 import { RebuildActionSet } from './RebuildActionSet'
 import { useRebuildStore } from '../stores/useRebuildStore'
+import { useResumeTemplateStore } from '../stores/useResumeTemplateStore'
 import type { PaneRebuildRecord } from '../types/tab'
 
 const record: PaneRebuildRecord = {
   sessionName: 'dev', tmuxInstance: '111:1000', cwd: '/w/p',
   agent: { type: 'cc', sessionId: 'S1', updatedAt: 1 },
-  resumeCommand: 'claude --resume S1', capturedAt: 1,
+  capturedAt: 1,
 }
 
 beforeEach(() => {
   useRebuildStore.setState({ operations: {}, lockedBy: null })
+  useResumeTemplateStore.setState({ agents: {} })
+})
+
+// The panel shows what the next Rebuild would send, and that string is
+// RESOLVED, not stored (spec §4.2). Reading it through an unsubscribed path
+// would satisfy every "the consumer calls the resolver" assertion and still
+// leave a stale command on screen after the user edits the template — so the
+// re-render is asserted directly, with no remount.
+describe('RebuildActionSet — the resume row is resolved live', () => {
+  it('renders the agent template composed with the recorded session id', () => {
+    render(<RebuildActionSet tabId="t1" paneId="p1" record={record} onRebuild={vi.fn()} />)
+    expect(screen.getByTestId('rebuild-resume-command-cell')).toHaveTextContent('claude --resume S1')
+  })
+
+  it('renders the pane override ahead of the template', () => {
+    render(<RebuildActionSet tabId="t1" paneId="p1" onRebuild={vi.fn()}
+      record={{ ...record, resumeCommandOverride: 'cld-yolo -c' }} />)
+    expect(screen.getByTestId('rebuild-resume-command-cell')).toHaveTextContent('cld-yolo -c')
+  })
+
+  it('re-renders when the template changes, without a remount', () => {
+    render(<RebuildActionSet tabId="t1" paneId="p1" record={record} onRebuild={vi.fn()} />)
+    expect(screen.getByTestId('rebuild-resume-command-cell')).toHaveTextContent('claude --resume S1')
+    act(() => { useResumeTemplateStore.getState().setTemplate('cc', 'exact', 'cld-yolo --resume {id}') })
+    expect(screen.getByTestId('rebuild-resume-command-cell')).toHaveTextContent('cld-yolo --resume S1')
+  })
+
+  it('turns the row back on when a template appears for an unknown agent', () => {
+    render(<RebuildActionSet tabId="t1" paneId="p1" onRebuild={vi.fn()}
+      record={{ ...record, agent: { type: 'aider', sessionId: 'S1', updatedAt: 1 } }} />)
+    expect(screen.getByRole('checkbox', { name: /resume/i })).toBeDisabled()
+    act(() => { useResumeTemplateStore.getState().setTemplate('aider', 'exact', 'aider --restore {id}') })
+    expect(screen.getByRole('checkbox', { name: /resume/i })).toBeEnabled()
+    expect(screen.getByTestId('rebuild-resume-command-cell')).toHaveTextContent('aider --restore S1')
+  })
 })
 
 describe('RebuildActionSet', () => {
@@ -23,7 +59,7 @@ describe('RebuildActionSet', () => {
   })
 
   it('disables and unchecks the resume row when there is no command', () => {
-    render(<RebuildActionSet tabId="t1" paneId="p1" record={{ ...record, resumeCommand: undefined, agent: undefined }} onRebuild={vi.fn()} />)
+    render(<RebuildActionSet tabId="t1" paneId="p1" record={{ ...record, resumeCommandOverride: undefined, agent: undefined }} onRebuild={vi.fn()} />)
     const resume = screen.getByRole('checkbox', { name: /resume/i })
     expect(resume).toBeDisabled()
     expect(resume).not.toBeChecked()
@@ -83,7 +119,7 @@ describe('RebuildActionSet', () => {
   })
 
   it('explains that a pane with no agent rebuilds as a shell', () => {
-    render(<RebuildActionSet tabId="t1" paneId="p1" record={{ ...record, resumeCommand: undefined, agent: undefined }} onRebuild={vi.fn()} />)
+    render(<RebuildActionSet tabId="t1" paneId="p1" record={{ ...record, resumeCommandOverride: undefined, agent: undefined }} onRebuild={vi.fn()} />)
     expect(screen.getByTestId('rebuild-no-agent-hint')).toBeInTheDocument()
     expect(screen.queryByTestId('rebuild-unverified-hint')).toBeNull()
   })
@@ -125,7 +161,7 @@ describe('RebuildActionSet', () => {
     const cmdInput = screen.getByDisplayValue('claude --resume S1')
     fireEvent.change(cmdInput, { target: { value: 'claude -c' } })
     fireEvent.keyDown(cmdInput, { key: 'Enter' })
-    expect(onEdit).toHaveBeenCalledWith('resumeCommand', 'claude -c')
+    expect(onEdit).toHaveBeenCalledWith('resumeCommandOverride', 'claude -c')
   })
 
   it('commits an edit only once when Enter is followed by the trailing blur', () => {

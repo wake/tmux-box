@@ -20,6 +20,8 @@ import { useRebuildStore, type OperationLockGrant, type RebuildBinding } from '.
 import { rebuildPane, repointMember, type RebuildDeps, type RebuildPlan, type RebuildReport } from './engine'
 import { batchCandidates, collectRecordRows, type BatchCandidate, type PaneRef } from './eligibility'
 import { pinHost } from './transport'
+import { resolveResumeCommand } from './composer'
+import { liveResumeTemplates, type ResumeTemplateLookup } from '../../stores/useResumeTemplateStore'
 import type { PaneRebuildRecord } from '../../types/tab'
 
 /** The batch's lock owner. One name for the whole run, per rule 3 above. */
@@ -60,12 +62,23 @@ export interface BatchReport {
   excluded: BatchCandidate[]
 }
 
-/** The plan a batched group runs with. Unverified exact resumes are skipped (§9.1). */
-export function planForRecord(record: PaneRebuildRecord): RebuildPlan {
+/**
+ * The plan a batched group runs with. Unverified exact resumes are skipped
+ * (§9.1), and so is a record that resolves to no command at all.
+ *
+ * **An empty command turns the resume step OFF; it does not exclude the pane.**
+ * `createSession` and `applyCwd` stay exactly as they were, which is spec
+ * §4.2's "an unknown agent rebuilds as a shell" — the session and its
+ * directory come back, only the agent does not.
+ */
+export function planForRecord(
+  record: PaneRebuildRecord,
+  templates: ResumeTemplateLookup = liveResumeTemplates,
+): RebuildPlan {
   return {
     createSession: true,
     applyCwd: !!record.cwd,
-    runResume: !!record.resumeCommand && !record.unverified,
+    runResume: !!resolveResumeCommand(record, templates) && !record.unverified,
   }
 }
 
@@ -79,7 +92,7 @@ function groupKey(ref: PaneRef): string {
 export function recordsDisagree(a: PaneRebuildRecord, b: PaneRebuildRecord): boolean {
   return a.sessionName !== b.sessionName
     || (a.cwd ?? '') !== (b.cwd ?? '')
-    || (a.resumeCommand ?? '') !== (b.resumeCommand ?? '')
+    || (a.resumeCommandOverride ?? '') !== (b.resumeCommandOverride ?? '')
 }
 
 /**

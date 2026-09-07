@@ -9,6 +9,7 @@
 // The store is SPARSE on purpose: only an agent the user actually customised
 // gets a record, so `DEFAULT_RESUME_TEMPLATES` stays the answer for everyone
 // else and a later change to a default reaches every untouched install.
+import { useCallback } from 'react'
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { purdexStorage, STORAGE_KEYS, syncManager } from '../lib/storage'
@@ -87,3 +88,21 @@ export const useResumeTemplateStore = create<ResumeTemplateState>()(
 )
 
 syncManager.register(STORAGE_KEYS.RESUME_TEMPLATES, useResumeTemplateStore)
+
+/**
+ * The live lookup for code that runs outside React — the engine and the batch
+ * planner, which resolve once at operation start and pin the result.
+ */
+export const liveResumeTemplates: ResumeTemplateLookup = (agentType) =>
+  useResumeTemplateStore.getState().getTemplates(agentType)
+
+/**
+ * The lookup for code that RENDERS one. Subscribed to `agents`, so a template
+ * edited in Settings — or in another window, through `syncManager` — repaints
+ * every panel showing a composed command without anything remounting.
+ * `liveResumeTemplates` would read the same values and never re-render.
+ */
+export function useResumeTemplateLookup(): ResumeTemplateLookup {
+  const agents = useResumeTemplateStore((s) => s.agents)
+  return useCallback((agentType: string) => lookup(agents, agentType), [agents])
+}

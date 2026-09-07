@@ -22,7 +22,9 @@ import {
   SNAPSHOT_LOCK_OWNER,
 } from '../../lib/snapshot/restore'
 import { useRebuildStore } from '../../stores/useRebuildStore'
+import { useResumeTemplateLookup } from '../../stores/useResumeTemplateStore'
 import { useTabStore } from '../../stores/useTabStore'
+import { resolveResumeCommand } from '../../lib/rebuild/composer'
 import {
   BATCH_LOCK_OWNER,
   groupForBatch,
@@ -616,6 +618,9 @@ function RebuildRecordsBlock({
   onRebuildOne: (pane: BatchCandidate) => void
   t: ReturnType<typeof useI18nStore.getState>['t']
 }) {
+  // Subscribed, so the command column repaints when a template is edited —
+  // reading the lookup once would render a stale command until a remount.
+  const templates = useResumeTemplateLookup()
   // Only the groups whose members disagree need naming — saying "using p1"
   // when there is nothing to choose between is noise.
   const conflicts = groups.filter((group) => {
@@ -661,7 +666,7 @@ function RebuildRecordsBlock({
                   <td className="py-1 pr-3 text-text-primary">{row.hostId}</td>
                   <td className="py-1 pr-3">{row.record?.sessionName || row.cachedName}</td>
                   <td className="py-1 pr-3 font-mono">{row.record?.cwd || '—'}</td>
-                  <td className="py-1 pr-3 font-mono">{row.record?.resumeCommand || '—'}</td>
+                  <td className="py-1 pr-3 font-mono">{resolveResumeCommand(row.record, templates) || '—'}</td>
                   <td className="py-1">
                     <HealthBadge
                       health={recordHealth(row, livenessOf(liveByHost[row.hostId] ?? 'loading'))}
