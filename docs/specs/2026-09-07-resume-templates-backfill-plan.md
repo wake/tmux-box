@@ -1087,8 +1087,31 @@ more scheduler tests.
 
 **Phase 3 gate:** after this task, Phase 1 + 2 + 3 is independently shippable — a
 pre-deploy session acquires its agent and a working resume command built from
-the existing hardcoded shapes. Verify by hand against a real running session
-before starting Phase 4.
+the existing hardcoded shapes.
+
+**The gate's condition, verified by tracing the chain rather than by running
+it:** the agent must emit **at least one hook** after the daemon is upgraded,
+because that is when the frame first learns its `session_id`. A pre-deploy
+session still in use crosses that line the next time the user says anything to
+it. One that is never touched again stays `found: false` and rebuilds as a shell
+with the probed cwd — not a broken link, but the physical limit of a daemon that
+was never told the id.
+
+**The hand-verification is deferred to deploy time, deliberately.** Running it
+now would mean putting a mid-feature daemon build in front of the user's live
+sessions, which is a larger action than checking a gate warrants. The check
+belongs in the deploy step of §"Manual verification" instead.
+
+**Sweep enumeration lives in the caller.** `useMultiHostEventWs` builds its own
+module-local list of eligible bindings rather than the probe module exporting a
+`probeMissingProvenance` twin of `probeMissingCwds` — the scheduler has exactly
+one exported entry point and that is worth keeping.
+
+**One Step 1 assertion is unreachable for the sweep**: "nothing is scheduled
+before the attach gate opens" cannot be violated there, because the sweep sits
+immediately after `openAttachGate` in the same block. Assert it on the hook
+trigger and on pane attach, which are the two places that can actually get it
+wrong.
 
 ---
 
