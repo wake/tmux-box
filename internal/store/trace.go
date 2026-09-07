@@ -141,6 +141,10 @@ func migrateTraceDB(db *sql.DB) error {
 		}
 	}
 
+	if err := addMissingTraceDedupColumns(ctx, conn); err != nil {
+		return err
+	}
+
 	if err := createTraceIndexes(ctx, conn); err != nil {
 		return err
 	}
@@ -156,6 +160,40 @@ func migrateTraceDB(db *sql.DB) error {
 		)
 	`)
 	return err
+}
+
+// addMissingTraceDedupColumns fills in the payload-dedup columns on databases
+// created before they existed. It runs after the create / legacy-rebuild steps
+// on the same pinned connection and re-reads table_info, so it is correct
+// whether the table was just created, just rebuilt, or left untouched, and
+// whether none, one, or both columns are already present.
+//
+// These columns are deliberately absent from the needsChainRebuild /
+// needsStepRebuild required lists: listing them there would send every
+// current-schema database down the legacy rebuild path, whose chain copier
+// reads created_at / agent_type — columns the current table does not have.
+func addMissingTraceDedupColumns(ctx context.Context, q sqlQuerier) error {
+	additions := []struct {
+		table  string
+		column string
+		ddl    string
+	}{
+		{"agent_trace_chains", "root_payload_json", `ALTER TABLE agent_trace_chains ADD COLUMN root_payload_json TEXT NOT NULL DEFAULT 'null'`},
+		{"agent_trace_steps", "payload_is_root", `ALTER TABLE agent_trace_steps ADD COLUMN payload_is_root INTEGER NOT NULL DEFAULT 0`},
+	}
+	for _, add := range additions {
+		cols, err := tableColumns(ctx, q, add.table)
+		if err != nil {
+			return err
+		}
+		if len(cols) == 0 || cols[add.column] {
+			continue
+		}
+		if _, err := q.ExecContext(ctx, add.ddl); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func tableColumns(ctx context.Context, q sqlQuerier, table string) (map[string]bool, error) {
@@ -303,7 +341,8 @@ func createTraceChainsTable(ctx context.Context, q sqlQuerier) error {
 			latest_decision     TEXT NOT NULL DEFAULT '',
 			latest_step_reason  TEXT NOT NULL DEFAULT '',
 			step_count          INTEGER NOT NULL DEFAULT 0,
-			updated_at          INTEGER NOT NULL DEFAULT 0
+			updated_at          INTEGER NOT NULL DEFAULT 0,
+			root_payload_json   TEXT NOT NULL DEFAULT 'null'
 		)
 	`)
 	return err
@@ -329,6 +368,7 @@ func createTraceStepsTable(ctx context.Context, q sqlQuerier) error {
 			before_json     TEXT NOT NULL DEFAULT 'null',
 			after_json      TEXT NOT NULL DEFAULT 'null',
 			created_at      INTEGER NOT NULL DEFAULT 0,
+			payload_is_root INTEGER NOT NULL DEFAULT 0,
 			FOREIGN KEY (chain_id) REFERENCES agent_trace_chains(chain_id) ON DELETE CASCADE,
 			FOREIGN KEY (chain_id, parent_step_id) REFERENCES agent_trace_steps(chain_id, step_id) ON DELETE CASCADE
 		)
@@ -592,6 +632,51 @@ func legacyTraceOrphanStepCount(ctx context.Context, q sqlQuerier) (int, error) 
 	return count, nil
 }
 
+// planTraceRootDedup decides which steps share the chain's root payload, so
+// that payload can be stored once on the chain row instead of once per step.
+//
+// steps must already be in read order — normalizeTraceRecord ends with a
+// sort.SliceStable on Seq → CreatedAt → StepID, exactly matching the read
+// query's ORDER BY — so the root candidate is simply steps[0]. Seq is not
+// unique, which is why those tie-breaks matter.
+//
+// Comparison is on the *stored* form (rawJSONText), never on the raw
+// json.RawMessage: only payloads whose stored bytes are equal may be merged, so
+// the read path can return byte-identical values. Semantically equal but
+// byte-different payloads simply keep their own copies.
+//
+// Returns the stored form of the root payload — "null" when dedup is off, which
+// is also the column default — and a slice parallel to steps marking the ones
+// that carry it. Correctness never depends on the returned string: a chain whose
+// steps all have a genuine null payload legitimately stores "null" as its root
+// with the flags set, so only the per-step flag distinguishes the two cases.
+func planTraceRootDedup(steps []TraceStep) (string, []bool) {
+	isRoot := make([]bool, len(steps))
+	if len(steps) == 0 {
+		return "null", isRoot
+	}
+
+	stored := make([]string, len(steps))
+	for i := range steps {
+		stored[i] = rawJSONText(steps[i].PayloadJSON)
+	}
+
+	candidate := stored[0]
+	matches := 0
+	for _, text := range stored {
+		if text == candidate {
+			matches++
+		}
+	}
+	if matches < 2 {
+		return "null", isRoot
+	}
+	for i, text := range stored {
+		isRoot[i] = text == candidate
+	}
+	return candidate, isRoot
+}
+
 // SaveChain stores a chain and its steps atomically, replacing any existing
 // record for the same chain_id.
 func (s *TraceStore) SaveChain(record TraceRecord) (err error) {
@@ -602,6 +687,7 @@ func (s *TraceStore) SaveChain(record TraceRecord) (err error) {
 	if err != nil {
 		return err
 	}
+	rootPayload, payloadIsRoot := planTraceRootDedup(steps)
 
 	tx, err := s.db.BeginTx(context.Background(), nil)
 	if err != nil {
@@ -620,8 +706,9 @@ func (s *TraceStore) SaveChain(record TraceRecord) (err error) {
 		INSERT INTO agent_trace_chains (
 			chain_id, started_at, completed_at, terminal_status, terminal_reason,
 			tmux_session, pane_id, root_agent_type, root_event_name, root_reason,
-			latest_step_kind, latest_decision, latest_step_reason, step_count, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			latest_step_kind, latest_decision, latest_step_reason, step_count, updated_at,
+			root_payload_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(chain_id) DO UPDATE SET
 			started_at = excluded.started_at,
 			completed_at = excluded.completed_at,
@@ -636,23 +723,35 @@ func (s *TraceStore) SaveChain(record TraceRecord) (err error) {
 			latest_decision = excluded.latest_decision,
 			latest_step_reason = excluded.latest_step_reason,
 			step_count = excluded.step_count,
-			updated_at = excluded.updated_at
+			updated_at = excluded.updated_at,
+			root_payload_json = excluded.root_payload_json
 	`, chain.ChainID, chain.StartedAt, chain.CompletedAt, chain.TerminalStatus, chain.TerminalReason,
 		chain.TmuxSession, chain.PaneID, chain.RootAgentType, chain.RootEventName, chain.RootReason,
-		chain.LatestStepKind, chain.LatestDecision, chain.LatestStepReason, chain.StepCount, time.Now().UnixNano()); err != nil {
+		chain.LatestStepKind, chain.LatestDecision, chain.LatestStepReason, chain.StepCount, time.Now().UnixNano(),
+		rootPayload); err != nil {
 		return err
 	}
 
-	for _, step := range steps {
+	for i, step := range steps {
+		// Deduped steps store the empty string as their payload — a literal SQL
+		// value, deliberately not routed through rawJSONText, which would turn
+		// an empty payload into "null" and make the marker indistinguishable
+		// from a genuine null payload.
+		payload := rawJSONText(step.PayloadJSON)
+		isRoot := 0
+		if payloadIsRoot[i] {
+			payload = ""
+			isRoot = 1
+		}
 		if _, err = tx.Exec(`
 			INSERT INTO agent_trace_steps (
 				step_id, chain_id, parent_step_id, seq, kind, tmux_session, pane_id,
 				agent_type, frame_id, parent_frame_id, event_name, decision, reason,
-				payload_json, before_json, after_json, created_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				payload_json, before_json, after_json, created_at, payload_is_root
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`, step.StepID, step.ChainID, nullString(step.ParentStepID), step.Seq, step.Kind, step.TmuxSession, step.PaneID,
 			step.AgentType, step.FrameID, step.ParentFrameID, step.EventName, step.Decision, step.Reason,
-			rawJSONText(step.PayloadJSON), rawJSONText(step.BeforeJSON), rawJSONText(step.AfterJSON), step.CreatedAt); err != nil {
+			payload, rawJSONText(step.BeforeJSON), rawJSONText(step.AfterJSON), step.CreatedAt, isRoot); err != nil {
 			return err
 		}
 	}
@@ -702,8 +801,15 @@ func (s *TraceStore) ListChains(filter TraceListFilter) (TraceChainPage, error) 
 
 // GetChainRecord returns a full chain and its ordered steps.
 func (s *TraceStore) GetChainRecord(chainID string) (*TraceRecord, error) {
+	return getTraceChainRecord(context.Background(), s.db, chainID)
+}
+
+// getTraceChainRecord is the body of GetChainRecord, parameterised over
+// sqlQuerier so tests can interpose a deterministic seam between the chain query
+// and the step query.
+func getTraceChainRecord(ctx context.Context, q sqlQuerier, chainID string) (*TraceRecord, error) {
 	var chain TraceChain
-	err := s.db.QueryRow(`
+	err := q.QueryRowContext(ctx, `
 		SELECT chain_id, started_at, completed_at, terminal_status, terminal_reason,
 		       tmux_session, pane_id, root_agent_type, root_event_name, root_reason,
 		       latest_step_kind, latest_decision, latest_step_reason, step_count
@@ -732,13 +838,23 @@ func (s *TraceStore) GetChainRecord(chainID string) (*TraceRecord, error) {
 		return nil, err
 	}
 
-	rows, err := s.db.Query(`
-		SELECT step_id, chain_id, parent_step_id, seq, kind, tmux_session, pane_id,
-		       agent_type, frame_id, parent_frame_id, event_name, decision, reason,
-		       payload_json, before_json, after_json, created_at
-		FROM agent_trace_steps
-		WHERE chain_id = ?
-		ORDER BY seq ASC, created_at ASC, step_id ASC
+	// The payload of a deduped step lives on the chain row, so flag and payload
+	// must come from one snapshot. Resolving it in the JOIN makes that
+	// structural: reading the chain and the steps as two independent queries
+	// and pairing them in Go would let an interleaved SaveChain hand root B's
+	// payload to root A's steps. The 17 result columns keep their order, with
+	// the CASE in the payload position, so collectTraceSteps — this query's only
+	// consumer, and a positional scanner — needs no change.
+	rows, err := q.QueryContext(ctx, `
+		SELECT s.step_id, s.chain_id, s.parent_step_id, s.seq, s.kind, s.tmux_session, s.pane_id,
+		       s.agent_type, s.frame_id, s.parent_frame_id, s.event_name, s.decision, s.reason,
+		       CASE WHEN s.payload_is_root = 1
+		            THEN c.root_payload_json ELSE s.payload_json END AS payload_json,
+		       s.before_json, s.after_json, s.created_at
+		FROM agent_trace_steps s
+		JOIN agent_trace_chains c ON c.chain_id = s.chain_id
+		WHERE s.chain_id = ?
+		ORDER BY s.seq ASC, s.created_at ASC, s.step_id ASC
 	`, chainID)
 	if err != nil {
 		return nil, err
