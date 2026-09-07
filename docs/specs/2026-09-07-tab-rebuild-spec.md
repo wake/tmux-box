@@ -516,6 +516,14 @@ So the daemon supplies it, on the payloads themselves:
    nothing to distinguish and nothing to protect — every pane is already
    marked dead by the code-absence rule.
 
+`GET /api/sessions` has a 1-second payload cache
+(`internal/module/session/handler.go:31-43`), which stores the whole stamped
+list. The instance is therefore never re-stamped on top of a cached list — the
+snapshot stays internally consistent, at the cost of up to a second of
+detection latency on that path. The WS broadcast and `GetSession` are
+uncached, so the primary path is unaffected. A coherent-but-slightly-stale
+snapshot yields a delayed verdict, never a wrong one.
+
 Death detection then reads only fields that arrived together:
 
 - A pane is marked `'tmux-restarted'` when its recorded instance and the
