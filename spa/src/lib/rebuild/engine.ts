@@ -125,11 +125,20 @@ function bindingUnchanged(tabId: string, paneId: string, binding: RebuildBinding
  * `syncSessionStore` does: seed from the host's existing sessions so unrelated
  * live ones survive, drop the dead code so it cannot linger as a ghost, then
  * call `replaceHost` exactly once.
+ *
+ * The eviction is generation-scoped, like every other writer in this feature
+ * (spec §4.5): after a tmux restart the dead pane's code can already belong to
+ * a different, live session, and dropping THAT would make a real session
+ * vanish from the session list and the picker until the next broadcast. The
+ * cached entry is removed only when its generation stamp is the one the dead
+ * binding carried — which includes the legacy both-unknown (`''`) case, so
+ * panes with no recorded generation behave exactly as before.
  */
-function syncSessionStore(hostId: string, session: Session, deadCode: string): void {
+function syncSessionStore(hostId: string, session: Session, dead: { code: string; tmuxInstance: string }): void {
   const state = useSessionStore.getState()
   const byCode = new Map<string, Session>((state.sessions[hostId] ?? []).map((s) => [s.code, s]))
-  byCode.delete(deadCode)
+  const cached = byCode.get(dead.code)
+  if (cached && (cached.tmux_instance ?? '') === dead.tmuxInstance) byCode.delete(dead.code)
   byCode.set(session.code, session)
   state.replaceHost(hostId, Array.from(byCode.values()))
 }
@@ -164,7 +173,7 @@ function defaultRepoint(tabId: string, paneId: string, session: Session): void {
       : undefined,
   }
   useTabStore.getState().setPaneContent(tabId, paneId, next)
-  syncSessionStore(content.hostId, session, content.sessionCode)
+  syncSessionStore(content.hostId, session, { code: content.sessionCode, tmuxInstance: content.tmuxInstance })
 }
 
 /**

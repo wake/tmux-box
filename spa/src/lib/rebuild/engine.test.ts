@@ -165,6 +165,45 @@ describe('rebuildPane', () => {
     expect(useSessionStore.getState().sessions['h1']?.map((s) => s.code)).toEqual(['new1'])
   })
 
+  // The dead code is dropped from the session store so it cannot linger as a
+  // ghost — but only when the cached entry really is the dead session. After a
+  // tmux restart the code can already belong to a live stranger.
+  it('evicts the dead code when the cached entry is that same generation', async () => {
+    useSessionStore.setState({ sessions: { h1: [session({ code: 'old111', name: 'dev', tmux_instance: '111:1000' })] } })
+    await rebuildPane('h1', 't1', 'p1', plan, {
+      createSession: vi.fn(async () => session({ code: 'new1', name: 'dev-2', tmux_instance: '222:2000' })),
+      sendKeys: vi.fn(),
+    })
+    expect(useSessionStore.getState().sessions['h1']?.map((s) => s.code)).toEqual(['new1'])
+  })
+
+  it('evicts a cached entry that carries no generation, as before', async () => {
+    useSessionStore.setState({ sessions: { h1: [session({ code: 'old111', name: 'dev' })] } })
+    seedPane('h1', 't1', 'p1', { cwd: '/w' })
+    useTabStore.setState((state) => {
+      const tab = state.tabs['t1']
+      const layout = tab.layout
+      if (layout.type !== 'leaf') throw new Error('fixture is a leaf')
+      return { tabs: { t1: { ...tab, layout: { ...layout, pane: { ...layout.pane,
+        content: { ...layout.pane.content, tmuxInstance: '' } as never } } } } }
+    })
+    await rebuildPane('h1', 't1', 'p1', plan, {
+      createSession: vi.fn(async () => session({ code: 'new1', name: 'dev-2', tmux_instance: '222:2000' })),
+      sendKeys: vi.fn(),
+    })
+    expect(useSessionStore.getState().sessions['h1']?.map((s) => s.code)).toEqual(['new1'])
+  })
+
+  it('keeps a live session that merely reuses the dead code', async () => {
+    // tmux restarted; `old111` is now somebody else's live session.
+    useSessionStore.setState({ sessions: { h1: [session({ code: 'old111', name: 'not-ours', tmux_instance: '222:2000' })] } })
+    await rebuildPane('h1', 't1', 'p1', plan, {
+      createSession: vi.fn(async () => session({ code: 'new1', name: 'dev-2', tmux_instance: '222:2000' })),
+      sendKeys: vi.fn(),
+    })
+    expect(useSessionStore.getState().sessions['h1']?.map((s) => s.code)).toEqual(['old111', 'new1'])
+  })
+
   it('passes the recorded cwd only when the plan applies it', async () => {
     const create: NonNullable<RebuildDeps['createSession']> =
       vi.fn(async () => session({ code: 'new1', name: 'dev', tmux_instance: '222:2000' }))
