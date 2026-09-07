@@ -14,9 +14,47 @@ import { scanPaneTree } from '../lib/pane-tree'
 import { reconcileSessionsPayload, type ReconcilePane } from '../lib/rebuild/reconcile'
 import { closeAttachGate, openAttachGate } from '../lib/rebuild/attach-gate'
 import { probeMissingCwds } from '../lib/rebuild/cwd-probe'
+import { probeSessionProvenance } from '../lib/rebuild/provenance-probe'
 import { hostWsUrl, fetchWsTicket, fetchHistory, type Session } from '../lib/host-api'
 import { checkHealth, type HealthResult } from '../lib/host-connection'
 import { ConnectionStateMachine } from '../lib/connection-state-machine'
+
+/**
+ * The distinct live terminal-pane bindings on `hostId`, optionally narrowed to
+ * one session code.
+ *
+ * Both provenance triggers in this file go through here so they ask with the
+ * generation the PANE RECORDED — never one read off the event that woke them.
+ * The probe keys its in-flight set, its cooldown and its disowned set by
+ * `(hostId, sessionCode, tmuxInstance)`, so a trigger that invented a different
+ * generation would open a second binding and slip past all three.
+ *
+ * Eligibility itself is not decided here: `probeSessionProvenance` owns the
+ * "does this pane still want an answer" rule (spec §5.4), and duplicating it at
+ * the call site is how the cwd probe's two rules once drifted apart.
+ */
+function provenanceBindings(
+  hostId: string,
+  sessionCode?: string,
+): Array<{ sessionCode: string; tmuxInstance: string }> {
+  // NUL separates the parts of the dedup key: it cannot occur in a session code
+  // or an instance stamp, so no two distinct pairs collide. Written as the
+  // `\u0000` escape rather than as a raw byte — a literal NUL makes the file
+  // count as binary, which puts it out of grep's reach.
+  const bindings = new Map<string, { sessionCode: string; tmuxInstance: string }>()
+  for (const tab of Object.values(useTabStore.getState().tabs)) {
+    scanPaneTree(tab.layout, (pane) => {
+      const c = pane.content
+      if (c.kind !== 'tmux-session' || c.mode !== 'terminal' || c.terminated) return
+      if (c.hostId !== hostId) return
+      if (sessionCode !== undefined && c.sessionCode !== sessionCode) return
+      bindings.set(`${c.sessionCode}\u0000${c.tmuxInstance}`, {
+        sessionCode: c.sessionCode, tmuxInstance: c.tmuxInstance,
+      })
+    })
+  }
+  return [...bindings.values()]
+}
 
 interface HostEntry {
   conn: EventConnection
@@ -161,6 +199,14 @@ export function useMultiHostEventWs() {
               // reconciliation so a pane about to be marked dead, or one that
               // just adopted this generation, is judged on its final binding.
               probeMissingCwds(hostId)
+
+              // First of the three provenance triggers (spec §5.4). Same
+              // placement and same ordering as the cwd sweep above: a sweep
+              // before reconciliation would ask with a generation the SPA has
+              // not adopted.
+              for (const { sessionCode, tmuxInstance } of provenanceBindings(hostId)) {
+                probeSessionProvenance(hostId, sessionCode, tmuxInstance)
+              }
             } catch { /* ignore */ }
             return
           }
@@ -168,6 +214,19 @@ export function useMultiHostEventWs() {
             try {
               const hookData = JSON.parse(event.value)
               useAgentStore.getState().handleNormalizedEvent(hostId, event.session, hookData)
+              // The second provenance trigger (spec §5.4), and the one v2
+              // lacked: the first probe of a pre-deploy session runs before any
+              // event has filled the frame's `session_id`, gets `found: false`,
+              // and nothing else would ever ask again — the session list has
+              // not changed and the pane is not re-attached. The hook stream is
+              // exactly the signal that the daemon now knows more than it did.
+              //
+              // AFTER `handleNormalizedEvent`, not before: a broadcast that
+              // itself writes the record leaves the pane ineligible, so it
+              // costs no request.
+              for (const { sessionCode, tmuxInstance } of provenanceBindings(hostId, event.session)) {
+                probeSessionProvenance(hostId, sessionCode, tmuxInstance)
+              }
             } catch { /* ignore */ }
           }
           if (event.type === 'relay') {

@@ -9,6 +9,7 @@ import { useWorkspaceStore } from '../features/workspace/store'
 import type { Pane, Tab, Workspace } from '../types/tab'
 import type { ConfigData } from '../lib/host-api'
 import { probeSessionCwd } from '../lib/rebuild/cwd-probe'
+import { probeSessionProvenance } from '../lib/rebuild/provenance-probe'
 
 const terminalViewProps = vi.hoisted(() => ({ last: undefined as Record<string, unknown> | undefined }))
 
@@ -30,6 +31,7 @@ vi.mock('./TerminatedPane', () => ({
 }))
 
 vi.mock('../lib/rebuild/cwd-probe', () => ({ probeSessionCwd: vi.fn() }))
+vi.mock('../lib/rebuild/provenance-probe', () => ({ probeSessionProvenance: vi.fn() }))
 
 const HOST_ID = 'test-host'
 
@@ -73,6 +75,7 @@ function makeWorkspace(id: string, tabs: string[]): Workspace {
 beforeEach(() => {
   cleanup()
   vi.mocked(probeSessionCwd).mockClear()
+  vi.mocked(probeSessionProvenance).mockClear()
   terminalViewProps.last = undefined
   useHostStore.setState({
     hosts: { [HOST_ID]: { id: HOST_ID, name: 'mlab', ip: '100.64.0.2', port: 7860, order: 0 } },
@@ -239,6 +242,77 @@ describe('SessionPaneContent', () => {
       render(<SessionPaneContent pane={dead} isActive={true} />)
 
       expect(probeSessionCwd).not.toHaveBeenCalled()
+    })
+  })
+
+  // The third provenance trigger (spec §5.4): a pane opened after the session
+  // list has settled gets no further `sessions` sweep and, until its agent
+  // speaks, no hook broadcast either — so attach is the only thing that can
+  // ask on its behalf.
+  describe('provenance probe on attach', () => {
+    it('asks who owns the pane binding when a terminal pane attaches', () => {
+      const pane = makePane({
+        content: {
+          kind: 'tmux-session', hostId: HOST_ID, sessionCode: 'dev001',
+          mode: 'terminal', cachedName: '', tmuxInstance: '222:2000',
+        },
+      })
+      setupTabStore(pane)
+      const view = render(<SessionPaneContent pane={pane} isActive={true} />)
+      view.rerender(<SessionPaneContent pane={pane} isActive={false} />)
+      expect(probeSessionProvenance).toHaveBeenCalledTimes(1)
+      expect(probeSessionProvenance).toHaveBeenCalledWith(HOST_ID, 'dev001', '222:2000')
+    })
+
+    it('does not ask while the host attach gate is closed', () => {
+      useHostStore.setState({ runtime: { [HOST_ID]: { status: 'connected' as const, attachReady: false } } })
+      const pane = makePane({
+        content: {
+          kind: 'tmux-session', hostId: HOST_ID, sessionCode: 'dev001',
+          mode: 'terminal', cachedName: '', tmuxInstance: '222:2000',
+        },
+      })
+      setupTabStore(pane)
+      render(<SessionPaneContent pane={pane} isActive={true} />)
+      expect(probeSessionProvenance).not.toHaveBeenCalled()
+    })
+
+    it('asks as soon as the gate opens under the mounted pane', async () => {
+      useHostStore.setState({ runtime: { [HOST_ID]: { status: 'connected' as const, attachReady: false } } })
+      const pane = makePane({
+        content: {
+          kind: 'tmux-session', hostId: HOST_ID, sessionCode: 'dev001',
+          mode: 'terminal', cachedName: '', tmuxInstance: '222:2000',
+        },
+      })
+      setupTabStore(pane)
+      render(<SessionPaneContent pane={pane} isActive={true} />)
+      expect(probeSessionProvenance).not.toHaveBeenCalled()
+
+      await act(async () => {
+        useHostStore.setState({ runtime: { [HOST_ID]: { status: 'connected' as const, attachReady: true } } })
+      })
+      expect(probeSessionProvenance).toHaveBeenCalledWith(HOST_ID, 'dev001', '222:2000')
+    })
+
+    it('does not ask for a stream-mode or terminated pane', () => {
+      const stream = makePane({
+        content: { kind: 'tmux-session', hostId: HOST_ID, sessionCode: 'dev001', mode: 'stream', cachedName: '', tmuxInstance: '222:2000' },
+      })
+      setupTabStore(stream)
+      render(<SessionPaneContent pane={stream} isActive={true} />)
+
+      const dead = makePane({
+        content: {
+          kind: 'tmux-session', hostId: HOST_ID, sessionCode: 'dev001',
+          mode: 'terminal', cachedName: '', tmuxInstance: '222:2000',
+          terminated: 'session-closed',
+        },
+      })
+      setupTabStore(dead)
+      render(<SessionPaneContent pane={dead} isActive={true} />)
+
+      expect(probeSessionProvenance).not.toHaveBeenCalled()
     })
   })
 
