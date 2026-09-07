@@ -567,6 +567,39 @@ undo) therefore stamp the current instance whenever they re-point. This ships
 in the same phase as the generation guard; "snapshot unchanged" is not
 achievable and is not claimed.
 
+### 4.6.2 Generation preconditions on the daemon (added after PR review R2)
+
+§4.5 says every writer takes its generation from the payload that carried its
+data. Two paths shipped in violation of that, and all three R2 review lenses
+converged on them:
+
+- `fetchSessionCwd` returns a bare string, so the probe writes the response
+  under the generation it *asked* with. If tmux restarted and reused the code
+  while the request was in flight, the **new** session's cwd is persisted into
+  the **old** pane's record — and the rebuild then uses that directory.
+- `retryResume` decides whether the target is still the session it created by
+  consulting `useSessionStore`, a cache with no freshness guarantee. A missing
+  entry or a stale generation both read as "safe", so a resume command can be
+  sent into a stranger's session. The daemon's send-keys resolves by code alone
+  and has no precondition to catch it.
+
+The SPA cannot close either hole from local state — only the daemon knows the
+current generation at the moment it acts. So both endpoints gain one:
+
+| Endpoint | Change |
+|---|---|
+| `GET /api/sessions/{code}/cwd` | Returns `{ "cwd": …, "tmux_instance": … }`, sampled together. The probe writes only when the returned instance equals the binding it asked for. |
+| `POST /api/sessions/{code}/send-keys` | Accepts an optional `expected_tmux_instance`. When present and it does not match the current generation, the daemon refuses with **409** and sends nothing. Absent means "no expectation", so existing callers (Quick Commands) are unaffected. |
+
+"Unknown" stays conservative in the direction that matters: §4.6 says an
+unknown generation never declares a pane dead, and this section says an
+unknown generation never authorises a write or a keystroke. The two rules point
+the same way — do nothing without evidence — rather than one of them being
+extended into permission.
+
+The probe additionally waits for the host's attach gate (§4.6), so it cannot
+run against a connection whose first session payload has not landed.
+
 ### 4.7 Resume command composition
 
 Composed when the agent group is written, stored as a plain string, so the user
