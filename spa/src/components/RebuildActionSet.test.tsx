@@ -207,6 +207,22 @@ describe('RebuildActionSet', () => {
     expect(screen.getByRole('button', { name: /attach anyway/i })).toBeEnabled()
   })
 
+  it('offers nothing to press once the daemon refused on the generation', () => {
+    // The refusal is not a failure to work around: the code the rebuild
+    // created belongs to another tmux generation now, so neither re-sending
+    // nor attaching can be right (spec §4.6.2).
+    render(<RebuildActionSet tabId="t1" paneId="p1" record={record} onRebuild={vi.fn()}
+      operation={{ report: { created: { code: 'new1', name: 'dev' }, repointed: false,
+        steps: {
+          create: { status: 'ok' },
+          resume: { status: 'failed', error: 'session new1 belongs to another tmux generation', refusal: 'generation' },
+          repoint: { status: 'failed', error: 'session new1 belongs to another tmux generation' },
+        } } }} />)
+    expect(screen.queryByRole('button', { name: /retry resume/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /attach anyway/i })).toBeNull()
+    expect(screen.getByTestId('rebuild-generation-refused-hint')).toBeInTheDocument()
+  })
+
   it('calls the retry callbacks it was given', () => {
     const onRetryResume = vi.fn()
     const onAttachAnyway = vi.fn()

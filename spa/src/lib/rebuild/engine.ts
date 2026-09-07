@@ -36,6 +36,13 @@ export interface RebuildPlan {
 export interface StepResult {
   status: 'ok' | 'skipped' | 'failed'
   error?: string
+  /**
+   * A refusal, as opposed to a failure — the daemon proved the target is not
+   * the session this operation created (spec §4.6.2). Nothing the user can
+   * press may clear it: re-sending can only be refused again, and re-pointing
+   * would bind the pane to whatever now owns that code.
+   */
+  refusal?: 'generation'
 }
 
 export interface RebuildReport {
@@ -53,6 +60,13 @@ export interface RebuildDeps {
    * — the daemon refuses the keystroke when it does not hold (spec §4.6.2).
    */
   sendKeys?: (hostId: string, code: string, command: string, expectedTmuxInstance: string) => Promise<void>
+  /**
+   * Read one session from the daemon, or `null` when it answers "not found".
+   * The retry path uses it to obtain the generation that currently owns the
+   * code it created (spec §4.6.2) — the SPA cache cannot prove that, and its
+   * silence least of all. Defaults to the pinned transport.
+   */
+  getSession?: (hostId: string, code: string) => Promise<Session | null>
   repoint?: (tabId: string, paneId: string, session: Session) => void
   /**
    * A lock the CALLER already holds (spec §4.11). "Rebuild all" takes the
@@ -156,6 +170,17 @@ function publishRefusal(
 
 /** The daemon returns 409 only for a duplicate session name; 400/500 never retry. */
 function isDuplicateName(err: unknown): boolean {
+  return typeof err === 'object' && err !== null
+    && (err as { status?: unknown }).status === 409
+}
+
+/**
+ * The send-keys 409: the generation precondition did not hold and the daemon
+ * sent nothing (`handler.go`). Matched by status rather than by class so a
+ * caller-supplied `sendKeys` reporting the same refusal is honoured too — the
+ * create step's 409 (a duplicate name) is a different endpoint, never here.
+ */
+function isGenerationConflict(err: unknown): boolean {
   return typeof err === 'object' && err !== null
     && (err as { status?: unknown }).status === 409
 }
@@ -329,7 +354,12 @@ async function runResumeStep(ctx: StepContext, enabled: boolean): Promise<void> 
     await ctx.sendKeys(ctx.hostId, code, ctx.resumeCommand, expectedTmuxInstance)
     ctx.report.steps.resume = { status: 'ok' }
   } catch (err) {
-    ctx.report.steps.resume = failed(err)
+    // A 409 is the daemon's generation refusal: it held the code against the
+    // generation the request named and they did not match. Typed, so no later
+    // action treats it as a transient failure worth working around.
+    ctx.report.steps.resume = isGenerationConflict(err)
+      ? { ...failed(err), refusal: 'generation' }
+      : failed(err)
   }
 }
 
@@ -520,34 +550,70 @@ async function runRebuild(
 
 /**
  * Whether the code the operation created still belongs to the session it
- * created, expressed as the reason it does not.
+ * created, expressed as the reason it does not — or `null` when the daemon
+ * confirms it does.
  *
  * A retry acts on a session created some time ago, and tmux hands out session
- * codes again after a restart (spec §3.5, §4.5) — so the code alone is not an
- * identity. The generation stamp that arrived with the create response is
- * compared against the one on the session the SPA currently sees at that code.
+ * codes again after a restart (spec §3.5, §4.5), so the code alone is not an
+ * identity. The generation that arrived with the create response is compared
+ * against one obtained from the PINNED DAEMON now. `useSessionStore` used to
+ * answer this, and could not: a missing entry and a stale entry both read as
+ * "no evidence of a stranger", which was then treated as permission. Absence
+ * of contrary evidence is not authorisation — only a positive match is
+ * (spec §4.6.2).
  *
- * Unknown is not mismatched: no session at that code (the daemon will reject
- * the send-keys, harmlessly), or an empty stamp on either side, means there is
- * no evidence of a stranger — the same rule §4.6 applies to death detection.
+ * Every unknown therefore refuses: no generation on the create response, a
+ * daemon that cannot be reached, a code it no longer knows, or a generation it
+ * cannot read. None of them are proof of a stranger, and none of them are
+ * permission either.
  */
-function targetIdentityMismatch(hostId: string, created: Session): string | null {
+async function targetIdentityRefusal(
+  getSession: NonNullable<RebuildDeps['getSession']>,
+  hostId: string,
+  created: Session,
+): Promise<string | null> {
   const createdInstance = created.tmux_instance ?? ''
-  if (!createdInstance) return null
-  const live = (useSessionStore.getState().sessions[hostId] ?? []).find((s) => s.code === created.code)
-  const liveInstance = live?.tmux_instance ?? ''
-  if (!liveInstance || liveInstance === createdInstance) return null
-  return `session ${created.code} on ${hostId} now belongs to tmux generation ${liveInstance}, not the ${createdInstance} this rebuild created`
+  if (!createdInstance) {
+    return `this rebuild never learnt which tmux generation session ${created.code} belongs to, so it cannot be re-attached`
+  }
+  let live: Session | null
+  try {
+    live = await getSession(hostId, created.code)
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    return `could not confirm which tmux generation session ${created.code} on ${hostId} belongs to: ${detail}`
+  }
+  if (!live) return `session ${created.code} no longer exists on ${hostId}`
+  const liveInstance = live.tmux_instance ?? ''
+  if (!liveInstance) {
+    return `${hostId} could not report which tmux generation session ${created.code} belongs to`
+  }
+  if (liveInstance !== createdInstance) {
+    return `session ${created.code} on ${hostId} now belongs to tmux generation ${liveInstance}, not the ${createdInstance} this rebuild created`
+  }
+  return null
 }
 
 /**
  * Stop the tail before it sends or re-points: the target is not provably the
  * one the operation created, so neither action is safe.
+ *
+ * A `refusal` outranks `withResume`. "Attach anyway" normally records the
+ * resume as skipped, but a generation refusal has to stay on the report it
+ * came from — recording it as "not requested" would erase the very state that
+ * is meant to be unclearable.
  */
-function refuseTail(report: RebuildReport, withResume: boolean, reason: string): void {
-  const step: StepResult = { status: 'failed', error: reason }
-  report.steps.resume = withResume ? step : skipped('not requested')
-  report.steps.repoint = step
+function refuseTail(
+  report: RebuildReport,
+  withResume: boolean,
+  reason: string,
+  refusal?: StepResult['refusal'],
+): void {
+  const step: StepResult = refusal
+    ? { status: 'failed', error: reason, refusal }
+    : { status: 'failed', error: reason }
+  report.steps.resume = withResume || refusal ? step : skipped('not requested')
+  report.steps.repoint = { status: 'failed', error: reason }
   report.repointed = false
 }
 
@@ -556,11 +622,16 @@ function refuseTail(report: RebuildReport, withResume: boolean, reason: string):
  * session is the whole reason a retry exists — but its report picks up the
  * reason, so the panel says why instead of just re-enabling the button.
  */
-function publishTailRefusal(paneId: string, withResume: boolean, reason: string): RebuildReport {
+function publishTailRefusal(
+  paneId: string,
+  withResume: boolean,
+  reason: string,
+  refusal?: StepResult['refusal'],
+): RebuildReport {
   const op = useRebuildStore.getState().operations[paneId]
   if (!op) return refusedReport('', 'resume', reason)
   const report: RebuildReport = { ...op.report, steps: { ...op.report.steps }, repointed: false }
-  refuseTail(report, withResume, reason)
+  refuseTail(report, withResume, reason, refusal)
   publish(paneId, report, op.createdSession)
   return report
 }
@@ -575,6 +646,12 @@ async function resumeTail(paneId: string, withResume: boolean, deps: RebuildDeps
   }
   if (op.status === 'running') {
     return refusedReport(op.hostId, 'resume', `a rebuild is already running for pane ${paneId}`)
+  }
+  if (op.report.steps.resume.refusal === 'generation') {
+    // Already refused by the daemon, on evidence only it holds. Neither button
+    // may argue with that: the code named in the refusal is somebody else's.
+    return publishTailRefusal(paneId, withResume, op.report.steps.resume.error
+      ?? `session ${op.createdSession.code} belongs to another tmux generation`, 'generation')
   }
   return withOperationLock(
     paneOwner(paneId),
@@ -606,9 +683,11 @@ async function runResumeTail(paneId: string, withResume: boolean, deps: RebuildD
     return report
   }
 
-  const mismatch = targetIdentityMismatch(op.hostId, op.createdSession)
-  if (mismatch) {
-    refuseTail(report, withResume, mismatch)
+  const getSession = deps.getSession
+    ?? ((_hostId: string, code: string) => pinned.getSession(code))
+  const refusal = await targetIdentityRefusal(getSession, op.hostId, op.createdSession)
+  if (refusal) {
+    refuseTail(report, withResume, refusal)
     publish(paneId, report, op.createdSession)
     return report
   }

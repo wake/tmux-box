@@ -27,6 +27,13 @@ export interface PinnedTransport {
   assertUnchanged(): void
   createSession(name: string, cwd: string, mode: string): Promise<Session>
   /**
+   * One session as the pinned daemon sees it NOW, or `null` when it answers
+   * "not found". The generation on the answer is the only authority on what a
+   * session code currently points at (spec §4.6.2) — uncached on the daemon
+   * side, unlike `GET /api/sessions`.
+   */
+  getSession(sessionCode: string): Promise<Session | null>
+  /**
    * `expectedTmuxInstance` is the tmux generation the caller believes the code
    * belongs to (spec §4.6.2). The daemon refuses with 409 and sends nothing
    * when it does not hold — the only authoritative check there is, because
@@ -90,13 +97,16 @@ export function pinHost(hostId: string, expected?: HostIdentity): PinnedTranspor
     }
   }
 
-  const request = async (path: string, body: unknown): Promise<Response> => {
-    // Re-verified immediately before every mutation, not just at pin time.
+  // Re-verified immediately before every request, not just at pin time.
+  const authHeaders = (): Record<string, string> => {
     assertUnchanged()
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     // Header name and format copied verbatim from `useHostStore.getAuthHeaders`
     // (`useHostStore.ts:167-171`), which also omits the header for a falsy token.
-    if (pinned.token) headers.Authorization = `Bearer ${pinned.token}`
+    return pinned.token ? { Authorization: `Bearer ${pinned.token}` } : {}
+  }
+
+  const request = async (path: string, body: unknown): Promise<Response> => {
+    const headers = { 'Content-Type': 'application/json', ...authHeaders() }
     return fetch(`${base}${path}`, { method: 'POST', headers, body: JSON.stringify(body) })
   }
 
@@ -106,6 +116,15 @@ export function pinHost(hostId: string, expected?: HostIdentity): PinnedTranspor
     assertUnchanged,
     async createSession(name, cwd, mode) {
       const res = await request('/api/sessions', { name, cwd, mode })
+      if (!res.ok) throw new HostApiError(res.status, res.statusText)
+      return res.json()
+    },
+    async getSession(sessionCode) {
+      const res = await fetch(`${base}/api/sessions/${sessionCode}`, { headers: authHeaders() })
+      // 404 is an answer, not a failure: the daemon knows no session at that
+      // code. The caller refuses on it all the same — it just refuses knowing
+      // why, rather than because it could not ask.
+      if (res.status === 404) return null
       if (!res.ok) throw new HostApiError(res.status, res.statusText)
       return res.json()
     },

@@ -216,6 +216,11 @@ export function RebuildActionSet({
   const steps = op?.report?.steps
   const resumeStep = steps?.resume
   const repointed = op?.report?.repointed ?? false
+  // The daemon refused the resume on the generation: the code this rebuild
+  // created belongs to somebody else now (spec §4.6.2). Neither retrying nor
+  // attaching can be right, so neither is offered — the engine refuses them
+  // anyway, and a button that can only fail reads as one worth pressing.
+  const generationRefused = resumeStep?.refusal === 'generation'
   // Once a session exists the rows describe something already done; editing
   // them would only pretend to change it.
   const frozen = busy || !!created || hostRemoved
@@ -336,6 +341,12 @@ export function RebuildActionSet({
               {t('rebuild.host_removed_hint')}
             </p>
           )
+          : generationRefused
+            ? (
+              <p data-testid="rebuild-generation-refused-hint" className="text-[11px] text-text-muted">
+                {t('rebuild.generation_refused_hint')}
+              </p>
+            )
           : created
             ? (
               <>

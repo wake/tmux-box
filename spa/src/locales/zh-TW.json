@@ -902,6 +902,7 @@
   "rebuild.retry_resume": "重試 resume",
   "rebuild.attach_anyway": "直接接上",
   "rebuild.host_removed_hint": "這個 pane 原本所屬的主機已被移除，請先把主機加回來再重建。",
+  "rebuild.generation_refused_hint": "這次重建建立的 tmux session 已經屬於另一個 tmux server，無法再送出 resume 或接上。請重新執行一次重建。",
   "rebuild.no_agent_hint": "這個 pane 沒有記錄到 agent，重建只會在上方目錄開一個 shell。若要接回 agent，請在這裡輸入指令。",
   "rebuild.unverified_hint": "這個 session 最近回報的 agent 與紀錄不同，因此預設不勾選；確定指令仍適用再勾選。",
   "rebuild.limits_title": "限制",

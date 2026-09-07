@@ -6,6 +6,7 @@ import { useRebuildStore } from '../../stores/useRebuildStore'
 import { useHostStore } from '../../stores/useHostStore'
 import { useTabStore } from '../../stores/useTabStore'
 import { useSessionStore } from '../../stores/useSessionStore'
+import { GenerationConflictError } from './transport'
 import type { Session } from '../host-api'
 import type { PaneRebuildRecord, Tab } from '../../types/tab'
 
@@ -413,10 +414,18 @@ describe('retryResume / attachAnyway', () => {
     })
   }
 
+  /**
+   * The daemon confirming that `new1` is still the session the operation
+   * created. Every tail now requires that confirmation before it acts
+   * (spec §4.6.2), so the happy paths below have to supply it.
+   */
+  const confirmed = () =>
+    vi.fn(async () => session({ code: 'new1', name: 'dev-2', tmux_instance: '222:2000' }))
+
   it('retryResume re-sends against the already-created session, then re-points', async () => {
     await failedResumeOperation()
     const sendKeys = vi.fn()
-    const report = await retryResume('p1', { sendKeys })
+    const report = await retryResume('p1', { sendKeys, getSession: confirmed() })
     expect(sendKeys).toHaveBeenCalledWith('h1', 'new1', 'claude --resume S1', '222:2000')
     expect(report.steps.create.status).toBe('ok')
     expect(report.steps.resume.status).toBe('ok')
@@ -427,7 +436,7 @@ describe('retryResume / attachAnyway', () => {
   it('attachAnyway re-points without re-sending the resume', async () => {
     await failedResumeOperation()
     const sendKeys = vi.fn()
-    const report = await attachAnyway('p1', { sendKeys })
+    const report = await attachAnyway('p1', { sendKeys, getSession: confirmed() })
     expect(sendKeys).not.toHaveBeenCalled()
     expect(report.steps.resume.status).toBe('skipped')
     expect(report.repointed).toBe(true)
@@ -514,7 +523,10 @@ describe('rebuildPane — operation lock', () => {
       createSession: vi.fn(async () => session({ code: 'new1', name: 'dev', tmux_instance: '222:2000' })),
       sendKeys: vi.fn(async () => { throw new Error('boom') }),
     })
-    const report = await attachAnyway('p1', { sendKeys: vi.fn() })
+    const report = await attachAnyway('p1', {
+      sendKeys: vi.fn(),
+      getSession: vi.fn(async () => session({ code: 'new1', name: 'dev', tmux_instance: '222:2000' })),
+    })
     expect(report.repointed).toBe(true)
     expect(useRebuildStore.getState().lockedBy).toBeNull()
   })
@@ -542,9 +554,14 @@ describe('retryResume / attachAnyway — target identity', () => {
     })
   }
 
-  /** What the SPA currently believes lives on the host. */
+  /** What the SPA cache believes lives on the host — never the authority. */
   function seedSessions(...sessions: Session[]) {
     useSessionStore.setState({ sessions: { h1: sessions } })
+  }
+
+  /** The daemon's answer for the created code, which IS the authority. */
+  function daemonSays(answer: Session | null) {
+    return vi.fn(async () => answer)
   }
 
   it('refuses the retry when the host address changed since the operation started', async () => {
@@ -559,43 +576,164 @@ describe('retryResume / attachAnyway — target identity', () => {
     expect(paneContent('t1', 'p1')).toMatchObject({ sessionCode: 'old111' })
   })
 
-  it('refuses the retry when the code now belongs to a different tmux generation', async () => {
+  it('refuses the retry when the daemon reports a different generation for the code', async () => {
     await failedResumeOperation()
     // tmux restarted and handed `new1` to somebody else.
-    seedSessions(session({ code: 'new1', name: 'not-ours', tmux_instance: '333:3000' }))
     const sendKeys = vi.fn()
-    const report = await retryResume('p1', { sendKeys })
+    const report = await retryResume('p1', {
+      sendKeys,
+      getSession: daemonSays(session({ code: 'new1', name: 'not-ours', tmux_instance: '333:3000' })),
+    })
     expect(sendKeys).not.toHaveBeenCalled()
     expect(report.steps.resume.status).toBe('failed')
     expect(report.steps.resume.error).toMatch(/generation|instance/i)
     expect(report.repointed).toBe(false)
   })
 
-  it('refuses to attach anyway onto a code that changed generation', async () => {
+  it('refuses to attach anyway onto a code the daemon reports at a different generation', async () => {
     await failedResumeOperation()
-    seedSessions(session({ code: 'new1', name: 'not-ours', tmux_instance: '333:3000' }))
     const repoint = vi.fn()
-    const report = await attachAnyway('p1', { repoint })
+    const report = await attachAnyway('p1', {
+      repoint,
+      getSession: daemonSays(session({ code: 'new1', name: 'not-ours', tmux_instance: '333:3000' })),
+    })
     expect(repoint).not.toHaveBeenCalled()
     expect(report.repointed).toBe(false)
     expect(paneContent('t1', 'p1')).toMatchObject({ sessionCode: 'old111' })
   })
 
-  it('retries when the session store still shows the session it created', async () => {
+  it('refuses when the daemon reports no generation for the code', async () => {
     await failedResumeOperation()
-    seedSessions(session({ code: 'new1', name: 'dev-2', tmux_instance: '222:2000' }))
     const sendKeys = vi.fn()
-    const report = await retryResume('p1', { sendKeys })
+    const repoint = vi.fn()
+    const report = await retryResume('p1', {
+      sendKeys, repoint,
+      getSession: daemonSays(session({ code: 'new1', name: 'dev-2', tmux_instance: '' })),
+    })
+    expect(sendKeys).not.toHaveBeenCalled()
+    expect(repoint).not.toHaveBeenCalled()
+    expect(report.steps.resume.status).toBe('failed')
+    expect(report.repointed).toBe(false)
+  })
+
+  it('refuses when the daemon says the code is gone', async () => {
+    await failedResumeOperation()
+    const sendKeys = vi.fn()
+    const report = await retryResume('p1', { sendKeys, getSession: daemonSays(null) })
+    expect(sendKeys).not.toHaveBeenCalled()
+    expect(report.repointed).toBe(false)
+  })
+
+  it('refuses when the daemon cannot be asked at all', async () => {
+    await failedResumeOperation()
+    const sendKeys = vi.fn()
+    const report = await retryResume('p1', {
+      sendKeys,
+      getSession: vi.fn(async () => { throw new Error('connection refused') }),
+    })
+    expect(sendKeys).not.toHaveBeenCalled()
+    expect(report.steps.resume.status).toBe('failed')
+    expect(report.repointed).toBe(false)
+  })
+
+  it('is not authorised by an empty SPA cache — the daemon still has to confirm', async () => {
+    // The cache holding nothing about `new1` used to read as "no evidence of a
+    // stranger", which was treated as permission. Absence of contrary evidence
+    // is not authorisation (spec §4.6.2).
+    await failedResumeOperation()
+    expect(useSessionStore.getState().sessions.h1).toBeUndefined()
+    const sendKeys = vi.fn()
+    const repoint = vi.fn()
+    const report = await attachAnyway('p1', {
+      sendKeys, repoint, getSession: daemonSays(null),
+    })
+    expect(repoint).not.toHaveBeenCalled()
+    expect(report.repointed).toBe(false)
+    expect(paneContent('t1', 'p1')).toMatchObject({ sessionCode: 'old111' })
+  })
+
+  it('retries when the daemon confirms the generation it created, cache or no cache', async () => {
+    await failedResumeOperation()
+    // A stale cache entry neither authorises nor blocks: only the answer does.
+    seedSessions(session({ code: 'new1', name: 'stale', tmux_instance: '333:3000' }))
+    const sendKeys = vi.fn()
+    const getSession = daemonSays(session({ code: 'new1', name: 'dev-2', tmux_instance: '222:2000' }))
+    const report = await retryResume('p1', { sendKeys, getSession })
+    expect(getSession).toHaveBeenCalledWith('h1', 'new1')
     expect(sendKeys).toHaveBeenCalledWith('h1', 'new1', 'claude --resume S1', '222:2000')
     expect(report.repointed).toBe(true)
   })
 
-  it('retries when the SPA has no session list to check against', async () => {
+  it('asks the pinned daemon for the session before it sends anything', async () => {
     await failedResumeOperation()
-    const sendKeys = vi.fn()
-    const report = await retryResume('p1', { sendKeys })
-    expect(sendKeys).toHaveBeenCalledWith('h1', 'new1', 'claude --resume S1', '222:2000')
+    const urls: string[] = []
+    const fetchMock = vi.fn(async (url: string) => {
+      urls.push(String(url))
+      if (String(url).endsWith('/api/sessions/new1')) {
+        return new Response(JSON.stringify({ code: 'new1', name: 'dev-2', tmux_instance: '222:2000' }), { status: 200 })
+      }
+      return new Response(null, { status: 204 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const report = await retryResume('p1')
+    expect(urls[0]).toBe('http://10.0.0.9:7860/api/sessions/new1')
+    expect(urls.some((u) => u.endsWith('/send-keys'))).toBe(true)
     expect(report.repointed).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The daemon's 409 is a REFUSAL, not a transient error: the code it names
+// belongs to another tmux generation, and no button may talk the SPA past
+// that. It is therefore typed and sticky (spec §4.6.2).
+// ---------------------------------------------------------------------------
+describe('retryResume / attachAnyway — a generation refusal is final', () => {
+  beforeEach(() => {
+    useRebuildStore.setState({ operations: {}, lockedBy: null })
+    useSessionStore.setState({ sessions: {}, activeHostId: null, activeCode: null })
+    seedHost('h1')
+    seedPane('h1', 't1', 'p1', { cwd: '/w', resumeCommand: 'claude --resume S1' })
+    vi.unstubAllGlobals()
+  })
+
+  /** An operation whose resume the daemon refused with 409. */
+  async function refusedResumeOperation() {
+    return rebuildPane('h1', 't1', 'p1', plan, {
+      createSession: vi.fn(async () => session({ code: 'new1', name: 'dev-2', tmux_instance: '222:2000' })),
+      sendKeys: vi.fn(async () => { throw new GenerationConflictError('new1', '222:2000') }),
+    })
+  }
+
+  it('marks the refusal on the report', async () => {
+    const report = await refusedResumeOperation()
+    expect(report.steps.resume.status).toBe('failed')
+    expect(report.steps.resume.refusal).toBe('generation')
+  })
+
+  it('attach anyway cannot clear it', async () => {
+    await refusedResumeOperation()
+    const repoint = vi.fn()
+    const getSession = vi.fn()
+    const report = await attachAnyway('p1', { repoint, getSession })
+    expect(repoint).not.toHaveBeenCalled()
+    // Not even asked: the answer could not authorise anything either way.
+    expect(getSession).not.toHaveBeenCalled()
+    expect(report.repointed).toBe(false)
+    expect(report.steps.resume.refusal).toBe('generation')
+    expect(paneContent('t1', 'p1')).toMatchObject({ sessionCode: 'old111' })
+  })
+
+  it('retry resume cannot clear it either, and it stays refused', async () => {
+    await refusedResumeOperation()
+    const sendKeys = vi.fn()
+    await retryResume('p1', { sendKeys })
+    expect(sendKeys).not.toHaveBeenCalled()
+    // Still refused on the next attempt: the state survives its own report.
+    const again = await attachAnyway('p1', { repoint: vi.fn() })
+    expect(again.steps.resume.refusal).toBe('generation')
+    expect(again.repointed).toBe(false)
+    expect(useRebuildStore.getState().operations['p1']?.report.steps.resume.refusal).toBe('generation')
   })
 })
 

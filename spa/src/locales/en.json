@@ -902,6 +902,7 @@
   "rebuild.retry_resume": "Retry resume",
   "rebuild.attach_anyway": "Attach anyway",
   "rebuild.host_removed_hint": "The host this pane belonged to has been removed. Add the host back before rebuilding.",
+  "rebuild.generation_refused_hint": "The tmux session this rebuild created now belongs to a different tmux server, so it cannot be resumed or attached. Rebuild again to start over.",
   "rebuild.no_agent_hint": "No agent was recorded for this pane, so Rebuild just opens a shell in the directory above. Type a command here to resume an agent instead.",
   "rebuild.unverified_hint": "This session was last reported running a different agent, so the recorded command is left unchecked. Tick it only if you are sure it still applies.",
   "rebuild.limits_title": "Limitations",
