@@ -10,8 +10,8 @@ import type { ContextMenuAction } from '../../components/TabContextMenu'
 import type { RebuildEditableField } from '../../components/RebuildActionSet'
 
 /**
- * One terminal `tmux-session` pane the tab-name popover can act on (spec
- * §4.10). A tab may hold several: the popover renders one block per target and
+ * One `tmux-session` pane the tab-name popover can act on (spec §4.10). A tab
+ * may hold several: the popover renders one block per terminal target and
  * every edit is scoped to the target it came from, so a split sibling bound to
  * the same session keeps its own record.
  */
@@ -22,28 +22,19 @@ export interface RenameTargetPane {
   sessionCode: string
   tmuxInstance: string
   cachedName: string
+  /** Stream panes carry no rebuild record; they only get the legacy rename. */
+  mode: 'terminal' | 'stream'
   /** Set when the pane's session is gone — its name row edits the record only. */
   terminated?: TerminatedReason
   record: PaneRebuildRecord
 }
 
-/**
- * Every terminal `tmux-session` pane in the tab, in layout order.
- *
- * This is the popover's entry condition. Looking at the tab's *primary* pane
- * alone (the pre-Task-15 behaviour) left the popover unreachable whenever the
- * first pane happened to be an editor or a dead session, even though another
- * pane in the same tab was a perfectly good live terminal.
- *
- * Terminated panes are included — a dead pane is exactly the one whose record
- * the user needs to fix — while stream panes are excluded, as everywhere else
- * in this feature.
- */
-export function collectRenameTargets(tab: Tab): RenameTargetPane[] {
+/** Every `tmux-session` pane in the tab, in layout order, whatever its mode. */
+function collectSessionPanes(tab: Tab): RenameTargetPane[] {
   const targets: RenameTargetPane[] = []
   for (const pane of collectLeaves(tab.layout)) {
     const c = pane.content
-    if (c.kind !== 'tmux-session' || c.mode !== 'terminal') continue
+    if (c.kind !== 'tmux-session') continue
     targets.push({
       tabId: tab.id,
       paneId: pane.id,
@@ -51,6 +42,7 @@ export function collectRenameTargets(tab: Tab): RenameTargetPane[] {
       sessionCode: c.sessionCode,
       tmuxInstance: c.tmuxInstance,
       cachedName: c.cachedName,
+      mode: c.mode,
       terminated: c.terminated,
       // A pane that never accumulated a record still has a name and a
       // generation — the same seed shape `applyRebuildPatch` writes against.
@@ -58,6 +50,34 @@ export function collectRenameTargets(tab: Tab): RenameTargetPane[] {
     })
   }
   return targets
+}
+
+/**
+ * The panes the popover renders a rebuild detail block for: terminal panes,
+ * dead ones included — a dead pane is exactly the one whose record the user
+ * needs to fix. Stream panes are out of scope for the record, as everywhere
+ * else in this feature.
+ */
+export function collectRenameTargets(tab: Tab): RenameTargetPane[] {
+  return collectSessionPanes(tab).filter((target) => target.mode === 'terminal')
+}
+
+/**
+ * The popover's entry condition: any pane it could do something useful with.
+ *
+ * Wider than {@link collectRenameTargets} in one direction and narrower in
+ * another. A stream pane has no rebuild record, but it is still a named tmux
+ * session that double-click has always renamed through the legacy single
+ * input — gating the entry point on terminal panes alone took that away.
+ * A terminated stream pane is left out, matching the pre-feature rule: there
+ * is no live session to rename and no record to edit.
+ *
+ * Looking at the tab's *primary* pane alone (the pre-Task-15 behaviour) left
+ * the popover unreachable whenever the first pane happened to be an editor or
+ * a dead session, even though another pane in the tab was a good target.
+ */
+export function collectRenameEntryPanes(tab: Tab): RenameTargetPane[] {
+  return collectSessionPanes(tab).filter((target) => target.mode === 'terminal' || !target.terminated)
 }
 
 export function useTabWorkspaceActions(displayTabs: Tab[]) {
@@ -146,12 +166,14 @@ export function useTabWorkspaceActions(displayTabs: Tab[]) {
     if (tab && !tab.locked) handleCloseTab(tabId)
   }, [tabs, handleCloseTab])
 
-  // Opens whenever the tab holds at least one terminal pane — not only when
+  // Opens whenever the tab holds at least one usable tmux pane — not only when
   // the *primary* one is a live session (spec §4.10). The stored target is the
   // pane the legacy single-input confirm path still acts on: the first live
-  // terminal, or the first target at all when every one of them is dead.
+  // session, or the first entry pane at all when every one of them is dead.
+  // That path is what a stream-only tab still renames through, since it gets
+  // no detail blocks.
   const openRenameForTab = useCallback((tab: Tab, anchorEl?: Element | null) => {
-    const targets = collectRenameTargets(tab)
+    const targets = collectRenameEntryPanes(tab)
     if (targets.length === 0) return
     const primary = targets.find((target) => !target.terminated) ?? targets[0]
     const el = anchorEl ?? document.querySelector(`[data-tab-id="${tab.id}"]`)

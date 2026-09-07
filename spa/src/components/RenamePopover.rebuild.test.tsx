@@ -6,14 +6,14 @@
 // block per terminal pane, each editing its own pane's record, and none of it
 // hijacking the Enter that submits a rename).
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
 import { useTabStore } from '../stores/useTabStore'
 import { useSessionStore } from '../stores/useSessionStore'
 import { useWorkspaceStore } from '../stores/useWorkspaceStore'
 import { useHostStore } from '../stores/useHostStore'
 import { useAgentStore } from '../stores/useAgentStore'
 import { clearModuleRegistry, registerModule } from '../lib/module-registry'
-import { collectRenameTargets, useTabWorkspaceActions } from '../features/workspace/hooks'
+import { collectRenameTargets, collectRenameEntryPanes, useTabWorkspaceActions } from '../features/workspace/hooks'
 import type { PaneContent, PaneRebuildRecord, Tab } from '../types/tab'
 
 const mockOnPointerDown = vi.fn()
@@ -373,5 +373,47 @@ describe('hook write-through', () => {
     const second = leaves[1]!.content as Extract<PaneContent, { kind: 'tmux-session' }>
     expect(first.rebuild?.cwd).toBe('/w/edited')
     expect(second.rebuild?.cwd).toBe('/w/p')
+  })
+})
+
+// A stream pane has no rebuild record and no rebuild fields, but it is still a
+// tmux session with a name — and renaming it by double-clicking the tab is an
+// entry point that predates this feature. Restricting the popover's entry
+// condition to terminal panes silently removed it.
+describe('stream panes keep the legacy rename', () => {
+  it('collects a live stream pane as an entry pane, but never as a detail target', () => {
+    const tab = seedSplitTab([terminal({ mode: 'stream' })])
+    expect(collectRenameTargets(tab)).toHaveLength(0)
+    expect(collectRenameEntryPanes(tab)).toHaveLength(1)
+    expect(collectRenameEntryPanes(tab)[0].mode).toBe('stream')
+  })
+
+  it('does not offer a terminated stream pane, which has nothing to rename', () => {
+    const tab = seedSplitTab([terminal({ mode: 'stream', terminated: 'tmux-restarted' })])
+    expect(collectRenameEntryPanes(tab)).toHaveLength(0)
+  })
+
+  it('opens the single rename input on a stream-only tab and renames through the daemon', async () => {
+    const tab = seedSplitTab([terminal({ mode: 'stream' })])
+    useTabStore.setState({ tabs: { t1: tab }, tabOrder: ['t1'], activeTabId: 't1' })
+    render(<TabBarHarness />)
+    fireEvent.doubleClick(screen.getByRole('tab'))
+
+    const input = await screen.findByDisplayValue('dev')
+    // The rebuild fields belong to terminal panes only.
+    expect(screen.queryByTestId('rename-pane-block-p1')).toBeNull()
+
+    fireEvent.change(input, { target: { value: 'renamed' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => expect(renameSession).toHaveBeenCalledWith('h1', 'abc123', 'renamed'))
+  })
+
+  it('still shows the detail blocks when a terminal pane shares the tab', async () => {
+    const tab = seedSplitTab([terminal({ mode: 'stream', sessionCode: 'str1' }), terminal({ sessionCode: 'trm1' })])
+    useTabStore.setState({ tabs: { t1: tab }, tabOrder: ['t1'], activeTabId: 't1' })
+    render(<TabBarHarness />)
+    fireEvent.doubleClick(screen.getByRole('tab'))
+    expect(await screen.findByTestId('rename-pane-block-p2')).toBeInTheDocument()
+    expect(screen.queryByTestId('rename-pane-block-p1')).toBeNull()
   })
 })
