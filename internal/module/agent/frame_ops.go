@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -77,6 +79,50 @@ type FrameTraceMeta struct {
 	// return path leaves it nil by zero value, which is the fail-safe: no
 	// field set, no envelope emitted. See spec §4.3.1.
 	Provenance *Provenance
+}
+
+// recordSessionIdentity stores the sender's own agent session id and cwd on
+// the frame the sender owns (spec §5.2).
+//
+// Call it at every applyFrameEvent return whose frame belongs to the process
+// that sent the event, and at none of the returns that hand back somebody
+// else's frame — the proxy fast path, reconcileCreatedFrameAsProxy, and the
+// codex broker upsert all return a *parent's* frame, and writing the child's
+// session id there would be a real mis-attribution.
+//
+// Deliberately not gated on lifecycle: opencode switches back to an existing
+// session inside one process without emitting a SessionStart (spec §3.3), and
+// a pre-deploy session's frame only ever sees ordinary events. Only non-empty
+// values are written, so an event carrying neither field clears nothing.
+//
+// Best-effort by design. A provider that does not implement SessionIdentifier
+// contributes nothing, and a write failure — sql.ErrNoRows from a frame a
+// concurrent sweep or SessionEnd already deleted, or any other store error —
+// is logged and swallowed rather than failing the hook: the event's status
+// meaning has already been persisted by the mutation this follows.
+func (m *Module) recordSessionIdentity(req EventRequest, frameID string) {
+	if m == nil || m.frames == nil || m.registry == nil || frameID == "" {
+		return
+	}
+	provider, ok := m.registry.Get(req.AgentType)
+	if !ok {
+		return
+	}
+	identifier, ok := provider.(agentpkg.SessionIdentifier)
+	if !ok {
+		return
+	}
+	sessionID, cwd := identifier.IdentifyEvent(req.PurdexName, req.RawEvent)
+	if sessionID == "" && cwd == "" {
+		return
+	}
+	if err := m.frames.UpdateSessionIdentity(frameID, sessionID, cwd); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[agent] session_identity_frame_gone: frame=%s pane=%s", frameID, req.TmuxPaneID)
+			return
+		}
+		log.Printf("[agent] session_identity_write_failed: frame=%s pane=%s err=%v", frameID, req.TmuxPaneID, err)
+	}
 }
 
 func (m *Module) applyFrameEvent(req EventRequest, result agentpkg.DeriveResult, broadcastTs int64) (*SessionProjection, FrameTraceMeta, error) {
@@ -165,6 +211,10 @@ func (m *Module) applyFrameEvent(req EventRequest, result agentpkg.DeriveResult,
 		}
 		agentID, _ := result.Detail["agent_id"].(string)
 		if agentID == "" {
+			// Own-frame return: the membership change is skipped, but the
+			// event still came from this frame's process and still carries
+			// its session id (cc marks it Valid — cc/status.go:107-110).
+			m.recordSessionIdentity(req, frame.FrameID)
 			projection, err := m.projectPane(req.TmuxPaneID)
 			return projection, FrameTraceMeta{
 				FrameID:       frame.FrameID,
@@ -210,6 +260,8 @@ func (m *Module) applyFrameEvent(req EventRequest, result agentpkg.DeriveResult,
 				After:    map[string]any{},
 			}, perr
 		}
+		// Own-frame return: stored is the sender's own frame.
+		m.recordSessionIdentity(req, stored.FrameID)
 		projection, err := m.projectPane(req.TmuxPaneID)
 		return projection, FrameTraceMeta{
 			FrameID:       stored.FrameID,
@@ -346,6 +398,10 @@ func (m *Module) applyFrameEvent(req EventRequest, result agentpkg.DeriveResult,
 			}
 			switch outcome {
 			case detachOutcomeDetached:
+				// Own-frame return: this is the NATIVE detach (the
+				// reason string says so) — stored is the sender's own
+				// frame, not a proxy parent's.
+				m.recordSessionIdentity(req, stored.FrameID)
 				projection, perr := m.projectPane(req.TmuxPaneID)
 				return projection, FrameTraceMeta{
 					FrameID:       stored.FrameID,
@@ -878,6 +934,16 @@ func (m *Module) applyFrameEvent(req EventRequest, result agentpkg.DeriveResult,
 			stored = updated
 		}
 	}
+	// Own-frame return: both branches above leave `stored` holding the
+	// sender's own frame — the existing-frame narrow update and the
+	// new-frame Upsert alike. Every return that hands back a parent's frame
+	// instead (the pre-Upsert proxy fast path, reconcileCreatedFrameAsProxy,
+	// the codex broker upsert) has already returned before this point.
+	//
+	// This is also the ordinary-event path, and therefore the one that
+	// matters most: a pre-deploy session's frame only ever sees ordinary
+	// events, and they take UpdateHookPath, never Upsert.
+	m.recordSessionIdentity(req, stored.FrameID)
 	projection, err := m.projectPane(req.TmuxPaneID)
 	// Phase 3 — three-state reason (plan §1.4):
 	//   parent_frame_found       → legacy lookup hit (line 220-228)
