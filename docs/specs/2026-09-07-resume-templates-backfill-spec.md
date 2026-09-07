@@ -1,7 +1,7 @@
 # Spec — Resume command templates & provenance backfill
 
-**Status:** v4
-**Review history:** v1 → codex `task-mtre55dl-hnlmvd` (2 Blocker, 9 Important, 1 Minor); v2 → codex `task-mtrggpct-ub3biv` (2 Blocker, 8 Important, 2 Minor); v3 → codex `task-mtrgvcef-75s6gi` (1 Blocker, 4 Important, 2 Minor). Dispositions in §10.
+**Status:** v5 — approved for plan by codex round 4
+**Review history:** v1 → codex `task-mtre55dl-hnlmvd` (2 Blocker, 9 Important, 1 Minor); v2 → codex `task-mtrggpct-ub3biv` (2 Blocker, 8 Important, 2 Minor); v3 → codex `task-mtrgvcef-75s6gi` (1 Blocker, 4 Important, 2 Minor); v4 → codex `task-mtrh5xai-ipphk9` (**0 Blocker, approved**). Dispositions in §10.
 **Follows:** `docs/specs/2026-09-07-tab-rebuild-spec.md` (shipped alpha.332)
 **Supersedes:** that spec's §9.1 "Daemon-side backfill (cut from v1)"
 
@@ -159,7 +159,26 @@ at `proxyMaxDepth` therefore costs up to ~20 forks **per frame**, and §5.3
 walks every frame in the pane. Memoization within one request is a requirement,
 not an optimisation (§5.3).
 
-### 3.5 A shell function is invisible to a non-interactive shell
+### 3.5 An agent sits one process below its tmux pane
+
+Measured on this machine, 2026-09-08, over `tmux list-panes -a` and
+`ps -axo pid,ppid,comm`. For every pane currently running an agent:
+
+```
+pane pid 46435 (-zsh)
+  depth=1  47858  /Users/wake/.local/bin/claude
+  depth=2  47967  node                     ← MCP servers, not the agent
+  depth=2  48486  /bin/zsh
+```
+
+**Depth 1.** A shell function adds no process layer — `cld-yolo` execs `claude`
+from the pane's own shell — so the wrapper this feature exists for does not
+deepen the chain. An npm launcher (codex installed through node) would make it
+2. `proxyMaxDepth` is 5, so the pane-tree half of §5.3's walk has ample
+headroom, and the walk's existing behaviour of refusing rather than inferring
+past the cap is the right failure mode for anything deeper.
+
+### 3.6 A shell function is invisible to a non-interactive shell
 
 `cld-yolo` is defined in the user's `~/.zshrc`. It is not on `PATH` and
 `command -v cld-yolo` from a non-interactive shell finds nothing. It resolves
@@ -283,8 +302,8 @@ along with the record field would blur exactly the distinction §4.3 depends on.
 **agent identity** the record holds — a different `agent.type` or a different
 `agent.sessionId`. That covers a qualifying `SessionStart` with a new id and
 the identity-correcting backfill of §5.5. A writer that lands the same identity
-(an idle `SessionStart` re-emit, a refresh that only fills a missing `cwd`)
-leaves the override alone.
+(an idle `SessionStart` re-emit, or the **confirm** mode of §5.5) leaves the
+override alone.
 
 This is a **product policy, not a proof**. It is neither necessary nor
 sufficient in every case: an override of the form `cld-yolo -c` stays valid
@@ -375,7 +394,8 @@ rc file can leave descendants holding the output pipe open:
   truncation.
 - 5 s deadline.
 
-**Rejected before exec** (`resolved: false, kind: "unverifiable"`): a token
+**Rejected before exec** (`resolved: false`, with `reason` `"shell_metacharacters"`
+or `"too_long"`): a token
 longer than 256 bytes, or containing any of ``| & ; < > ( ) $ ` \ " ' newline``
 or a leading `-`. The *template* is not restricted — only what we agree to
 probe.
@@ -688,6 +708,14 @@ an `unverified` record clears the flag; an answer that disagrees replaces the
 record. A binding that keeps answering `found: false` costs one request per 30 s
 **only while hooks keep arriving**, and none at all once the session is idle.
 
+`unverified` cannot be re-raised in a loop, because the only writer is the
+**reconnect replay branch** (`useAgentStore.ts:213`) — ordinary hook broadcasts
+never set it. So after a `confirm`, no amount of further agent activity
+re-opens the question; a *new* reconnect can raise it again, and that is a new
+signal deserving one more repair, not a loop. "Never asks again" throughout
+this section means "until a new invalidation signal arrives", and there is
+exactly one such signal.
+
 `disowned` remains permanent, as in `cwd-probe`.
 
 ### 5.5 SPA — the write
@@ -763,7 +791,7 @@ instead of only a warning.
 
 | Phase | Content |
 |---|---|
-| **1** | B. Daemon: two `agent_frames` columns + migration + the write contract of §5.2, `UpdateSessionIdentity`, `SessionIdentifier` for the three agents, the shared ancestry traversal extracted from `classifyAncestor`, `GET /api/sessions/{code}/provenance` with pane-tree verification and per-request memoization, opencode `cwd` emits. SPA: `provenance-probe.ts` + its three triggers and stop conditions, the `agent-backfill` patch with its three modes, `cwdSource: 'user'` on manual cwd edits. |
+| **1** | B. Daemon: two `agent_frames` columns + migration + the write contract of §5.2, `UpdateSessionIdentity`, `SessionIdentifier` for the three agents, the shared ancestry traversal extracted from `classifyAncestor`, `GET /api/sessions/{code}/provenance` with pane-tree verification and per-request memoization, opencode `cwd` emits. SPA: `provenance-probe.ts` + its three triggers and stop conditions, the `agent-backfill` patch with its four ordered modes, `cwdSource: 'user'` on manual cwd edits. |
 | **2** | A. `useResumeTemplateStore`, `resolveResumeCommand`, the `resumeCommand` → `resumeCommandOverride` rename across every site in §4.2, the identity-scoped override clear, operation-pinned display, `POST /api/shell/resolve-command`, `ResumeTemplateSettings.tsx`, i18n. |
 
 Phase 1 first: it is the coverage bug the user has actually seen, and after it a
@@ -927,7 +955,22 @@ endpoint, whose 404 renders as `unverifiable`.
 
 ## 10. Review disposition
 
-### 10.1 Round 3 — codex `task-mtrgvcef-75s6gi` on v3
+### 10.1 Round 4 — codex `task-mtrh5xai-ipphk9` on v4 — **approved for plan**
+
+No Blocker. Two Important and one Minor, all assigned to the plan:
+
+| # | Finding | Disposition |
+|---|---|---|
+| 1 | Important — the in-flight branch of §5.4.1 does not say whether the deferred run fires immediately on completion or waits for the new deadline; "fire on completion" would let a slow request with continuous hooks run back-to-back | **Plan item.** The plan defines one scheduling entry point: in flight → set `pending` only; on completion → set `nextAllowedAt`; `pending` survives to that deadline and is consumed only when a request actually starts, after every guard. The timer callback re-checks in-flight, deadline and `disowned` |
+| 2 | Important — the shared walker cannot simply reuse the existing loop's return and completion conditions: it starts from the PPID (so `frame.PID == panePID` must be handled before the loop) and returns early on a framed ancestor (so `panePID` may not have been reached — which is fine, the frame is already not a root) | **Plan item.** The plan pins the walker's stop conditions and result type, with tests for self-equals-panePID, early ancestor hit, and a pane at the depth cap. The depth question itself is now measured (§3.5) |
+| 3 | Minor — three leftovers from withdrawn contracts (`kind` in the rejection example, a late-cwd refresh example, "three modes") | **Fixed in this revision** |
+
+Also confirmed by that round and folded in: `unverified` is set only by the
+replay branch, which is what makes `confirm` converge (§5.4.1); and the typed
+struct's "no allocation" claim is scoped to not materialising the unknown
+value, not to a zero-allocation `Unmarshal` (§7's benchmark asserts the former).
+
+### 10.2 Round 3 — codex `task-mtrgvcef-75s6gi` on v3
 
 | # | Finding | Disposition |
 |---|---|---|
@@ -939,7 +982,7 @@ endpoint, whose 404 renders as `unverifiable`.
 | 6 | Minor — `command -v` output is not "path or word"; an alias prints its definition, a relative PATH entry a relative path | **Accepted.** `kind` is removed from the API entirely; the endpoint returns `resolved` plus what the shell printed and claims nothing about species (§4.4) |
 | 7 | Minor — `Upsert` is `ON CONFLICT DO UPDATE` then re-`SELECT`; the method table was wrong and incomplete | **Accepted.** The table is rewritten against the real code and covers every `FramesStore` method (§5.2) |
 
-### 10.2 Round 2 — codex `task-mtrggpct-ub3biv` on v2
+### 10.3 Round 2 — codex `task-mtrggpct-ub3biv` on v2
 
 | # | Finding | Disposition |
 |---|---|---|
@@ -956,7 +999,7 @@ endpoint, whose 404 renders as `unverifiable`.
 | 11 | Minor — imprecise summary of `disowned` and the generation comparisons | **Accepted.** §5.4 names the helpers and separates eligibility from write authorisation |
 | 12 | Minor — a test result survived a host switch | **Accepted.** Keyed by `(hostId, commandWord)` (§4.5) |
 
-### 10.3 Round 1 — codex `task-mtre55dl-hnlmvd` on v1
+### 10.4 Round 1 — codex `task-mtre55dl-hnlmvd` on v1
 
 Findings 1 and 2 (Blockers) drove the switch from a pushed envelope to a query
 (§5.1); 3 and 5 became moot with the envelope and the arming map; 4, 6, 7, 8,
