@@ -591,9 +591,36 @@ current generation at the moment it acts. So both endpoints gain one:
 | `GET /api/sessions/{code}/cwd` | Returns `{ "cwd": …, "tmux_instance": … }`, sampled together. The probe writes only when the returned instance equals the binding it asked for. |
 | `POST /api/sessions/{code}/send-keys` | Accepts an optional `expected_tmux_instance`. When present and it does not match the current generation, the daemon refuses with **409** and sends nothing. Absent means "no expectation", so existing callers (Quick Commands) are unaffected. |
 
+**The check and the send must share one tmux invocation.** Sampling the
+generation in one `tmux` call and sending in another leaves a window: between
+them the server can restart and a same-named session be recreated, so a stale
+generation passes the comparison while the keys reach the new server. Nothing
+about re-sampling closes it — any check that is a separate invocation from the
+send has the same gap. The condition is therefore evaluated *by the server that
+receives the keys*:
+
+```
+tmux if-shell -F '#{==:#{pid}:#{start_time},<expected>}'      "send-keys -t '<$id>:' -H <hex bytes>"      'display-message -p pdx-generation-refused'
+```
+
+If the server restarted, this command connects to the **new** server, whose
+`#{pid}:#{start_time}` differs, and the else branch runs. Three details are
+load-bearing: keys go as hex because the nested command string is parsed by
+tmux a second time (which also prevents key-name reinterpretation); the target
+is the session **id**, not its name; and because `if-shell` exits 0 either way,
+the sentinel on stdout is the only verdict channel. `expected_tmux_instance` is
+interpolated into a tmux format, so the handler rejects `,` `}` `#` with 400
+before tmux is invoked.
+
 "Unknown" stays conservative in the direction that matters: §4.6 says an
 unknown generation never declares a pane dead, and this section says an
-unknown generation never authorises a write or a keystroke. The two rules point
+unknown generation never authorises a write or a keystroke. That applies to
+**both** sides of the comparison — a rebuild whose created session carries no
+generation refuses rather than sending without a precondition, and the cwd
+probe requires the answered generation to be non-empty and equal, since the
+daemon returns empty precisely when its two-sided sampling could not agree.
+The pinned transport makes "no expectation" unrepresentable; only
+`executeCommand` (Quick Commands, not a rebuild) sends without one. The two rules point
 the same way — do nothing without evidence — rather than one of them being
 extended into permission.
 
