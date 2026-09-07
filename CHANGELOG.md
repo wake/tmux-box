@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.0.0-alpha.330] - 2026-09-07
+
+### Perf(store): agent trace 的 root payload 每條 chain 只存一次（#962）
+
+使用者問「這些 event 資料有長期／短期保留的必要嗎」，查下去發現問錯的不是保留期，是每筆存了什麼。
+
+`agent_trace_steps` 每列存三個 JSON blob。live 資料庫實測（10,000 chains / 39,554 steps / 396 MB）：`payload_json` 總計 **324.9 MB**（平均 8.2 KB、單筆最大 **682 KB**），而 `before_json` + `after_json` 加起來才 7.2 MB。也就是 `payload_json` 幾乎就是整個資料庫。
+
+而其中 **73% 是重複**：去重後（`DISTINCT chain_id + payload_json`）只有 86.3 MB。根因是 `trigger` / `verify` / `frame` / `projection` 四個 step 都把整個 `req`（`EventRequest`）當自己的 payload，四份位元組完全相同；`PdxPostToolUse` 特別肥是因為 payload 帶著 tool result，可能是整個檔案的內容。
+
+**保留機制本來就有**（`pruneTraceChains` 上限 10,000 chains / 100,000 steps，表卡在 10,000 就是它在運作，涵蓋約 32 小時），所以這輪不動保留期。
+
+- `agent_trace_chains` 加 `root_payload_json`、`agent_trace_steps` 加 `payload_is_root` 旗標，共用的 root payload 每條 chain 只存一次。
+- 以 `rawJSONText` 的輸出（stored form）比對，**只有 bytes 相等才合併**；語意相同但 bytes 不同的保留各自副本，只降低去重率、不影響正確性。
+- 讀取用 **JOIN + `CASE WHEN`** 在 SQL 內解析，而非分兩次查詢在 Go 裡拼——後者會讓交錯的 `SaveChain` 把 root B 的 chain row 配上 root A 的 step rows，靜默回傳錯的 payload。**API 輸出位元組完全不變**，SPA 不需改動。
+- 新欄位**刻意不列入** `needsChainRebuild` / `needsStepRebuild` 的 required 清單：列進去會讓現行 schema 全部走 legacy rebuild，而該路徑的 copier 讀現行表沒有的 `created_at` / `agent_type`，migration 會直接失敗。兩個 regression 測試釘住這件事。
+- 既有資料不 backfill，靠 pruning 汰換。
+
+24 個新測試全程 TDD。涵蓋部分去重 `[A,B,B]` / `[A,A,B,B]`、位元組保真、亂序輸入與 `Seq` tie-break、四種空值慣例、re-save 轉換、step INSERT 失敗的 rollback、migration 矩陣、重啟後已去重資料仍可讀、混合新舊 chain 的 pruning。交錯讀寫用 `sqlQuerier` 接縫做成決定性測試，並**實作過錯誤版本確認它真的會紅**。
+
+Codex 四輪 review（標準 + 攻擊／防守／體質三平行）全部 approve 無實質發現。體質提出的註解措辭問題已修；拆檔、測試重整、`planTraceRootDedup` 回傳型別三項延後至 #963 / #964 / #965。
+
+**⚠️ 部署限制**：這是磁碟格式變更，**舊版 daemon 不能讀已被此版本寫過的資料庫**——舊 reader 只讀 `payload_json`，會把去重過的 row 讀成空 payload，靜默不報錯。回滾只能用仍懂新格式的版本，或還原升級前備份。
+
+延後項目見 #957（payload 截斷：768 列 >64 KB 佔 241 MB，但那是有損的）。
+
 ## [1.0.0-alpha.329] - 2026-09-07
 
 ### Fix(daemon): `pdx start` 健康檢查窗口修復（#960）
