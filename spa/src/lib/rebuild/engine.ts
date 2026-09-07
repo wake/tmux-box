@@ -14,6 +14,7 @@
 // failure keeps it named in the report.
 import { pinHost, type PinnedTransport } from './transport'
 import {
+  sameBinding,
   useRebuildStore,
   withOperationLock,
   type OperationLockToken,
@@ -62,6 +63,22 @@ export interface RebuildDeps {
    * honoured, so a stale one cannot smuggle an operation past the lock.
    */
   lockToken?: OperationLockToken
+  /**
+   * The binding the CALLER planned this operation from (spec §4.11).
+   *
+   * "Rebuild all" snapshots every group up front and then runs them in
+   * sequence, so a later group's source pane can be re-pointed — through the
+   * session picker, say — while an earlier group is still in flight. The engine
+   * otherwise reads whatever the pane holds NOW as its baseline, and would
+   * rebuild the session the user just chose, then drag the rest of the group
+   * onto that wrong result. Verified against the pane's live binding in the
+   * same synchronous step that reaches the create, so nothing can slip between
+   * the check and the request.
+   *
+   * Absent for a single-pane rebuild: there the pane's current binding IS the
+   * baseline, decided at the moment the user pressed the button.
+   */
+  expectedBinding?: RebuildBinding
 }
 
 /** `name`, `name-2`, … `name-5`. Five attempts, then the operation gives up. */
@@ -389,6 +406,17 @@ async function runRebuild(
     hostId,
     sessionCode: content.sessionCode,
     tmuxInstance: content.tmuxInstance,
+  }
+  // The caller's baseline, checked here rather than at plan time: everything
+  // from this line to the create below is one synchronous run.
+  if (deps.expectedBinding && !sameBinding(binding, deps.expectedBinding)) {
+    const want = deps.expectedBinding
+    report.steps.create = failed(new Error(
+      `pane ${paneId} no longer holds the binding this operation planned from `
+      + `(${want.sessionCode}@${want.tmuxInstance || 'unknown'} → `
+      + `${binding.sessionCode}@${binding.tmuxInstance || 'unknown'})`,
+    ))
+    return publishRefusal(hostId, tabId, paneId, plan, report)
   }
   const record = content.rebuild
   const baseName = record?.sessionName || content.cachedName

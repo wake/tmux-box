@@ -143,6 +143,12 @@ function rebindPane(tabId: string, _paneId: string, sessionCode: string) {
   })
 }
 
+function deferred<T = void>() {
+  let resolve!: (v: T) => void
+  const promise = new Promise<T>((res) => { resolve = res })
+  return { promise, resolve }
+}
+
 function resetStores() {
   useRebuildStore.setState({ operations: {}, lockedBy: null })
   useSessionStore.setState({ sessions: {}, activeHostId: null, activeCode: null })
@@ -292,6 +298,40 @@ describe('runBatchRebuild', () => {
     })
     expect(blocked?.steps.create.status).toBe('failed')
     expect(blocked?.steps.create.error).toContain(BATCH_LOCK_OWNER)
+  })
+
+  it('skips a group whose source pane was re-pointed while an earlier group ran', async () => {
+    // Two groups: t1/p1 runs first, t2/p2 second. While the first group's
+    // create is in flight the user re-points p2 through the session picker, so
+    // by the time the batch reaches group 2 its planned source is a different
+    // session. The engine must refuse rather than rebuild whatever the pane
+    // holds now — and overwrite the session the user just chose.
+    seedPane('h1', 't1', 'p1', { sessionName: 'dev' })
+    seedPane('h1', 't2', 'p2', { sessionName: 'other' }, { sessionCode: 'old222' })
+
+    const firstCreateEntered = deferred<void>()
+    const releaseFirstCreate = deferred<void>()
+    const create = vi.fn(async (_hostId: string, name: string) => {
+      if (name === 'dev') {
+        firstCreateEntered.resolve()
+        await releaseFirstCreate.promise
+        return session({ code: 'new1', name: 'dev', tmux_instance: '222:2000' })
+      }
+      return session({ code: 'new2', name, tmux_instance: '222:2000' })
+    })
+
+    const run = runBatchRebuild({ createSession: create, sendKeys: vi.fn() })
+    await firstCreateEntered.promise
+    rebindPane('t2', 'p2', 'picked-live')
+    releaseFirstCreate.resolve()
+    const report = await run
+
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(sessionCodeOfPane('t1', 'p1')).toBe('new1')
+    expect(sessionCodeOfPane('t2', 'p2')).toBe('picked-live')
+    const skipped = report.groups.find((g) => g.sourcePaneId === 'p2')
+    expect(skipped?.report.steps.create.status).toBe('failed')
+    expect(skipped?.report.steps.create.error).toMatch(/binding/)
   })
 
   it('reports an empty run without taking the lock hostage', async () => {

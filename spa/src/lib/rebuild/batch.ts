@@ -226,18 +226,23 @@ async function runGroup(
   token: OperationLockToken,
   deps: RebuildDeps,
 ): Promise<BatchGroupResult> {
-  const report = await rebuildPane(group.hostId, group.tabId, group.sourcePaneId, group.plan, {
-    ...deps,
-    lockToken: token,
-  })
-  // The full `Session` the engine created — `report.created` is only its
-  // summary, and `defaultRepoint` needs the session itself.
-  const created = useRebuildStore.getState().operations[group.sourcePaneId]?.createdSession
+  // Every group was planned before the first one ran, so by the time this one
+  // starts the user may have re-pointed its source pane. The binding travels
+  // into the engine, which verifies it in the same synchronous step as the
+  // create — otherwise the group would rebuild whatever the pane holds now.
   const binding: RebuildBinding = {
     hostId: group.hostId,
     sessionCode: group.sessionCode,
     tmuxInstance: group.tmuxInstance,
   }
+  const report = await rebuildPane(group.hostId, group.tabId, group.sourcePaneId, group.plan, {
+    ...deps,
+    lockToken: token,
+    expectedBinding: binding,
+  })
+  // The full `Session` the engine created — `report.created` is only its
+  // summary, and `defaultRepoint` needs the session itself.
+  const created = useRebuildStore.getState().operations[group.sourcePaneId]?.createdSession
 
   const members: BatchMemberResult[] = []
   for (const paneId of group.paneIds) {
