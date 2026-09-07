@@ -15,6 +15,11 @@ export interface Session {
   current_command?: string
   pane_title?: string
   window_name?: string
+  // tmux server generation ("<server pid>:<start_time>") the daemon stamped on
+  // the payload that carried this session. Changes on every tmux server
+  // restart; "" means unknown (probe failure/timeout, or an older daemon) and
+  // never counts as a match. Optional so older daemons stay consumable.
+  tmux_instance?: string
 }
 
 export interface ConfigData {
@@ -91,6 +96,21 @@ export function renameSession(hostId: string, code: string, name: string) {
 
 /* ─── Session API ─── */
 
+/**
+ * An HTTP error that keeps its status code. The rebuild engine retries a
+ * duplicate session name ONLY on 409 — the status the daemon returns
+ * specifically for that case (`internal/module/session/handler.go:101-104`) —
+ * and must never retry a 400 (validation) or 500 (create failure).
+ */
+export class HostApiError extends Error {
+  status: number
+  constructor(status: number, statusText: string) {
+    super(`${status} ${statusText}`)
+    this.name = 'HostApiError'
+    this.status = status
+  }
+}
+
 export async function listSessions(hostId: string): Promise<Session[]> {
   const res = await hostFetch(hostId, '/api/sessions')
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
@@ -105,7 +125,9 @@ export async function createSession(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, cwd, mode }),
   })
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  // Typed so a 409 (duplicate name) stays distinguishable from 400/500; the
+  // message is unchanged, so existing callers that only render it are unaffected.
+  if (!res.ok) throw new HostApiError(res.status, res.statusText)
   return res.json()
 }
 
@@ -154,15 +176,30 @@ export async function fetchHistory(hostId: string, sessionCode: string): Promise
   return res.json()
 }
 
+/**
+ * A cwd reading and the tmux generation it was sampled in (spec §4.6.2).
+ *
+ * The pair travels together because a bare string cannot be attributed: a
+ * caller that stamps the answer with the generation it *asked* with writes the
+ * new session's directory into the old one's record whenever tmux restarted
+ * and reused the code mid-request. `tmuxInstance` is `''` when unknown — an
+ * old daemon, or a generation that moved during the read — and `''` never
+ * equals a real generation, so unknown can only ever mean "do not write".
+ */
+export interface SessionCwd {
+  cwd: string
+  tmuxInstance: string
+}
+
 export async function fetchSessionCwd(
   hostId: string,
   sessionCode: string,
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<SessionCwd> {
   const res = await hostFetch(hostId, `/api/sessions/${sessionCode}/cwd`, { signal })
   if (!res.ok) throw new Error(`fetchSessionCwd failed: ${res.status}`)
   const body = await res.json()
-  return String(body.cwd ?? '')
+  return { cwd: String(body.cwd ?? ''), tmuxInstance: String(body.tmux_instance ?? '') }
 }
 
 export async function fetchSessionHome(

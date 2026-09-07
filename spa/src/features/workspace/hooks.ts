@@ -2,15 +2,87 @@ import { useState, useCallback } from 'react'
 import { useTabStore } from '../../stores/useTabStore'
 import { useWorkspaceStore } from './store'
 import { createTab } from '../../types/tab'
-import { getPrimaryPane } from '../../lib/pane-tree'
+import { getPrimaryPane, collectLeaves } from '../../lib/pane-tree'
 import { renameSession } from '../../lib/host-api'
 import { closeTab } from '../../lib/tab-lifecycle'
-import type { Tab, PaneContent } from '../../types/tab'
+import type { Tab, PaneContent, PaneRebuildRecord, TerminatedReason } from '../../types/tab'
 import type { ContextMenuAction } from '../../components/TabContextMenu'
+import type { RebuildEditableField } from '../../components/RebuildActionSet'
+
+/**
+ * One `tmux-session` pane the tab-name popover can act on (spec §4.10). A tab
+ * may hold several: the popover renders one block per terminal target and
+ * every edit is scoped to the target it came from, so a split sibling bound to
+ * the same session keeps its own record.
+ */
+export interface RenameTargetPane {
+  tabId: string
+  paneId: string
+  hostId: string
+  sessionCode: string
+  tmuxInstance: string
+  cachedName: string
+  /** Stream panes carry no rebuild record; they only get the legacy rename. */
+  mode: 'terminal' | 'stream'
+  /** Set when the pane's session is gone — its name row edits the record only. */
+  terminated?: TerminatedReason
+  record: PaneRebuildRecord
+}
+
+/** Every `tmux-session` pane in the tab, in layout order, whatever its mode. */
+function collectSessionPanes(tab: Tab): RenameTargetPane[] {
+  const targets: RenameTargetPane[] = []
+  for (const pane of collectLeaves(tab.layout)) {
+    const c = pane.content
+    if (c.kind !== 'tmux-session') continue
+    targets.push({
+      tabId: tab.id,
+      paneId: pane.id,
+      hostId: c.hostId,
+      sessionCode: c.sessionCode,
+      tmuxInstance: c.tmuxInstance,
+      cachedName: c.cachedName,
+      mode: c.mode,
+      terminated: c.terminated,
+      // A pane that never accumulated a record still has a name and a
+      // generation — the same seed shape `applyRebuildPatch` writes against.
+      record: c.rebuild ?? { sessionName: c.cachedName, tmuxInstance: c.tmuxInstance, capturedAt: 0 },
+    })
+  }
+  return targets
+}
+
+/**
+ * The panes the popover renders a rebuild detail block for: terminal panes,
+ * dead ones included — a dead pane is exactly the one whose record the user
+ * needs to fix. Stream panes are out of scope for the record, as everywhere
+ * else in this feature.
+ */
+export function collectRenameTargets(tab: Tab): RenameTargetPane[] {
+  return collectSessionPanes(tab).filter((target) => target.mode === 'terminal')
+}
+
+/**
+ * The popover's entry condition: any pane it could do something useful with.
+ *
+ * Wider than {@link collectRenameTargets} in one direction and narrower in
+ * another. A stream pane has no rebuild record, but it is still a named tmux
+ * session that double-click has always renamed through the legacy single
+ * input — gating the entry point on terminal panes alone took that away.
+ * A terminated stream pane is left out, matching the pre-feature rule: there
+ * is no live session to rename and no record to edit.
+ *
+ * Looking at the tab's *primary* pane alone (the pre-Task-15 behaviour) left
+ * the popover unreachable whenever the first pane happened to be an editor or
+ * a dead session, even though another pane in the tab was a good target.
+ */
+export function collectRenameEntryPanes(tab: Tab): RenameTargetPane[] {
+  return collectSessionPanes(tab).filter((target) => target.mode === 'terminal' || !target.terminated)
+}
 
 export function useTabWorkspaceActions(displayTabs: Tab[]) {
   const [contextMenu, setContextMenu] = useState<{ tab: Tab; position: { x: number; y: number } } | null>(null)
-  const [renameTarget, setRenameTarget] = useState<{ tabId: string; hostId: string; sessionCode: string; currentName: string; anchorRect: DOMRect } | null>(null)
+  const [renameTarget, setRenameTarget] = useState<{ tabId: string; hostId: string; sessionCode: string; tmuxInstance: string; currentName: string; anchorRect: DOMRect } | null>(null)
   const [renameError, setRenameError] = useState<string | undefined>()
 
   // Tab store
@@ -94,18 +166,25 @@ export function useTabWorkspaceActions(displayTabs: Tab[]) {
     if (tab && !tab.locked) handleCloseTab(tabId)
   }, [tabs, handleCloseTab])
 
+  // Opens whenever the tab holds at least one usable tmux pane — not only when
+  // the *primary* one is a live session (spec §4.10). The stored target is the
+  // pane the legacy single-input confirm path still acts on: the first live
+  // session, or the first entry pane at all when every one of them is dead.
+  // That path is what a stream-only tab still renames through, since it gets
+  // no detail blocks.
   const openRenameForTab = useCallback((tab: Tab, anchorEl?: Element | null) => {
-    const primary = getPrimaryPane(tab.layout)
-    const c = primary.content
-    if (c.kind !== 'tmux-session' || c.terminated) return
+    const targets = collectRenameEntryPanes(tab)
+    if (targets.length === 0) return
+    const primary = targets.find((target) => !target.terminated) ?? targets[0]
     const el = anchorEl ?? document.querySelector(`[data-tab-id="${tab.id}"]`)
     if (!el) return
     const rect = el.getBoundingClientRect()
     setRenameTarget({
       tabId: tab.id,
-      hostId: c.hostId,
-      sessionCode: c.sessionCode,
-      currentName: c.cachedName || c.sessionCode,
+      hostId: primary.hostId,
+      sessionCode: primary.sessionCode,
+      tmuxInstance: primary.tmuxInstance,
+      currentName: primary.cachedName || primary.sessionCode,
       anchorRect: rect,
     })
     setRenameError(undefined)
@@ -170,23 +249,67 @@ export function useTabWorkspaceActions(displayTabs: Tab[]) {
     }
   }, [contextMenu, tabs, displayTabs, handleCloseTab, handleSelectTab, openRenameForTab])
 
-  const handleRenameConfirm = useCallback(async (name: string) => {
-    if (!renameTarget) return
+  /**
+   * The daemon rename. Takes its binding as an argument rather than reading
+   * `renameTarget`, because a split tab renders one block per terminal pane and
+   * any of them may be the one being renamed (spec §4.10).
+   */
+  const renameBoundSession = useCallback(async (
+    binding: { hostId: string; sessionCode: string; tmuxInstance: string },
+    name: string,
+  ) => {
     try {
-      const res = await renameSession(renameTarget.hostId, renameTarget.sessionCode, name)
+      const res = await renameSession(binding.hostId, binding.sessionCode, name)
       if (!res.ok) {
         const text = await res.text().catch(() => 'Unknown error')
         setRenameError(text)
         return
       }
-      // Immediately update tab label (don't wait for WS session event)
-      useTabStore.getState().updateSessionCache(renameTarget.hostId, renameTarget.sessionCode, name)
+      // Immediately update tab label (don't wait for WS session event).
+      // The name refresh is generation-scoped (spec §4.5), so it needs the
+      // generation the rename response was produced under; an older daemon
+      // that sends none leaves us with the pane's own recorded instance,
+      // which is the binding we just renamed.
+      const info = await res.json().catch(() => null) as { tmux_instance?: string } | null
+      const tmuxInstance = typeof info?.tmux_instance === 'string' && info.tmux_instance
+        ? info.tmux_instance
+        : binding.tmuxInstance
+      useTabStore.getState().updateSessionCache(binding.hostId, binding.sessionCode, name, tmuxInstance)
       setRenameTarget(null)
       setRenameError(undefined)
     } catch (err) {
       setRenameError(err instanceof Error ? err.message : 'Unknown error')
     }
-  }, [renameTarget])
+  }, [])
+
+  const handleRenameConfirm = useCallback(async (name: string) => {
+    if (!renameTarget) return
+    await renameBoundSession(renameTarget, name)
+  }, [renameTarget, renameBoundSession])
+
+  /** A live pane's name row. Never called for a terminated pane (§4.10). */
+  const handleRenamePane = useCallback(async (target: RenameTargetPane, name: string) => {
+    await renameBoundSession(target, name)
+  }, [renameBoundSession])
+
+  /**
+   * A record edit from the popover: the pane's name (when its session is gone),
+   * its cwd or its resume command. Always pane-scoped, never the session-scoped
+   * writer — an edit here must not rewrite a split sibling's record (§4.10) —
+   * and nothing is sent to a live session.
+   */
+  const handleEditRebuildField = useCallback((
+    target: RenameTargetPane,
+    field: RebuildEditableField,
+    value: string,
+  ) => {
+    useTabStore.getState().setPaneRebuildForPane(
+      target.tabId,
+      target.paneId,
+      { hostId: target.hostId, sessionCode: target.sessionCode, tmuxInstance: target.tmuxInstance },
+      { kind: 'field', field, value },
+    )
+  }, [])
 
   const handleRenameCancel = useCallback(() => {
     setRenameTarget(null)
@@ -229,6 +352,8 @@ export function useTabWorkspaceActions(displayTabs: Tab[]) {
     renameTarget,
     renameError,
     handleRenameConfirm,
+    handleRenamePane,
+    handleEditRebuildField,
     handleRenameCancel,
     handleClearRenameError,
     openRenameForTab,

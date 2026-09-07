@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, screen, cleanup, act } from '@testing-library/react'
 import { SessionPaneContent } from './SessionPaneContent'
 import { useHostStore } from '../stores/useHostStore'
 import { useSessionStore } from '../stores/useSessionStore'
@@ -8,6 +8,7 @@ import { useConfigStore } from '../stores/useConfigStore'
 import { useWorkspaceStore } from '../features/workspace/store'
 import type { Pane, Tab, Workspace } from '../types/tab'
 import type { ConfigData } from '../lib/host-api'
+import { probeSessionCwd } from '../lib/rebuild/cwd-probe'
 
 const terminalViewProps = vi.hoisted(() => ({ last: undefined as Record<string, unknown> | undefined }))
 
@@ -27,6 +28,8 @@ vi.mock('./TerminatedPane', () => ({
     <div data-testid="terminated-pane">Terminated: {content.terminated}</div>
   ),
 }))
+
+vi.mock('../lib/rebuild/cwd-probe', () => ({ probeSessionCwd: vi.fn() }))
 
 const HOST_ID = 'test-host'
 
@@ -69,11 +72,15 @@ function makeWorkspace(id: string, tabs: string[]): Workspace {
 
 beforeEach(() => {
   cleanup()
+  vi.mocked(probeSessionCwd).mockClear()
   terminalViewProps.last = undefined
   useHostStore.setState({
     hosts: { [HOST_ID]: { id: HOST_ID, name: 'mlab', ip: '100.64.0.2', port: 7860, order: 0 } },
     hostOrder: [HOST_ID],
     activeHostId: HOST_ID,
+    // The attach gate is open by default here; the probe waits on it
+    // (spec §4.6.2) and its own suite covers the closed case.
+    runtime: { [HOST_ID]: { status: 'connected' as const, attachReady: true } },
   })
   useSessionStore.setState({
     sessions: {
@@ -160,6 +167,78 @@ describe('SessionPaneContent', () => {
       })
       render(<SessionPaneContent pane={pane} isActive={true} />)
       expect(terminalViewProps.last?.workspaceId).toBe('wsB')
+    })
+  })
+
+  // A pane opened after the session list has settled gets no further
+  // broadcast, so attach is the second cwd-probe trigger (spec §4.4).
+  describe('cwd probe on attach', () => {
+    it('probes the pane binding once when a terminal pane attaches', () => {
+      const pane = makePane({
+        content: {
+          kind: 'tmux-session', hostId: HOST_ID, sessionCode: 'dev001',
+          mode: 'terminal', cachedName: '', tmuxInstance: '222:2000',
+        },
+      })
+      setupTabStore(pane)
+      const view = render(<SessionPaneContent pane={pane} isActive={true} />)
+      view.rerender(<SessionPaneContent pane={pane} isActive={false} />)
+      expect(probeSessionCwd).toHaveBeenCalledTimes(1)
+      expect(probeSessionCwd).toHaveBeenCalledWith(HOST_ID, 'dev001', '222:2000')
+    })
+
+    // The mount trigger must respect the same gate as the terminal attach
+    // (spec §4.6.2): a connection whose first `sessions` payload has not
+    // landed has not proved which generation the pane's code belongs to.
+    it('does not probe while the host attach gate is closed', () => {
+      useHostStore.setState({ runtime: { [HOST_ID]: { status: 'connected' as const, attachReady: false } } })
+      const pane = makePane({
+        content: {
+          kind: 'tmux-session', hostId: HOST_ID, sessionCode: 'dev001',
+          mode: 'terminal', cachedName: '', tmuxInstance: '222:2000',
+        },
+      })
+      setupTabStore(pane)
+      render(<SessionPaneContent pane={pane} isActive={true} />)
+      expect(probeSessionCwd).not.toHaveBeenCalled()
+    })
+
+    it('probes as soon as the gate opens under the mounted pane', async () => {
+      useHostStore.setState({ runtime: { [HOST_ID]: { status: 'connected' as const, attachReady: false } } })
+      const pane = makePane({
+        content: {
+          kind: 'tmux-session', hostId: HOST_ID, sessionCode: 'dev001',
+          mode: 'terminal', cachedName: '', tmuxInstance: '222:2000',
+        },
+      })
+      setupTabStore(pane)
+      render(<SessionPaneContent pane={pane} isActive={true} />)
+      expect(probeSessionCwd).not.toHaveBeenCalled()
+
+      await act(async () => {
+        useHostStore.setState({ runtime: { [HOST_ID]: { status: 'connected' as const, attachReady: true } } })
+      })
+      expect(probeSessionCwd).toHaveBeenCalledWith(HOST_ID, 'dev001', '222:2000')
+    })
+
+    it('does not probe a stream-mode or terminated pane', () => {
+      const stream = makePane({
+        content: { kind: 'tmux-session', hostId: HOST_ID, sessionCode: 'dev001', mode: 'stream', cachedName: '', tmuxInstance: '222:2000' },
+      })
+      setupTabStore(stream)
+      render(<SessionPaneContent pane={stream} isActive={true} />)
+
+      const dead = makePane({
+        content: {
+          kind: 'tmux-session', hostId: HOST_ID, sessionCode: 'dev001',
+          mode: 'terminal', cachedName: '', tmuxInstance: '222:2000',
+          terminated: 'session-closed',
+        },
+      })
+      setupTabStore(dead)
+      render(<SessionPaneContent pane={dead} isActive={true} />)
+
+      expect(probeSessionCwd).not.toHaveBeenCalled()
     })
   })
 

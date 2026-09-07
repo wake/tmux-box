@@ -1,10 +1,11 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import type { Tab, PaneContent, PaneLayout, TerminatedReason, LayoutPattern } from '../types/tab'
+import type { Tab, PaneContent, PaneLayout, TerminatedReason, LayoutPattern, PaneRebuildRecord, RebuildPatch, TmuxSessionContent } from '../types/tab'
 import type { FileSource } from '../types/fs'
 import { createTab } from '../types/tab'
 import { getPrimaryPane, findPane, updatePaneInLayout, splitAtPane, removePane, applyLayoutPattern, remountLeaf } from '../lib/pane-tree'
 import { contentMatches, isFilePaneContent } from '../lib/pane-utils'
+import { bindingMatchesLegacy, generationMatchesLegacy } from '../lib/rebuild/binding'
 import { purdexStorage, STORAGE_KEYS, syncManager } from '../lib/storage'
 import type { UntitledDocumentState } from '../types/tab'
 
@@ -43,16 +44,200 @@ export function migrateTabStore(state: any, version: number): any {
 
 // --- Terminated marking helpers ---
 
-function markPanesInLayout(layout: PaneLayout, hostId: string, sessionCode: string, reason: TerminatedReason): PaneLayout {
+/**
+ * Mark panes bound to (hostId, sessionCode) as terminated.
+ *
+ * `expectedTmuxInstance` narrows the match to one tmux generation (spec §4.5):
+ * a pane that has already re-bound to a newer generation of the same reused
+ * session code is left alone. A pane whose recorded instance is `''` (legacy
+ * pane, or a host whose generation is unknown) is matched by the old
+ * host+code rule so nothing regresses. `undefined` = no generation predicate.
+ */
+function markPanesInLayout(
+  layout: PaneLayout,
+  hostId: string,
+  sessionCode: string,
+  reason: TerminatedReason,
+  expectedTmuxInstance?: string,
+): PaneLayout {
   if (layout.type === 'leaf') {
     const c = layout.pane.content
-    if (c.kind === 'tmux-session' && c.hostId === hostId && c.sessionCode === sessionCode && !c.terminated) {
+    const generationMatches = expectedTmuxInstance === undefined
+      || c.kind !== 'tmux-session'
+      || generationMatchesLegacy(c.tmuxInstance, expectedTmuxInstance)
+    if (c.kind === 'tmux-session' && c.hostId === hostId && c.sessionCode === sessionCode && generationMatches && !c.terminated) {
       return { ...layout, pane: { ...layout.pane, content: { ...c, terminated: reason } } }
     }
     return layout
   }
-  const children = layout.children.map((child) => markPanesInLayout(child, hostId, sessionCode, reason))
+  const children = layout.children.map((child) => markPanesInLayout(child, hostId, sessionCode, reason, expectedTmuxInstance))
   return children.some((c, i) => c !== layout.children[i]) ? { ...layout, children } : layout
+}
+
+/**
+ * Stamp the tmux generation onto panes bound to (hostId, sessionCode) that
+ * carry none. Never overwrites a generation a pane already has — that would be
+ * assuming a binding rather than observing it.
+ */
+function adoptInstanceInLayout(layout: PaneLayout, hostId: string, sessionCode: string, tmuxInstance: string): PaneLayout {
+  if (layout.type === 'leaf') {
+    const c = layout.pane.content
+    if (c.kind === 'tmux-session' && c.hostId === hostId && c.sessionCode === sessionCode && c.tmuxInstance === '') {
+      return { ...layout, pane: { ...layout.pane, content: { ...c, tmuxInstance } } }
+    }
+    return layout
+  }
+  const children = layout.children.map((child) => adoptInstanceInLayout(child, hostId, sessionCode, tmuxInstance))
+  return children.some((c, i) => c !== layout.children[i]) ? { ...layout, children } : layout
+}
+
+// --- Rebuild record helpers (spec §4.1 / §4.4 / §4.5) ---
+
+/**
+ * Does this pane belong to the binding a writer is addressing?
+ *
+ * The legacy-compatible comparison (`binding.ts`): host and code exact, and a
+ * pane whose recorded instance is `''` — a legacy pane, or one on a host whose
+ * generation is unknown — answers to any expected instance, which is the same
+ * rule `markPanesInLayout` uses.
+ */
+function sessionBindingMatches(
+  c: PaneContent,
+  hostId: string,
+  sessionCode: string,
+  expectedTmuxInstance: string,
+): c is TmuxSessionContent {
+  return c.kind === 'tmux-session'
+    && bindingMatchesLegacy(c, { hostId, sessionCode, tmuxInstance: expectedTmuxInstance })
+}
+
+/** As above, minus stream-mode panes, which are out of scope for rebuild. */
+function rebuildBindingMatches(
+  c: PaneContent,
+  hostId: string,
+  sessionCode: string,
+  expectedTmuxInstance: string,
+): c is TmuxSessionContent {
+  return sessionBindingMatches(c, hostId, sessionCode, expectedTmuxInstance) && c.mode === 'terminal'
+}
+
+/**
+ * The final eligibility check for a SESSION-scoped record write, per pane.
+ *
+ * A terminated pane is excluded. The readers that trigger these writes — the
+ * cwd probe, the agent-group envelope — decide whether to ask while every pane
+ * on the binding is still alive, but the answer arrives later, and by then one
+ * pane may have died while a sibling on the same reused code is still live. The
+ * answer then describes the sibling's session, and writing it into the dead
+ * pane's record would put a stranger's directory (or agent) into the rebuild
+ * that pane offers. So the check that matters is made HERE, against each pane,
+ * in the same synchronous `set` that writes.
+ *
+ * Pane-scoped writes (`setPaneRebuildForPane`) deliberately do NOT use this: a
+ * terminated pane is exactly where the user edits the cwd before rebuilding it.
+ */
+function acceptsSessionScopedWrite(
+  c: PaneContent,
+  hostId: string,
+  sessionCode: string,
+  expectedTmuxInstance: string,
+): c is TmuxSessionContent {
+  return rebuildBindingMatches(c, hostId, sessionCode, expectedTmuxInstance) && !c.terminated
+}
+
+/**
+ * Rewrite every tmux-session leaf the predicate selects. `update` returning
+ * its argument unchanged keeps the layout reference stable, so a no-op write
+ * never re-renders.
+ */
+function mapTmuxPanesInLayout(
+  layout: PaneLayout,
+  match: (c: PaneContent) => c is TmuxSessionContent,
+  update: (c: TmuxSessionContent) => TmuxSessionContent,
+): PaneLayout {
+  if (layout.type === 'leaf') {
+    const c = layout.pane.content
+    if (!match(c)) return layout
+    const next = update(c)
+    if (next === c) return layout
+    return { ...layout, pane: { ...layout.pane, content: next } }
+  }
+  const children = layout.children.map((child) => mapTmuxPanesInLayout(child, match, update))
+  return children.some((c, i) => c !== layout.children[i]) ? { ...layout, children } : layout
+}
+
+/**
+ * Apply one `RebuildPatch` to a pane, creating the record on first write.
+ *
+ * Returns the same content object when the patch changes nothing (a probe
+ * against a cwd that is already known, an edit that retypes the same value).
+ * Every write that does land re-stamps `capturedAt`, which is what makes the
+ * batch view's "latest edit wins" resolution meaningful.
+ */
+function applyRebuildPatch(c: TmuxSessionContent, patch: RebuildPatch): TmuxSessionContent {
+  const prev: PaneRebuildRecord = c.rebuild ?? {
+    sessionName: c.cachedName,
+    tmuxInstance: c.tmuxInstance,
+    capturedAt: 0,
+  }
+  const now = Date.now()
+  let next: PaneRebuildRecord
+
+  switch (patch.kind) {
+    case 'agent-group': {
+      const { record } = patch
+      // One unit: everything the agent group owns is replaced together, so a
+      // payload without cwd clears cwd instead of leaving the previous agent's
+      // directory beside a new session id. `unverified` is cleared too — it
+      // only ever meant "this agent group disagrees with the daemon", and this
+      // is a fresh, authoritative agent group.
+      next = {
+        sessionName: prev.sessionName,
+        tmuxInstance: record.tmuxInstance || prev.tmuxInstance,
+        cwd: record.cwd,
+        cwdSource: record.cwd === undefined ? undefined : (record.cwdSource ?? 'agent-session-start'),
+        agent: record.agent,
+        resumeCommand: record.resumeCommand,
+        capturedAt: now,
+      }
+      break
+    }
+    case 'field': {
+      if (prev[patch.field] === patch.value) return c
+      // Spelled out per field so the record keeps its exact shape.
+      next = patch.field === 'cwd' ? { ...prev, cwd: patch.value, capturedAt: now }
+        : patch.field === 'resumeCommand' ? { ...prev, resumeCommand: patch.value, capturedAt: now }
+          : { ...prev, sessionName: patch.value, capturedAt: now }
+      break
+    }
+    case 'probe-cwd': {
+      if (prev.cwd) return c   // agent provenance (or an edit) already won
+      next = { ...prev, cwd: patch.cwd, cwdSource: 'pane-probe', capturedAt: now }
+      break
+    }
+    case 'unverified': {
+      if (prev.unverified === patch.unverified) return c
+      next = { ...prev, unverified: patch.unverified, capturedAt: now }
+      break
+    }
+  }
+
+  return { ...c, rebuild: next }
+}
+
+/**
+ * Refresh the pane's display name and, when it has a record, the name the
+ * rebuild would recreate the session under.
+ */
+function applySessionName(c: TmuxSessionContent, cachedName: string): TmuxSessionContent {
+  const nameChanged = c.cachedName !== cachedName
+  const recordChanged = c.rebuild !== undefined && c.rebuild.sessionName !== cachedName
+  if (!nameChanged && !recordChanged) return c
+  return {
+    ...c,
+    cachedName,
+    rebuild: recordChanged ? { ...c.rebuild!, sessionName: cachedName } : c.rebuild,
+  }
 }
 
 function markHostPanesInLayout(layout: PaneLayout, hostId: string, reason: TerminatedReason): PaneLayout {
@@ -148,8 +333,17 @@ interface TabState {
   reorderTabs: (order: string[]) => void
   togglePin: (id: string) => void
   toggleLock: (id: string) => void
-  updateSessionCache: (hostId: string, sessionCode: string, cachedName: string) => void
+  updateSessionCache: (hostId: string, sessionCode: string, cachedName: string, tmuxInstance: string) => void
+  setPaneRebuild: (hostId: string, sessionCode: string, expectedTmuxInstance: string, patch: RebuildPatch) => void
+  setPaneRebuildForPane: (
+    tabId: string,
+    paneId: string,
+    expected: { hostId: string; sessionCode: string; tmuxInstance: string },
+    patch: Extract<RebuildPatch, { kind: 'field' }>,
+  ) => void
   markTerminated: (hostId: string, sessionCode: string, reason: TerminatedReason) => void
+  markTerminatedForGeneration: (hostId: string, sessionCode: string, expectedTmuxInstance: string, reason: TerminatedReason) => void
+  adoptTmuxInstance: (hostId: string, sessionCode: string, tmuxInstance: string) => void
   markHostTerminated: (hostId: string, reason: TerminatedReason) => void
 }
 
@@ -253,6 +447,9 @@ export const useTabStore = create<TabState>()(
             mode,
             cachedName: pane.content.cachedName,
             tmuxInstance: pane.content.tmuxInstance,
+            // Carried explicitly: this content is rebuilt field by field, and
+            // the rebuild record describes the tmux session, not the view.
+            rebuild: pane.content.rebuild,
           })
           return { tabs: { ...state.tabs, [tabId]: { ...tab, layout: newLayout } } }
         }),
@@ -405,22 +602,66 @@ export const useTabStore = create<TabState>()(
           return { tabs: { ...state.tabs, [id]: { ...tab, locked: !tab.locked } } }
         }),
 
-      updateSessionCache: (hostId, sessionCode, cachedName) =>
+      // Generation-scoped, and every leaf — not just the primary pane, which
+      // left a split tab's second terminal stuck on the old name. Without the
+      // generation match a rename broadcast from a new tmux server would write
+      // the new name onto the old pane the reconciler is about to mark dead,
+      // and pollute the `rebuild.sessionName` the rebuild would then use.
+      updateSessionCache: (hostId, sessionCode, cachedName, tmuxInstance) =>
         set((state) => {
           let changed = false
           const tabs = { ...state.tabs }
           for (const [id, tab] of Object.entries(tabs)) {
-            const primary = getPrimaryPane(tab.layout)
-            const c = primary.content
-            if (c.kind === 'tmux-session' && c.hostId === hostId && c.sessionCode === sessionCode && c.cachedName !== cachedName) {
-              tabs[id] = {
-                ...tab,
-                layout: updatePaneInLayout(tab.layout, primary.id, { ...c, cachedName }),
-              }
+            const newLayout = mapTmuxPanesInLayout(
+              tab.layout,
+              (c): c is TmuxSessionContent => sessionBindingMatches(c, hostId, sessionCode, tmuxInstance),
+              (c) => applySessionName(c, cachedName),
+            )
+            if (newLayout !== tab.layout) {
+              tabs[id] = { ...tab, layout: newLayout }
               changed = true
             }
           }
           return changed ? { tabs } : state
+        }),
+
+      // Session-scoped: the agent group and the cwd probe describe the tmux
+      // SESSION, so they land on every LIVE pane bound to the triple (spec
+      // §4.1) — see `acceptsSessionScopedWrite` for why terminated is excluded
+      // here rather than only at the reader.
+      setPaneRebuild: (hostId, sessionCode, expectedTmuxInstance, patch) =>
+        set((state) => {
+          let changed = false
+          const tabs = { ...state.tabs }
+          for (const [id, tab] of Object.entries(tabs)) {
+            const newLayout = mapTmuxPanesInLayout(
+              tab.layout,
+              (c): c is TmuxSessionContent => acceptsSessionScopedWrite(c, hostId, sessionCode, expectedTmuxInstance),
+              (c) => applyRebuildPatch(c, patch),
+            )
+            if (newLayout !== tab.layout) {
+              tabs[id] = { ...tab, layout: newLayout }
+              changed = true
+            }
+          }
+          return changed ? { tabs } : state
+        }),
+
+      // Pane-scoped: a user edit belongs to the pane it was made on, so
+      // editing one pane's cwd leaves its split sibling's record alone
+      // (spec §4.10 gives each pane its own block, §4.11 resolves conflicting
+      // per-pane edits — both need the edits to be able to differ).
+      setPaneRebuildForPane: (tabId, paneId, expected, patch) =>
+        set((state) => {
+          const tab = state.tabs[tabId]
+          if (!tab) return state
+          const pane = findPane(tab.layout, paneId)
+          if (!pane) return state
+          const c = pane.content
+          if (!rebuildBindingMatches(c, expected.hostId, expected.sessionCode, expected.tmuxInstance)) return state
+          const next = applyRebuildPatch(c, patch)
+          if (next === c) return state
+          return { tabs: { ...state.tabs, [tabId]: { ...tab, layout: updatePaneInLayout(tab.layout, paneId, next) } } }
         }),
 
       markTerminated: (hostId, sessionCode, reason) =>
@@ -429,6 +670,37 @@ export const useTabStore = create<TabState>()(
           const tabs = { ...state.tabs }
           for (const [id, tab] of Object.entries(tabs)) {
             const newLayout = markPanesInLayout(tab.layout, hostId, sessionCode, reason)
+            if (newLayout !== tab.layout) {
+              tabs[id] = { ...tab, layout: newLayout }
+              changed = true
+            }
+          }
+          return changed ? { tabs } : state
+        }),
+
+      // Generation-scoped sibling of markTerminated (spec §4.5). markTerminated
+      // stays for its existing session-closed / host-removed callers.
+      markTerminatedForGeneration: (hostId, sessionCode, expectedTmuxInstance, reason) =>
+        set((state) => {
+          let changed = false
+          const tabs = { ...state.tabs }
+          for (const [id, tab] of Object.entries(tabs)) {
+            const newLayout = markPanesInLayout(tab.layout, hostId, sessionCode, reason, expectedTmuxInstance)
+            if (newLayout !== tab.layout) {
+              tabs[id] = { ...tab, layout: newLayout }
+              changed = true
+            }
+          }
+          return changed ? { tabs } : state
+        }),
+
+      adoptTmuxInstance: (hostId, sessionCode, tmuxInstance) =>
+        set((state) => {
+          if (!tmuxInstance) return state // "" means unknown — never stamp it
+          let changed = false
+          const tabs = { ...state.tabs }
+          for (const [id, tab] of Object.entries(tabs)) {
+            const newLayout = adoptInstanceInLayout(tab.layout, hostId, sessionCode, tmuxInstance)
             if (newLayout !== tab.layout) {
               tabs[id] = { ...tab, layout: newLayout }
               changed = true

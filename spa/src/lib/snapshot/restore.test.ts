@@ -21,6 +21,7 @@ import { readPrevSnapshot } from './storage'
 import { useTabStore } from '../../stores/useTabStore'
 import { useWorkspaceStore } from '../../features/workspace/store'
 import { useSessionStore } from '../../stores/useSessionStore'
+import { useRebuildStore } from '../../stores/useRebuildStore'
 
 vi.mock('../host-api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../host-api')>()),
@@ -1031,5 +1032,109 @@ describe('T7 orchestration', () => {
     // Backup failed before any store mutation → stores untouched.
     expect(useTabStore.getState().tabOrder).toEqual(['oldT'])
     expect(useWorkspaceStore.getState().activeWorkspaceId).toBe('oldws')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The shared operation lock (spec §4.11). All four legacy actions create
+// sessions and/or replace the whole tab snapshot, so none of them may run
+// while a Tab Rebuild is in flight — and vice versa.
+// ---------------------------------------------------------------------------
+describe('legacy snapshot actions — operation lock', () => {
+  const resetStores = (): void => {
+    useTabStore.setState({ tabs: {}, tabOrder: [], activeTabId: null, visitHistory: [] })
+    useWorkspaceStore.setState({ workspaces: [], activeWorkspaceId: null })
+    useSessionStore.setState({ sessions: {}, activeHostId: null, activeCode: null })
+    useRebuildStore.setState({ operations: {}, lockedBy: null })
+  }
+
+  beforeEach(() => {
+    localStorage.clear()
+    vi.mocked(listSessions).mockReset()
+    vi.mocked(createSession).mockReset()
+    vi.mocked(listSessions).mockResolvedValue([])
+    resetStores()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    resetStores()
+    localStorage.clear()
+  })
+
+  const emptySnapshot = (): WorkspaceSnapshot => ({
+    version: 1,
+    capturedAt: 0,
+    tabs: {},
+    tabOrder: [],
+    activeTabId: null,
+    workspaces: [],
+    activeWorkspaceId: null,
+    sessionMeta: {},
+  })
+
+  it.each([
+    ['rebuildAllSessions', () => rebuildAllSessions(emptySnapshot())],
+    ['restoreTabLayout', () => restoreTabLayout(emptySnapshot(), { now: 1 })],
+    ['restoreAll', () => restoreAll(emptySnapshot(), { now: 1 })],
+  ])('%s refuses to run while a rebuild holds the lock', async (_name, run) => {
+    useRebuildStore.getState().acquireOperationLock('rebuild:p1')
+    await expect(run()).rejects.toThrow(/rebuild:p1/)
+    expect(createSession).not.toHaveBeenCalled()
+    expect(useRebuildStore.getState().lockedBy).toBe('rebuild:p1')
+  })
+
+  it('undoLastRestore refuses to run while a rebuild holds the lock', async () => {
+    await restoreAll(emptySnapshot(), { now: 1 })
+    expect(readPrevSnapshot()).not.toBeNull()
+    useRebuildStore.getState().acquireOperationLock('rebuild:p1')
+    await expect(undoLastRestore({ now: 2 })).rejects.toThrow(/rebuild:p1/)
+    expect(useRebuildStore.getState().lockedBy).toBe('rebuild:p1')
+  })
+
+  it('holds the lock for the duration of restoreAll and releases it afterwards', async () => {
+    let heldDuringBuild: string | null = null
+    await restoreAll(emptySnapshot(), {
+      now: 1,
+      buildSnapshotFn: async (now: number) => {
+        heldDuringBuild = useRebuildStore.getState().lockedBy
+        return { ...emptySnapshot(), capturedAt: now }
+      },
+    })
+    expect(heldDuringBuild).toBe('snapshot:restoreAll')
+    expect(useRebuildStore.getState().lockedBy).toBeNull()
+  })
+
+  it('releases the lock when a restore rejects with RestoreError', async () => {
+    await restoreAll(emptySnapshot(), {
+      now: 1,
+      buildSnapshotFn: () => Promise.reject(new Error('quota exceeded')),
+    }).catch(() => {})
+    expect(useRebuildStore.getState().lockedBy).toBeNull()
+  })
+
+  it('undoLastRestore nests into restoreAll under one owner and unlocks at the end', async () => {
+    useTabStore.setState({ tabs: { preA: tab('preA') }, tabOrder: ['preA'], activeTabId: 'preA', visitHistory: [] })
+    useWorkspaceStore.setState({
+      workspaces: [workspace({ id: 'wsPre', tabs: ['preA'], activeTabId: 'preA' })],
+      activeWorkspaceId: 'wsPre',
+    })
+    await restoreAll(validSnapshot(), { now: 1 })
+    expect(useRebuildStore.getState().lockedBy).toBeNull()
+
+    const seen: (string | null)[] = []
+    const undone = await undoLastRestore({
+      now: 2,
+      buildSnapshotFn: async (now: number) => {
+        seen.push(useRebuildStore.getState().lockedBy)
+        return { ...emptySnapshot(), capturedAt: now }
+      },
+    })
+    // The nested restoreAll runs under the undo's own owner and its release is
+    // a no-op, so the lock survives until undoLastRestore itself returns.
+    expect(undone).not.toBeNull()
+    expect(seen).toEqual(['snapshot:undoLastRestore'])
+    expect(useRebuildStore.getState().lockedBy).toBeNull()
+    expect(Object.keys(useTabStore.getState().tabs)).toEqual(['preA'])
   })
 })

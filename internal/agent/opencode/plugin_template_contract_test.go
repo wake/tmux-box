@@ -1106,3 +1106,18 @@ func TestOpenCodePluginTemplate_RenderedTemplateContainsExpectedFilter(t *testin
 		t.Fatalf("rendered template missing Decision 3/4 idle filter %q", filterLine)
 	}
 }
+
+// TestPluginTemplate_SessionCreated_EmitsCwd guards the tab-rebuild
+// requirement (spec 2026-09-07 §3.1 / §4.2) that the parent-session start
+// payload carries the working directory. Without it the rebuild record has
+// no directory to recreate the tmux session in, and the resume has to fall
+// back to `opencode -c`.
+func TestPluginTemplate_SessionCreated_EmitsCwd(t *testing.T) {
+	body := renderManagedPlugin("/usr/local/bin/pdx")
+	if !strings.Contains(body, "cwd: pdxCwd()") {
+		t.Fatalf("session.created emit does not include cwd:\n%s", body)
+	}
+	if !strings.Contains(body, "function pdxCwd()") {
+		t.Fatalf("pdxCwd helper missing")
+	}
+}

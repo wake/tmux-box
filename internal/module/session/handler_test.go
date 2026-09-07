@@ -293,6 +293,30 @@ func TestHandlerCreateSession(t *testing.T) {
 	assert.Len(t, sessions, 1)
 }
 
+// TestHandlerCreateSession_StampsTmuxInstance guards the create response, which
+// builds its SessionInfo by hand rather than going through ListSessions. The
+// rebuild engine re-points a pane using the generation in this very response
+// (spec v4 §4.8 step 4), so an unstamped create leaves the rebuilt pane with an
+// unknown generation until the next sessions broadcast.
+func TestHandlerCreateSession_StampsTmuxInstance(t *testing.T) {
+	mod, _, _ := newTestModule(t)
+	mod.tmuxInstanceFn = func() string { return "4471:1788740000" }
+	mux := http.NewServeMux()
+	mod.RegisterRoutes(mux)
+
+	body := `{"name": "stamped", "cwd": "/tmp"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	var info SessionInfo
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&info))
+	assert.Equal(t, "4471:1788740000", info.TmuxInstance)
+}
+
 func TestHandlerCreateSessionWithMode(t *testing.T) {
 	mod, meta, _ := newTestModule(t)
 	mux := http.NewServeMux()
@@ -699,6 +723,123 @@ func TestHandlerSendKeysNotFound(t *testing.T) {
 	mux.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// --- send-keys generation precondition (spec §4.6.2) ---
+
+// sendKeysTo posts a send-keys request built from the given JSON body and
+// returns the recorder, so each precondition case reads as one line.
+func sendKeysTo(t *testing.T, mux *http.ServeMux, code, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+code+"/send-keys", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	return w
+}
+
+// A caller that states the generation it believes it is talking to gets that
+// belief checked. Matching generation → the keys go through as before.
+func TestHandlerSendKeys_ExpectedInstanceMatches_Sends(t *testing.T) {
+	mod, _, fake := newTestModule(t)
+	// The generation lives on the server that would receive the keys — that is
+	// the only place a check about it can be authoritative — so the fake holds
+	// it and the daemon reads the same value.
+	mod.tmuxInstanceFn = fake.Instance
+	fake.SetInstance("111:1000")
+	mux := http.NewServeMux()
+	mod.RegisterRoutes(mux)
+
+	fake.AddSession("target", "/tmp")
+	sessions, err := mod.ListSessions()
+	require.NoError(t, err)
+	code := sessions[0].Code
+
+	w := sendKeysTo(t, mux, code, `{"keys":"echo hello\n","expected_tmux_instance":"111:1000"}`)
+
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	require.Len(t, fake.RawKeysSent(), 1)
+	// Targeted by session id: the conditional send resolves nothing by name.
+	assert.Equal(t, "$0:", fake.RawKeysSent()[0].Target)
+}
+
+// The whole point: a session code is a reversible encoding of `$N`, so after a
+// tmux restart the code the caller recorded can belong to a stranger. The
+// daemon refuses and sends NOTHING.
+func TestHandlerSendKeys_ExpectedInstanceMismatch_Refuses409(t *testing.T) {
+	mod, _, fake := newTestModule(t)
+	mod.tmuxInstanceFn = fake.Instance
+	fake.SetInstance("222:2000")
+	mux := http.NewServeMux()
+	mod.RegisterRoutes(mux)
+
+	fake.AddSession("target", "/tmp")
+	sessions, err := mod.ListSessions()
+	require.NoError(t, err)
+	code := sessions[0].Code
+
+	w := sendKeysTo(t, mux, code, `{"keys":"rm -rf /\n","expected_tmux_instance":"111:1000"}`)
+
+	assert.Equal(t, http.StatusConflict, w.Code)
+	assert.Empty(t, fake.RawKeysSent(), "a refused send-keys must send nothing at all")
+}
+
+// Unknown never authorises a keystroke (spec §4.6.2). A daemon that cannot
+// read its own generation cannot confirm the caller's expectation either.
+func TestHandlerSendKeys_ExpectedInstanceAgainstUnknown_Refuses409(t *testing.T) {
+	mod, _, fake := newTestModule(t)
+	mod.tmuxInstanceFn = fake.Instance
+	fake.SetInstance("")
+	mux := http.NewServeMux()
+	mod.RegisterRoutes(mux)
+
+	fake.AddSession("target", "/tmp")
+	sessions, err := mod.ListSessions()
+	require.NoError(t, err)
+	code := sessions[0].Code
+
+	w := sendKeysTo(t, mux, code, `{"keys":"echo hello\n","expected_tmux_instance":"111:1000"}`)
+
+	assert.Equal(t, http.StatusConflict, w.Code)
+	assert.Empty(t, fake.RawKeysSent())
+}
+
+// Absent means "no expectation", so Quick Commands and `executeCommand` —
+// which post `{"keys":…}` and nothing else — are unaffected.
+func TestHandlerSendKeys_NoExpectation_SendsWhateverTheGeneration(t *testing.T) {
+	mod, _, fake := newTestModule(t)
+	mod.tmuxInstanceFn = func() string { return "999:9000" }
+	mux := http.NewServeMux()
+	mod.RegisterRoutes(mux)
+
+	fake.AddSession("target", "/tmp")
+	sessions, err := mod.ListSessions()
+	require.NoError(t, err)
+	code := sessions[0].Code
+
+	w := sendKeysTo(t, mux, code, `{"keys":"echo hello\n"}`)
+
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	require.Len(t, fake.RawKeysSent(), 1)
+}
+
+// An explicitly empty expectation is the same as none: "" is the unknown
+// value, and a caller cannot assert that a session's generation is unknown.
+func TestHandlerSendKeys_EmptyExpectation_IsNoExpectation(t *testing.T) {
+	mod, _, fake := newTestModule(t)
+	mod.tmuxInstanceFn = func() string { return "999:9000" }
+	mux := http.NewServeMux()
+	mod.RegisterRoutes(mux)
+
+	fake.AddSession("target", "/tmp")
+	sessions, err := mod.ListSessions()
+	require.NoError(t, err)
+	code := sessions[0].Code
+
+	w := sendKeysTo(t, mux, code, `{"keys":"echo hello\n","expected_tmux_instance":""}`)
+
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	require.Len(t, fake.RawKeysSent(), 1)
 }
 
 func TestHandleList_CacheDebounce(t *testing.T) {

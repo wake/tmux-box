@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -297,5 +298,123 @@ func TestHashSessionsChangesWhenPaneTitleChanges(t *testing.T) {
 		PaneTitle: "second title",
 	}}
 
-	assert.NotEqual(t, hashSessions(base), hashSessions(changed))
+	assert.NotEqual(t, hashSessions("i", base), hashSessions("i", changed))
+}
+
+// drainSessions collects the inner JSON payload of every "sessions" event the
+// subscriber received. Frames on SendCh() are the outer core.HostEvent
+// envelope, so the type is checked before the value is kept.
+func drainSessions(t *testing.T, sub *core.EventSubscriber) []string {
+	t.Helper()
+	var out []string
+	timeout := time.After(100 * time.Millisecond)
+	for {
+		select {
+		case msg := <-sub.SendCh():
+			var env struct {
+				Type  string `json:"type"`
+				Value string `json:"value"`
+			}
+			if err := json.Unmarshal(msg, &env); err != nil || env.Type != "sessions" {
+				continue
+			}
+			out = append(out, env.Value)
+		case <-timeout:
+			return out
+		}
+	}
+}
+
+func TestTickNormal_TmuxRestartWithIdenticalList_Broadcasts(t *testing.T) {
+	mod, fake, events := newWatcherTestModule(t)
+	sub := events.AddTestSubscriber()
+	defer events.RemoveTestSubscriber(sub)
+
+	fake.AddSession("dev", "/w")
+	mod.tmuxInstanceFn = func() string { return "111:1000" }
+	mod.tickNormal()
+	require.Len(t, drainSessions(t, sub), 1, "first tick must broadcast")
+
+	// Same session list, new tmux server.
+	mod.tmuxInstanceFn = func() string { return "222:2000" }
+	mod.tickNormal()
+	got := drainSessions(t, sub)
+	require.Len(t, got, 1, "restart with an identical list must still broadcast")
+	assert.Contains(t, got[0], `"tmux_instance":"222:2000"`)
+}
+
+func TestTickNormal_UnchangedInstanceAndList_DoesNotBroadcast(t *testing.T) {
+	mod, fake, events := newWatcherTestModule(t)
+	sub := events.AddTestSubscriber()
+	defer events.RemoveTestSubscriber(sub)
+
+	fake.AddSession("dev", "/w")
+	mod.tmuxInstanceFn = func() string { return "111:1000" }
+	mod.tickNormal()
+	drainSessions(t, sub)
+
+	mod.tickNormal()
+	assert.Empty(t, drainSessions(t, sub), "unchanged state must not broadcast")
+}
+
+func TestListSessions_SamplesInstanceOutsideTheTick(t *testing.T) {
+	// A restart between two ticks must not be reported with the previous
+	// generation by the list path.
+	mod, fake, _ := newWatcherTestModule(t)
+	fake.AddSession("dev", "/w")
+	mod.tmuxInstanceFn = func() string { return "111:1000" }
+	mod.tickNormal()
+
+	mod.tmuxInstanceFn = func() string { return "222:2000" }
+	sessions, err := mod.ListSessions()
+	require.NoError(t, err)
+	require.NotEmpty(t, sessions)
+	assert.Equal(t, "222:2000", sessions[0].TmuxInstance,
+		"list must sample the instance, not reuse the last tick's value")
+}
+
+func TestSessionInfo_TmuxInstanceKeyAlwaysPresent(t *testing.T) {
+	raw, err := json.Marshal(SessionInfo{Code: "abc", Name: "dev"})
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"tmux_instance":""`,
+		"the key must be transmitted even when unknown (spec §4.6)")
+}
+
+func TestTickNormal_InstanceProbeFailure_PropagatesEmpty(t *testing.T) {
+	mod, fake, _ := newWatcherTestModule(t)
+	fake.AddSession("dev", "/w")
+	mod.tmuxInstanceFn = func() string { return "" }
+	mod.tickNormal()
+
+	sessions, err := mod.ListSessions()
+	require.NoError(t, err)
+	require.NotEmpty(t, sessions)
+	assert.Equal(t, "", sessions[0].TmuxInstance, "a probe failure must propagate empty, not a stale value")
+}
+
+func TestGetSession_StampsTmuxInstance(t *testing.T) {
+	mod, fake, _ := newWatcherTestModule(t)
+	fake.AddSession("dev", "/w")
+	mod.tmuxInstanceFn = func() string { return "333:3000" }
+
+	sessions, err := mod.ListSessions()
+	require.NoError(t, err)
+	require.NotEmpty(t, sessions)
+
+	info, err := mod.GetSession(sessions[0].Code)
+	require.NoError(t, err)
+	require.NotNil(t, info)
+	assert.Equal(t, "333:3000", info.TmuxInstance, "the single-get path must stamp the generation too")
+}
+
+func TestTmuxInstance_ProviderMethodSamplesEveryCall(t *testing.T) {
+	mod, _, _ := newWatcherTestModule(t)
+	calls := 0
+	mod.tmuxInstanceFn = func() string {
+		calls++
+		return "444:4000"
+	}
+	assert.Equal(t, "444:4000", mod.TmuxInstance())
+	assert.Equal(t, "444:4000", mod.TmuxInstance())
+	assert.Equal(t, 2, calls, "every call must re-sample rather than reuse a cached value")
 }

@@ -63,7 +63,9 @@ function mockCwds(map: Record<string, string | Error>): void {
     const v = map[code]
     if (v instanceof Error) throw v
     if (v === undefined) throw new Error(`unexpected fetchSessionCwd for ${code}`)
-    return v
+    // The endpoint stamps the generation it sampled in (spec §4.6.2); capture
+    // takes only the cwd.
+    return { cwd: v, tmuxInstance: '222:2000' }
   })
 }
 
@@ -117,7 +119,7 @@ describe('buildSnapshot / captureSnapshot', () => {
     })
     vi.mocked(fetchSessionCwd).mockImplementation(async (hostId: string, code: string) => {
       if (code !== 'shared') throw new Error(`unexpected code ${code}`)
-      return hostId === 'hostA' ? '/host-a' : '/host-b'
+      return { cwd: hostId === 'hostA' ? '/host-a' : '/host-b', tmuxInstance: '222:2000' }
     })
 
     const snap = await buildSnapshot(2000)

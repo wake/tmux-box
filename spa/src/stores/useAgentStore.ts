@@ -2,6 +2,10 @@
 import { create } from 'zustand'
 import { getActiveSessionInfo } from '../lib/active-session'
 import { compositeKey } from '../lib/composite-key'
+import { parseProvenance } from '../lib/rebuild/provenance'
+import { composeResumeCommand } from '../lib/rebuild/composer'
+import { useTabStore } from './useTabStore'
+import { scanPaneTree } from '../lib/pane-tree'
 
 export type AgentStatus = 'running' | 'waiting' | 'idle' | 'error'
 
@@ -59,6 +63,70 @@ export interface NormalizedEvent {
   raw_event_name: string
   broadcast_ts: number
   detail?: Record<string, unknown>
+}
+
+/**
+ * Write the rebuild record from a qualifying `SessionStart`'s provenance
+ * envelope (spec §4.2 step 3). The whole agent group is replaced as one unit,
+ * so a payload without `cwd` clears `cwd` rather than leaving the previous
+ * agent's directory beside a new session id.
+ */
+function writeProvenanceRecord(
+  hostId: string,
+  sessionCode: string,
+  detail: Record<string, unknown> | undefined,
+): boolean {
+  const prov = parseProvenance(detail)
+  if (!prov) return false
+  const now = Date.now()
+  useTabStore.getState().setPaneRebuild(hostId, sessionCode, prov.tmuxInstance, {
+    kind: 'agent-group',
+    record: {
+      tmuxInstance: prov.tmuxInstance,
+      cwd: prov.cwd || undefined,
+      cwdSource: prov.cwd ? 'agent-session-start' : undefined,
+      agent: {
+        type: prov.agentType,
+        sessionId: prov.sessionId || undefined,
+        tmuxPaneId: prov.tmuxPaneId || undefined,
+        updatedAt: now,
+      },
+      resumeCommand: composeResumeCommand(prov.agentType, prov.sessionId) || undefined,
+      capturedAt: now,
+    },
+  })
+  return true
+}
+
+/**
+ * The reconnect projection replay (`internal/module/agent/module.go:564`)
+ * delivers the session's *current* agent type but no provenance. When it
+ * disagrees with the record, the SPA was away while the session changed
+ * agents: the record still holds the old agent and nothing else marks it
+ * wrong, so flag it unverified (spec §9.1).
+ *
+ * Only the replay does this. A hot-path event's outer `agent_type` is the
+ * session-projection winner, which can legitimately name another tmux pane of
+ * the same session — not evidence that the record is stale.
+ */
+function flagUnverifiedAgent(hostId: string, sessionCode: string, agentType: string): void {
+  if (!agentType) return
+  const instances = new Set<string>()
+  for (const tab of Object.values(useTabStore.getState().tabs)) {
+    scanPaneTree(tab.layout, (pane) => {
+      const c = pane.content
+      if (c.kind !== 'tmux-session' || c.mode !== 'terminal') return
+      if (c.hostId !== hostId || c.sessionCode !== sessionCode) return
+      const recorded = c.rebuild?.agent?.type
+      if (!recorded || recorded === agentType || c.rebuild?.unverified === true) return
+      instances.add(c.tmuxInstance)
+    })
+  }
+  for (const tmuxInstance of instances) {
+    useTabStore.getState().setPaneRebuild(hostId, sessionCode, tmuxInstance, {
+      kind: 'unverified', unverified: true,
+    })
+  }
 }
 
 /** Latest CC statusLine snapshot per session (ephemeral, from statusLine wrapper). */
@@ -136,6 +204,14 @@ export const useAgentStore = create<AgentState>()(
       // Store agent type
       if (event.agent_type) {
         set((s) => ({ agentTypes: { ...s.agentTypes, [key]: event.agent_type } }))
+      }
+
+      // Rebuild record (spec §4.2). Reads ONLY `detail.pdx_provenance` — the
+      // outer `agent_type` above is the session-projection winner and must
+      // never reach the record (spec §4.3.1).
+      const wroteProvenance = writeProvenanceRecord(hostId, sessionCode, event.detail)
+      if (!wroteProvenance && event.raw_event_name === 'replay') {
+        flagUnverifiedAgent(hostId, sessionCode, event.agent_type)
       }
 
       // Store model (persist across events)

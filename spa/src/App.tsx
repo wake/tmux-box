@@ -143,6 +143,8 @@ export default function App() {
     renameTarget,
     renameError,
     handleRenameConfirm,
+    handleRenamePane,
+    handleEditRebuildField,
     handleRenameCancel,
     handleClearRenameError,
     openRenameForTab,
@@ -322,6 +324,9 @@ export default function App() {
             onCancel={handleRenameCancel}
             error={renameError}
             onClearError={handleClearRenameError}
+            tab={tabs[renameTarget.tabId]}
+            onRenamePane={handleRenamePane}
+            onEditRebuildField={handleEditRebuildField}
           />
         )}
         {wsContextMenu && (() => {

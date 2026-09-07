@@ -66,12 +66,18 @@ describe('connectHostEvents', () => {
     expect(wsInstances).toHaveLength(0) // no WS created
   })
 
-  it('connecting flag prevents concurrent connect calls', async () => {
+  // The `connecting` flag still serializes connects, but it no longer *drops*
+  // the newer one: under the epoch contract (spec §4.6) the in-flight attempt
+  // is superseded and hands over, so the second reconnect is honoured with its
+  // own ticket instead of silently inheriting the stale in-flight one.
+  it('serializes overlapping connects — one socket, and the newest attempt wins', async () => {
     const getTicket = vi.fn().mockImplementation(() => new Promise((r) => setTimeout(() => r('tk'), 100)))
     const conn = connectHostEvents('ws://test/ws/host-events', vi.fn(), undefined, undefined, getTicket, false, true)
     conn.reconnect()
     conn.reconnect() // second call while first is awaiting getTicket
     await new Promise((r) => setTimeout(r, 150))
-    expect(getTicket).toHaveBeenCalledTimes(1) // only one connect ran
+    expect(wsInstances).toHaveLength(0) // the superseded attempt opened nothing
+    await new Promise((r) => setTimeout(r, 150))
+    expect(wsInstances).toHaveLength(1) // the hand-over opened exactly one
   })
 })

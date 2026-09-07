@@ -4,6 +4,7 @@ import type { FitAddon } from '@xterm/addon-fit'
 import { connectTerminal } from '../lib/ws'
 import { useHostStore } from '../stores/useHostStore'
 import { useUISettingsStore } from '../stores/useUISettingsStore'
+import { canAttachTerminal } from '../lib/rebuild/attach-gate'
 
 interface UseTerminalWsOpts {
   wsUrl: string
@@ -35,10 +36,25 @@ export function useTerminalWs({ wsUrl, termRef, fitAddonRef, containerRef, hostI
     return useUISettingsStore.subscribe((s) => { revealDelayRef.current = s.terminalRevealDelay })
   }, [])
 
+  // Attach gate (spec §4.6): no terminal socket for this host until its current
+  // host-events connection has reconciled a `sessions` payload, so the pane can
+  // never attach to a session code a tmux restart handed to a stranger.
+  //
+  // Sticky per wsUrl on purpose. The gate closes again on every host-events
+  // reconnect; tearing an already-verified terminal down for that would flicker
+  // every pane on a transient blip. Later attempts are re-gated live through
+  // `canReconnect` below, which is the path that actually re-opens a socket.
+  const gateOpen = useHostStore((s) => (hostId ? s.runtime[hostId]?.attachReady === true : true))
+  const gateLatchRef = useRef({ wsUrl, allowed: false })
+  if (gateLatchRef.current.wsUrl !== wsUrl) gateLatchRef.current = { wsUrl, allowed: false }
+  if (gateOpen) gateLatchRef.current.allowed = true
+  const attachAllowed = gateLatchRef.current.allowed
+
   useEffect(() => {
     const term = termRef.current
     const container = containerRef.current
     if (!term || !container) return
+    if (!attachAllowed) return
 
     let revealed = false
     const reveal = () => {
@@ -53,7 +69,8 @@ export function useTerminalWs({ wsUrl, termRef, fitAddonRef, containerRef, hostI
           const state = useHostStore.getState()
           if (!state.hosts[hostId]) return false // host deleted — stop reconnecting
           const runtime = state.runtime[hostId]
-          return !runtime || runtime.status === 'connected'
+          if (runtime && runtime.status !== 'connected') return false
+          return canAttachTerminal(hostId)
         }
       : undefined
 
@@ -129,7 +146,7 @@ export function useTerminalWs({ wsUrl, termRef, fitAddonRef, containerRef, hostI
   // Other deps (containerRef, fitAddonRef, getTicket, hostId, termRef) are stable refs or
   // props captured once at mount; callbacks stabilized via refs above.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wsUrl])
+  }, [wsUrl, attachAllowed])
 
   return connRef
 }

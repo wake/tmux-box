@@ -208,6 +208,23 @@ describe('handleNotificationClick workspace switching', () => {
     expect(ws?.tabs).toHaveLength(1)
   })
 
+  it('reopenTabOnClick stamps the generation from the session payload', () => {
+    useSessionStore.setState({
+      sessions: {
+        [HOST_ID]: [
+          { code: SESSION_CODE, name: 'dev', cwd: '/tmp', mode: 'stream', cc_session_id: '', cc_model: '', has_relay: false, tmux_instance: '222:2000' },
+        ],
+      },
+    })
+    useNotificationSettingsStore.getState().setReopenTabOnClick('', true)
+
+    handleNotificationClick({ kind: 'open-session', hostId: HOST_ID, sessionCode: SESSION_CODE })
+
+    const tab = Object.values(useTabStore.getState().tabs)[0]
+    const content = tab.layout.type === 'leaf' ? tab.layout.pane.content : null
+    expect(content?.kind === 'tmux-session' && content.tmuxInstance).toBe('222:2000')
+  })
+
   it('reopenTabOnClick at Home (null workspace) keeps tab standalone', () => {
     // Setup: no existing tab, activeWorkspaceId is null (Home), reopenTabOnClick=true
     // Workspaces exist but active is null

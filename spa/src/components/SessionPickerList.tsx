@@ -48,7 +48,9 @@ export function SessionPickerList({ onSelect }: Props) {
                       hostId,
                       sessionCode: s.code,
                       cachedName: s.name,
-                      tmuxInstance: runtime[hostId]?.info?.tmux_instance ?? '',
+                      // From the session payload itself, never from ambient
+                      // host state (spec §3.5).
+                      tmuxInstance: s.tmux_instance ?? '',
                     })
                   }
                 >

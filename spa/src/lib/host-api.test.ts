@@ -212,13 +212,24 @@ describe('agentUpload', () => {
 })
 
 describe('fetchSessionCwd', () => {
-  it('returns cwd string from /api/sessions/{code}/cwd', async () => {
+  it('returns cwd and the generation it was sampled in', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ cwd: '/home/user/proj', tmux_instance: '222:2000' }), { status: 200 }),
+    )
+    const res = await fetchSessionCwd(HOST_ID, 'abc123')
+    expect(res).toEqual({ cwd: '/home/user/proj', tmuxInstance: '222:2000' })
+    expectAuthFetch(`${BASE}/api/sessions/abc123/cwd`)
+  })
+
+  it('reports an absent generation as unknown, never as a match', async () => {
+    // An older daemon does not send the field at all; "" is what the caller
+    // compares against, and "" never equals a real generation.
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(JSON.stringify({ cwd: '/home/user/proj' }), { status: 200 }),
     )
-    const cwd = await fetchSessionCwd(HOST_ID, 'abc123')
-    expect(cwd).toBe('/home/user/proj')
-    expectAuthFetch(`${BASE}/api/sessions/abc123/cwd`)
+    expect(await fetchSessionCwd(HOST_ID, 'abc123')).toEqual({
+      cwd: '/home/user/proj', tmuxInstance: '',
+    })
   })
 
   it('throws on non-ok response', async () => {

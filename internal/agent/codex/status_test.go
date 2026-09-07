@@ -232,3 +232,30 @@ func TestCodexDeriveStatus_LegacyNames_Invalid(t *testing.T) {
 		}
 	}
 }
+
+// TestCodexDeriveStatus_SessionStart_CarriesProvenance pins the observed codex
+// SessionStart payload (spec 3.1).
+func TestCodexDeriveStatus_SessionStart_CarriesProvenance(t *testing.T) {
+	r := deriveWithRaw("PdxSessionStart", `{"session_id":"01a07ace","cwd":"/w/purdex","hook_event_name":"SessionStart","model":"gpt-6-astra","permission_mode":"bypassPermissions","source":"startup"}`)
+	if !r.Valid {
+		t.Fatalf("Valid = false, got %+v", r)
+	}
+	if r.Detail["session_id"] != "01a07ace" {
+		t.Fatalf("session_id = %v", r.Detail["session_id"])
+	}
+	if r.Detail["cwd"] != "/w/purdex" {
+		t.Fatalf("cwd = %v", r.Detail["cwd"])
+	}
+}
+
+// TestCodexDeriveStatus_SessionStart_OmitsAbsentKeys — an absent key stays
+// absent so nothing serializes as null on the wire.
+func TestCodexDeriveStatus_SessionStart_OmitsAbsentKeys(t *testing.T) {
+	r := deriveWithRaw("PdxSessionStart", `{"source":"startup"}`)
+	if _, ok := r.Detail["session_id"]; ok {
+		t.Fatalf("session_id present for a payload that has none: %+v", r.Detail)
+	}
+	if _, ok := r.Detail["cwd"]; ok {
+		t.Fatalf("cwd present for a payload that has none: %+v", r.Detail)
+	}
+}

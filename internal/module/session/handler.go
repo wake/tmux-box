@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/wake/purdex/internal/store"
+	"github.com/wake/purdex/internal/tmux"
 )
 
 var nameRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
@@ -143,6 +144,12 @@ func (m *SessionModule) handleCreate(w http.ResponseWriter, r *http.Request) {
 				Exists: true,
 				Mode:   req.Mode,
 				Cwd:    req.Cwd,
+				// This response is built by hand rather than via ListSessions,
+				// so it needs its own stamp. The rebuild engine re-points a
+				// pane using the generation carried here (spec §4.8 step 4);
+				// leaving it empty would give the rebuilt pane an unknown
+				// generation until the next sessions broadcast.
+				TmuxInstance: m.TmuxInstance(),
 			}
 			break
 		}
@@ -288,6 +295,20 @@ func (m *SessionModule) handleSwitchMode(w http.ResponseWriter, r *http.Request)
 
 type sendKeysRequest struct {
 	Keys string `json:"keys"`
+
+	// ExpectedTmuxInstance is the tmux generation the caller believes this
+	// session code belongs to (spec §4.6.2). Optional: absent or "" means the
+	// caller states no expectation and the keys go to whatever the code
+	// resolves to now — which is what Quick Commands and `executeCommand`
+	// do, and their behaviour is unchanged.
+	//
+	// When it IS stated, the daemon checks it. Codes are a reversible encoding
+	// of the tmux id `$N`, so after a tmux server restart `$0` mints the same
+	// code and a caller holding a recorded code can address a session it has
+	// never seen. Only the daemon knows the current generation at the moment
+	// it acts, so this is the only place the check can be authoritative — a
+	// client-side cache comparison is a hint, not a precondition.
+	ExpectedTmuxInstance string `json:"expected_tmux_instance"`
 }
 
 func (m *SessionModule) handleSendKeys(w http.ResponseWriter, r *http.Request) {
@@ -314,6 +335,44 @@ func (m *SessionModule) handleSendKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A stated expectation is checked BY THE SERVER THAT RECEIVES THE KEYS, in
+	// one tmux invocation (`tmux.SendKeysIfInstance`).
+	//
+	// Comparing `info.TmuxInstance` here would not do it, however freshly it
+	// were re-sampled. That value was read by an earlier, separate tmux
+	// invocation; between it and the send sit `ActivePaneMetadata`'s
+	// subprocesses, a DB read, and then a NEW tmux connection resolving the
+	// target. A server restart inside that window passes the check and
+	// delivers the keys to the new server — and because a session code is a
+	// reversible encoding of `$N`, the new server has the same id. Any check
+	// that is a separate invocation from the send has that window; only one
+	// that shares the send's connection does not.
+	//
+	// The daemon's own sample survives for one thing only: `info.TmuxID` is
+	// the target, an id rather than a name, so a rename cannot re-point it.
+	if req.ExpectedTmuxInstance != "" {
+		// An expectation that cannot be compared at all is a bad request, not
+		// a verdict about the session — and it must not reach a tmux format.
+		if !tmux.ValidInstance(req.ExpectedTmuxInstance) {
+			http.Error(w, "invalid expected_tmux_instance", http.StatusBadRequest)
+			return
+		}
+		sent, err := m.tmux.SendKeysIfInstance(info.TmuxID, req.ExpectedTmuxInstance, req.Keys)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !sent {
+			// Unknown authorises nothing either: a server that could not
+			// report a generation cannot satisfy an expectation, and declines.
+			http.Error(w, "session "+code+" belongs to another tmux generation", http.StatusConflict)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// No expectation stated — Quick Commands and `executeCommand`. Unchanged.
 	if err := m.tmux.SendKeysRaw("="+info.Name+":", req.Keys); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

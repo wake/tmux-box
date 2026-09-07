@@ -11,6 +11,9 @@ import { dispatchBackupWsEvent } from '../lib/storage-backup/backup-ws-dispatch'
 import { usePathCacheStore } from '../stores/path-cache/usePathCacheStore'
 import { debugStatuslineTest } from '../lib/statusline-test-debug'
 import { scanPaneTree } from '../lib/pane-tree'
+import { reconcileSessionsPayload, type ReconcilePane } from '../lib/rebuild/reconcile'
+import { closeAttachGate, openAttachGate } from '../lib/rebuild/attach-gate'
+import { probeMissingCwds } from '../lib/rebuild/cwd-probe'
 import { hostWsUrl, fetchWsTicket, fetchHistory, type Session } from '../lib/host-api'
 import { checkHealth, type HealthResult } from '../lib/host-connection'
 import { ConnectionStateMachine } from '../lib/connection-state-machine'
@@ -86,6 +89,9 @@ export function useMultiHostEventWs() {
           })
           // On recovery → reconnect WS with pre-fetched ticket
           if (result.daemon === 'connected' && connRef.current) {
+            // A new connection starts here; nothing it will say has arrived
+            // yet, so the pane's binding is unverified again (spec §4.6).
+            closeAttachGate(hostId)
             if (result.ticket) {
               connRef.current.reconnectWithTicket(result.ticket)
             } else {
@@ -103,35 +109,58 @@ export function useMultiHostEventWs() {
           if (event.type === 'sessions') {
             try {
               const data: Session[] = JSON.parse(event.value)
-              useSessionStore.getState().replaceHost(hostId, data)
-              for (const s of data) {
-                useTabStore.getState().updateSessionCache(hostId, s.code, s.name)
-              }
 
-              // session-closed detection: collect unique closed codes, then mark once each
-              const newCodes = new Set(data.map((s: Session) => s.code))
-              const closedCodes = new Set<string>()
-              const { tabs } = useTabStore.getState()
-              for (const tab of Object.values(tabs)) {
+              // Decide BEFORE mutating anything (spec §4.5): the verdict must
+              // read the panes as they were when the payload arrived, not
+              // after a name refresh has already touched them.
+              const panes: ReconcilePane[] = []
+              for (const tab of Object.values(useTabStore.getState().tabs)) {
                 scanPaneTree(tab.layout, (pane) => {
                   const c = pane.content
-                  if (c.kind === 'tmux-session' && c.hostId === hostId && !c.terminated && !newCodes.has(c.sessionCode)) {
-                    closedCodes.add(c.sessionCode)
+                  if (c.kind === 'tmux-session' && c.hostId === hostId && !c.terminated) {
+                    panes.push({ hostId: c.hostId, sessionCode: c.sessionCode, tmuxInstance: c.tmuxInstance })
                   }
                 })
               }
-              for (const code of closedCodes) {
-                useTabStore.getState().markTerminated(hostId, code, 'session-closed')
+              const outcome = reconcileSessionsPayload({ hostId, sessions: data, panes })
+
+              useSessionStore.getState().replaceHost(hostId, data)
+
+              // Adoption first — a pane that takes the live generation here is
+              // no longer matched by a sibling's tmux-restarted decision.
+              for (const { sessionCode, tmuxInstance } of outcome.adoptInstance) {
+                useTabStore.getState().adoptTmuxInstance(hostId, sessionCode, tmuxInstance)
+              }
+              for (const s of data) {
+                useTabStore.getState().updateSessionCache(hostId, s.code, s.name, s.tmux_instance ?? '')
+              }
+
+              const clearedCodes = new Set<string>()
+              for (const { sessionCode, expectedTmuxInstance, reason } of outcome.terminate) {
+                useTabStore.getState().markTerminatedForGeneration(hostId, sessionCode, expectedTmuxInstance, reason)
+                if (reason !== 'session-closed' || clearedCodes.has(sessionCode)) continue
+                clearedCodes.add(sessionCode)
                 // Clear agent state (subagents, status, etc.) so indicators
                 // don't linger after the tmux session disappears.
-                useAgentStore.getState().clearSession(hostId, code)
+                useAgentStore.getState().clearSession(hostId, sessionCode)
                 // Path-cache entries tagged with this sessionCode are now
                 // dead (their owning agent session is gone); other sessions
                 // sharing the same cwd keep their entries. SessionCode is
                 // host-local so we must scope the clear by hostId — sibling
                 // hosts can mint identical codes (R3 P2).
-                usePathCacheStore.getState().clearBySession(hostId, code)
+                usePathCacheStore.getState().clearBySession(hostId, sessionCode)
               }
+
+              // This connection has now told us which generation is live and
+              // the panes have been reconciled against it: terminals bound to
+              // this host may attach (spec §4.6). A payload we could not parse
+              // is no evidence, so this stays inside the try.
+              openAttachGate(hostId)
+
+              // First of the two cwd-probe triggers (spec §4.4). Runs after
+              // reconciliation so a pane about to be marked dead, or one that
+              // just adopted this generation, is judged on its final binding.
+              probeMissingCwds(hostId)
             } catch { /* ignore */ }
             return
           }
@@ -195,7 +224,9 @@ export function useMultiHostEventWs() {
         },
         // onClose — trigger SM health check (no auto-reconnect)
         () => {
-          useHostStore.getState().setRuntime(hostId, { status: 'reconnecting' })
+          // Immediately, not on the next open: from here on nothing confirms
+          // the panes' bindings (spec §4.6).
+          useHostStore.getState().setRuntime(hostId, { status: 'reconnecting', attachReady: false })
           sm.trigger()
         },
         // onOpen
@@ -213,6 +244,10 @@ export function useMultiHostEventWs() {
       connRef.current = conn
 
       entries.set(hostId, { conn, sm, configKey })
+
+      // A brand-new connection: the gate starts closed and only this
+      // connection's own `sessions` payload may open it.
+      closeAttachGate(hostId)
 
       // Start negotiation — SM will trigger reconnectWithTicket on success
       sm.trigger()

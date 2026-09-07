@@ -12,7 +12,11 @@ func deriveCodexStatus(eventName string, rawEvent json.RawMessage) agent.DeriveR
 
 	switch eventName {
 	case "PdxSessionStart":
-		return agent.DeriveResult{Valid: true, Status: agent.StatusIdle}
+		return agent.DeriveResult{
+			Valid:  true,
+			Status: agent.StatusIdle,
+			Detail: agent.DetailStrings(raw, "session_id", "cwd"),
+		}
 
 	case "PdxUserPromptSubmit":
 		return agent.DeriveResult{Valid: true, Status: agent.StatusRunning}

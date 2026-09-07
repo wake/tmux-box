@@ -134,6 +134,9 @@ export function WorkspaceQuickCommandsContextMenu({ workspaceId, hostId, onClose
         sessionCode,
         mode: 'terminal',
         cachedName: sessionCode,
+        // No Session payload in hand (the slot executor hands back a bare
+        // code), so the generation stays unknown until the next sessions
+        // payload adopts it (spec §4.5).
         tmuxInstance: '',
       })
       useWorkspaceStore.getState().insertTab(tabId, workspaceId)

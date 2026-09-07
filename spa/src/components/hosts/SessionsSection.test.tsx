@@ -156,6 +156,17 @@ describe('SessionsSection', () => {
     })
     expect(mockSetActiveTab).toHaveBeenCalledWith('tab-1')
   })
+
+  it('clicking Open carries the session generation into the pane', () => {
+    useSessionStore.setState({
+      sessions: { [HOST_ID]: [{ ...SESSIONS[0], tmux_instance: '222:2000' }] },
+    })
+    render(<SessionsSection hostId={HOST_ID} />)
+    fireEvent.click(screen.getByTitle('Open'))
+    expect(mockOpenSingletonTab).toHaveBeenCalledWith(
+      expect.objectContaining({ tmuxInstance: '222:2000' }),
+    )
+  })
 })
 
 describe('SessionsSection — v1 QuickCommandMenu removal (Phase 1c, Finding 4)', () => {

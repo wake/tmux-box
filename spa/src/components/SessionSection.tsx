@@ -26,7 +26,7 @@ function SessionRow({ hostId, session, disabled, onSelect }: {
       disabled={disabled}
       tabIndex={0}
       onClick={() =>
-        onSelect({ kind: 'tmux-session', hostId, sessionCode: session.code, mode: 'terminal', cachedName: session.name, tmuxInstance: '' })
+        onSelect({ kind: 'tmux-session', hostId, sessionCode: session.code, mode: 'terminal', cachedName: session.name, tmuxInstance: session.tmux_instance ?? '' })
       }
       onKeyDown={(e) => {
         const container = e.currentTarget.closest('[data-session-list]')
@@ -73,7 +73,7 @@ function isHostLive(hostId: string): boolean {
 function NewTabSessionForm({ hostId, disabled, onCreated, onCancel }: {
   hostId: string
   disabled: boolean
-  onCreated: (content: { code: string; name: string; mode: string }) => void
+  onCreated: (content: { code: string; name: string; mode: string; tmuxInstance: string }) => void
   onCancel: () => void
 }) {
   const t = useI18nStore((s) => s.t)
@@ -111,7 +111,10 @@ function NewTabSessionForm({ hostId, disabled, onCreated, onCancel }: {
       if (!created.code) { setError(t('hosts.create') + ' failed'); return }
       // Guard 2 — host still live (removed/disconnected during the await must not attach).
       if (!isHostLive(hostId)) { setError(t('hosts.create') + ' failed'); return }
-      onCreated({ code: created.code, name: created.name, mode })
+      // The generation comes from the create response itself — never from
+      // ambient host state (spec §4.5). Older daemons omit it; '' = unknown,
+      // and the next sessions payload adopts the real value.
+      onCreated({ code: created.code, name: created.name, mode, tmuxInstance: created.tmux_instance ?? '' })
     } catch (err) {
       if (activeRef.current) setError(err instanceof Error ? err.message : 'Failed')
     } finally {
@@ -227,9 +230,9 @@ export function SessionSection({ onSelect }: NewTabProviderProps) {
                 hostId={hostId}
                 disabled={createDisabled}
                 onCancel={() => setCreatingHost(null)}
-                onCreated={({ code, name, mode }) => {
+                onCreated={({ code, name, mode, tmuxInstance }) => {
                   setCreatingHost(null)
-                  onSelect({ kind: 'tmux-session', hostId, sessionCode: code, mode: mode as 'terminal' | 'stream', cachedName: name, tmuxInstance: '' })
+                  onSelect({ kind: 'tmux-session', hostId, sessionCode: code, mode: mode as 'terminal' | 'stream', cachedName: name, tmuxInstance })
                 }}
               />
             )}

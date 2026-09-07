@@ -5,6 +5,7 @@ import type { PaneContent, PaneLayout, Tab } from '../../types/tab'
 import { useTabStore } from '../../stores/useTabStore'
 import { useWorkspaceStore } from '../../features/workspace/store'
 import { useSessionStore } from '../../stores/useSessionStore'
+import { withOperationLock, type OperationLockGrant } from '../../stores/useRebuildStore'
 import { buildSnapshot } from './capture'
 import { readPrevSnapshot, writePrevSnapshot } from './storage'
 import { RestoreError } from './types'
@@ -97,8 +98,9 @@ export async function ensureSessions(
  *
  * Per-pane behaviour (keyed by the composite `[hostId][sessionCode]`):
  * - `reattached` / `rebuilt` → adopt `entry.newCode`, refresh `cachedName` from
- *   `entry.session.name`, and clear any `terminated` marker (the session is now
- *   attachable again).
+ *   `entry.session.name`, stamp `entry.session.tmux_instance` (falling back to
+ *   the pane's current instance when the payload has none), and clear any
+ *   `terminated` marker (the session is now attachable again).
  * - `failed` → keep the pane's code but mark `terminated: 'tmux-restarted'`.
  *   The reason is FIXED for the restore path (codex plan-review): restore never
  *   guesses `'session-closed'` / `'host-removed'`.
@@ -135,12 +137,22 @@ export function remapLayoutSessions(
       return
     }
 
-    // reattached | rebuilt — adopt new code/name, clear terminated marker.
+    // reattached | rebuilt — adopt new code/name/generation, clear terminated
+    // marker. Stamping the generation is mandatory (spec §4.6.1): the session we
+    // re-point to may live on a NEW tmux server, and keeping the pane's old
+    // instance would make the next reconciliation mark it dead again. When the
+    // payload carries no instance (older daemon / probe failure) keep the one we
+    // already know — never downgrade it to ''.
     const { terminated: _cleared, ...rest } = content
     void _cleared
     updates.push({
       paneId: pane.id,
-      content: { ...rest, sessionCode: entry.newCode, cachedName: entry.session.name },
+      content: {
+        ...rest,
+        sessionCode: entry.newCode,
+        cachedName: entry.session.name,
+        tmuxInstance: entry.session.tmux_instance ?? content.tmuxInstance,
+      },
     })
   })
 
@@ -310,6 +322,34 @@ export function replaceTabSnapshot(snap: WorkspaceSnapshot): void {
 export interface RestoreDeps {
   now?: number
   buildSnapshotFn?: typeof buildSnapshot
+  /**
+   * Internal: the operation-lock grant the CALLER already holds. Only
+   * {@link undoLastRestore} sets it, so the {@link restoreAll} it delegates to
+   * re-enters the undo's own lock instead of being refused by it. The grant
+   * itself, not its owner name: names are not identities, and re-entry granted
+   * on a name match would let two unrelated callers interleave.
+   */
+  lockGrant?: OperationLockGrant
+}
+
+/**
+ * Operation-lock owners for the legacy snapshot actions (spec §4.11). All four
+ * create tmux sessions and/or replace the whole tab tree, so none of them may
+ * interleave with a Tab Rebuild — see {@link useRebuildStore}.
+ */
+export const SNAPSHOT_LOCK_OWNER = {
+  rebuildAll: 'snapshot:rebuildAllSessions',
+  restoreLayout: 'snapshot:restoreTabLayout',
+  restoreAll: 'snapshot:restoreAll',
+  undo: 'snapshot:undoLastRestore',
+} as const
+
+/**
+ * Refuse rather than run: a legacy restore replaces the entire tab snapshot,
+ * which would silently overwrite an in-flight rebuild's re-point.
+ */
+function lockRefused(owner: string, holder: string): never {
+  throw new Error(`${owner} refused: another operation is already running (${holder})`)
 }
 
 /**
@@ -389,6 +429,14 @@ function rewriteSnapshotTabs(
  * uses {@link replaceTabState}, which does not validate navigation refs.
  */
 export async function rebuildAllSessions(snap: WorkspaceSnapshot): Promise<RestoreReport> {
+  return withOperationLock(
+    SNAPSHOT_LOCK_OWNER.rebuildAll,
+    () => runRebuildAllSessions(snap),
+    (holder) => lockRefused(SNAPSHOT_LOCK_OWNER.rebuildAll, holder),
+  )
+}
+
+async function runRebuildAllSessions(snap: WorkspaceSnapshot): Promise<RestoreReport> {
   const { remap, report } = await ensureSessions(snap.sessionMeta)
 
   const { tabs, tabOrder, activeTabId } = useTabStore.getState()
@@ -413,7 +461,13 @@ export async function restoreTabLayout(
   snap: WorkspaceSnapshot,
   deps?: RestoreDeps,
 ): Promise<RestoreReport> {
-  return applySnapshotRestore(snap, { rebuild: false }, deps)
+  const owner = SNAPSHOT_LOCK_OWNER.restoreLayout
+  return withOperationLock(
+    owner,
+    () => applySnapshotRestore(snap, { rebuild: false }, deps),
+    (holder) => lockRefused(owner, holder),
+    deps?.lockGrant,
+  )
 }
 
 /**
@@ -425,7 +479,13 @@ export async function restoreAll(
   snap: WorkspaceSnapshot,
   deps?: RestoreDeps,
 ): Promise<RestoreReport> {
-  return applySnapshotRestore(snap, { rebuild: true }, deps)
+  const owner = SNAPSHOT_LOCK_OWNER.restoreAll
+  return withOperationLock(
+    owner,
+    () => applySnapshotRestore(snap, { rebuild: true }, deps),
+    (holder) => lockRefused(owner, holder),
+    deps?.lockGrant,
+  )
 }
 
 /**
@@ -466,9 +526,19 @@ async function applySnapshotRestore(
 /**
  * Undo the most recent restore by replaying the `-prev` backup through
  * {@link restoreAll}. Returns `null` when there is no backup to undo.
+ *
+ * The nested {@link restoreAll} is handed THIS action's lock grant, so its
+ * acquire is a re-entry that cannot drop the lock when it returns — the undo
+ * owns the lock from its first line to its last.
  */
 export async function undoLastRestore(deps?: RestoreDeps): Promise<RestoreReport | null> {
   const prev = readPrevSnapshot()
   if (!prev) return null
-  return restoreAll(prev, deps)
+  const owner = SNAPSHOT_LOCK_OWNER.undo
+  return withOperationLock(
+    owner,
+    (grant) => restoreAll(prev, { ...deps, lockGrant: grant }),
+    (holder) => lockRefused(owner, holder),
+    deps?.lockGrant,
+  )
 }

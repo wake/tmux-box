@@ -82,7 +82,10 @@ export async function buildSnapshot(now: number): Promise<WorkspaceSnapshot> {
           // session_path (unexpanded start dir) if the probe fails or is empty.
           let probed = ''
           try {
-            probed = await fetchSessionCwd(hostId, ref.sessionCode)
+            // The generation the reading came from is irrelevant here: a
+            // snapshot records whatever is live at capture time, and is not
+            // written back onto a pane's binding (spec §4.6.2 governs that).
+            probed = (await fetchSessionCwd(hostId, ref.sessionCode)).cwd
           } catch {
             probed = ''
           }

@@ -12,7 +12,7 @@ func deriveOpenCodeStatus(eventName string, rawEvent json.RawMessage) agent.Deri
 
 	switch eventName {
 	case "PdxSessionStart":
-		return agent.DeriveResult{Valid: true, Status: agent.StatusIdle}
+		return agent.DeriveResult{Valid: true, Status: agent.StatusIdle, Detail: agent.DetailStrings(raw, "session_id", "cwd")}
 	case "PdxUserPromptSubmit":
 		return agent.DeriveResult{Valid: true, Status: agent.StatusRunning, Model: strVal(raw, "modelName")}
 	case "PdxSubagentStart", "PdxSubagentStop":

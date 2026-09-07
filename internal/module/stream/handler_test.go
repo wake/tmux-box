@@ -73,6 +73,8 @@ func (f *fakeSessionProvider) UpdateMeta(code string, update session.MetaUpdate)
 func (f *fakeSessionProvider) HandleTerminalWS(w http.ResponseWriter, r *http.Request, code string) {
 }
 
+func (f *fakeSessionProvider) TmuxInstance() string { return "" }
+
 func (f *fakeSessionProvider) getUpdates() []metaUpdateRecord {
 	f.mu.Lock()
 	defer f.mu.Unlock()

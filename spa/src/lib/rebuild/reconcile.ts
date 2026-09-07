@@ -1,0 +1,106 @@
+// spa/src/lib/rebuild/reconcile.ts — pure decision function for a `sessions`
+// payload (spec §4.5 / §4.6).
+//
+// A pane's binding is (hostId, sessionCode, tmuxInstance), not
+// (hostId, sessionCode): session codes are a reversible encoding of the tmux
+// id `$N`, so after a tmux server restart `$0` mints the same code and a pane
+// can find "its" code alive and attach to an unrelated session. The generation
+// carried on the payload itself is what distinguishes them.
+//
+// This module never touches a store — the caller collects the panes, calls
+// this, then applies the two outputs.
+import type { Session } from '../host-api'
+import type { TerminatedReason } from '../../types/tab'
+
+/** A session as it arrives on a `sessions` payload; only `code` is required. */
+export type ReconcileSession = Partial<Session> & { code: string }
+
+/** The part of a live pane this decision needs. */
+export interface ReconcilePane {
+  hostId: string
+  sessionCode: string
+  tmuxInstance: string
+}
+
+export interface TerminateDecision {
+  hostId: string
+  sessionCode: string
+  /** The generation the dying panes carry — see `markTerminatedForGeneration`. */
+  expectedTmuxInstance: string
+  reason: TerminatedReason
+}
+
+export interface AdoptDecision {
+  sessionCode: string
+  tmuxInstance: string
+}
+
+export interface ReconcileInput {
+  hostId: string
+  sessions: ReconcileSession[]
+  /** Live (non-terminated) tmux-session panes; foreign hosts are ignored. */
+  panes: ReconcilePane[]
+}
+
+export interface ReconcileOutcome {
+  terminate: TerminateDecision[]
+  adoptInstance: AdoptDecision[]
+}
+
+/**
+ * Decide what a `sessions` payload means for the panes bound to that host.
+ *
+ * Rules:
+ *  - code absent from the live list → `session-closed` (today's behaviour).
+ *  - code present, both generations non-empty and different → `tmux-restarted`.
+ *  - any combination involving `""` means *unknown* and marks nothing — first
+ *    load, offline hosts, `GetTmuxInstance()` timeouts, host re-add/undo and
+ *    daemon-only restarts all land here.
+ *  - a pane with no generation whose code is alive adopts the live one, so it
+ *    can be compared on the next payload.
+ *
+ * Callers must apply `adoptInstance` before `terminate`: adoption is what stops
+ * a generation-less pane from being swept up by a sibling's `tmux-restarted`
+ * decision (an empty recorded instance matches the old host+code rule).
+ */
+export function reconcileSessionsPayload({ hostId, sessions, panes }: ReconcileInput): ReconcileOutcome {
+  const liveInstances = new Map<string, string>()
+  for (const s of sessions) liveInstances.set(s.code, s.tmux_instance ?? '')
+
+  const terminate: TerminateDecision[] = []
+  const seenTerminate = new Set<string>()
+  const adoptInstance: AdoptDecision[] = []
+  const seenAdopt = new Set<string>()
+
+  const pushTerminate = (sessionCode: string, expectedTmuxInstance: string, reason: TerminatedReason) => {
+    // NUL as the composite-key separator — impossible in any of the three
+    // parts. Written as the `\u0000` escape, never as a raw byte: a literal NUL
+    // makes the file count as binary and puts it out of grep's reach.
+    const key = `${sessionCode}\u0000${expectedTmuxInstance}\u0000${reason}`
+    if (seenTerminate.has(key)) return
+    seenTerminate.add(key)
+    terminate.push({ hostId, sessionCode, expectedTmuxInstance, reason })
+  }
+
+  for (const pane of panes) {
+    if (pane.hostId !== hostId) continue
+
+    const live = liveInstances.get(pane.sessionCode)
+    if (live === undefined) {
+      pushTerminate(pane.sessionCode, pane.tmuxInstance, 'session-closed')
+      continue
+    }
+    if (pane.tmuxInstance === '') {
+      if (live !== '' && !seenAdopt.has(pane.sessionCode)) {
+        seenAdopt.add(pane.sessionCode)
+        adoptInstance.push({ sessionCode: pane.sessionCode, tmuxInstance: live })
+      }
+      continue
+    }
+    if (live !== '' && live !== pane.tmuxInstance) {
+      pushTerminate(pane.sessionCode, pane.tmuxInstance, 'tmux-restarted')
+    }
+  }
+
+  return { terminate, adoptInstance }
+}

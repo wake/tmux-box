@@ -41,7 +41,7 @@ func renderPurdexEventConst(specs []agent.HookEventSpec) string {
 
 func renderManagedPlugin(pdxPath string) string {
 	return fmt.Sprintf(`// %s
-export const PurdexOpenCodeHooks = async () => {
+export const PurdexOpenCodeHooks = async (ctx = {}) => {
   const activeSubagents = new Map()
   const suppressIdleForSession = new Set()
   // childSessionID -> parentSessionID. opencode runs each subagent (Task
@@ -69,6 +69,21 @@ export const PurdexOpenCodeHooks = async () => {
     await proc.exited
   }
 
+  // opencode calls a plugin export as Plugin(input: PluginInput, options?),
+  // and PluginInput carries both 'directory' (the session's working
+  // directory) and 'worktree' (the enclosing git worktree root). Prefer
+  // 'directory', fall back to 'worktree', then to the plugin process cwd.
+  // Returns '' rather than throwing so a missing cwd never breaks an emit.
+  function pdxCwd() {
+    try {
+      if (ctx && typeof ctx.directory === 'string' && ctx.directory) return ctx.directory
+      if (ctx && typeof ctx.worktree === 'string' && ctx.worktree) return ctx.worktree
+      return process.cwd()
+    } catch {
+      return ''
+    }
+  }
+
   function agentTypeFromArgs(args) {
     if (!args || typeof args !== 'object') return 'task'
     if (typeof args.subagent_type === 'string' && args.subagent_type) return args.subagent_type
@@ -90,7 +105,7 @@ export const PurdexOpenCodeHooks = async () => {
             if (sid) subagentSessions.set(sid, parentID)
             return
           }
-          await emit(PURDEX_EVENT.PdxSessionStart, { session_id: sid })
+          await emit(PURDEX_EVENT.PdxSessionStart, { session_id: sid, cwd: pdxCwd() })
           return
         }
         case 'permission.asked':

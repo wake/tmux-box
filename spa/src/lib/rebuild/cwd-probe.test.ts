@@ -1,0 +1,287 @@
+// spa/src/lib/rebuild/cwd-probe.test.ts — the shell-only cwd baseline (§4.4).
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { probeSessionCwd, probeMissingCwds, resetCwdProbes } from './cwd-probe'
+import { useTabStore } from '../../stores/useTabStore'
+import { useHostStore } from '../../stores/useHostStore'
+import { createTab, type TmuxSessionContent } from '../../types/tab'
+import { fetchSessionCwd } from '../host-api'
+
+vi.mock('../host-api', () => ({ fetchSessionCwd: vi.fn() }))
+
+/** The daemon's answer: a cwd plus the generation it was sampled in. */
+const answer = (cwd: string, tmuxInstance = '222:2000') => ({ cwd, tmuxInstance })
+
+function seed(overrides?: Partial<TmuxSessionContent>) {
+  const tab = createTab({
+    kind: 'tmux-session', hostId: 'h1', sessionCode: 'abc123',
+    mode: 'terminal', cachedName: 'dev', tmuxInstance: '222:2000',
+    ...overrides,
+  })
+  useTabStore.setState({ tabs: { [tab.id]: tab }, tabOrder: [tab.id], activeTabId: tab.id })
+  return tab
+}
+
+function recordOf(tabId: string) {
+  const l = useTabStore.getState().tabs[tabId].layout
+  return l.type === 'leaf' && l.pane.content.kind === 'tmux-session' ? l.pane.content.rebuild : undefined
+}
+
+/** Re-point the tab's single pane at another session code. */
+function rebind(tabId: string, sessionCode: string) {
+  const state = useTabStore.getState()
+  const tab = state.tabs[tabId]
+  const l = tab.layout
+  if (l.type !== 'leaf' || l.pane.content.kind !== 'tmux-session') throw new Error('bad seed')
+  useTabStore.setState({
+    tabs: {
+      ...state.tabs,
+      [tabId]: { ...tab, layout: { ...l, pane: { ...l.pane, content: { ...l.pane.content, sessionCode } } } },
+    },
+  })
+}
+
+/** Flush every pending microtask (the probe chain is then → catch → finally). */
+const flush = () => new Promise((r) => setTimeout(r, 0))
+
+type Answer = { cwd: string; tmuxInstance: string }
+
+function deferred() {
+  let resolve!: (v: Answer) => void
+  let reject!: (e: unknown) => void
+  const promise = new Promise<Answer>((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
+}
+
+/** The attach gate for a host, which the probe waits on (spec §4.6.2). */
+function setGate(hostId: string, open: boolean) {
+  useHostStore.setState({
+    runtime: {
+      ...useHostStore.getState().runtime,
+      [hostId]: { status: 'connected', attachReady: open },
+    },
+  })
+}
+
+beforeEach(() => {
+  resetCwdProbes()
+  vi.mocked(fetchSessionCwd).mockReset()
+  useTabStore.setState({ tabs: {}, tabOrder: [], activeTabId: null })
+  useHostStore.setState({ runtime: {} })
+  setGate('h1', true)
+  setGate('h2', true)
+})
+
+describe('probeSessionCwd', () => {
+  it('writes the probed cwd as a pane-probe baseline', async () => {
+    const tab = seed()
+    vi.mocked(fetchSessionCwd).mockResolvedValue(answer('/w/late'))
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    await vi.waitFor(() => expect(recordOf(tab.id)?.cwd).toBe('/w/late'))
+    expect(recordOf(tab.id)?.cwdSource).toBe('pane-probe')
+  })
+
+  it('deduplicates concurrent probes for the same binding', async () => {
+    const tab = seed()
+    const d = deferred()
+    vi.mocked(fetchSessionCwd).mockReturnValue(d.promise)
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    probeMissingCwds('h1')
+    expect(fetchSessionCwd).toHaveBeenCalledTimes(1)
+    d.resolve(answer('/w/one'))
+    await vi.waitFor(() => expect(recordOf(tab.id)?.cwd).toBe('/w/one'))
+  })
+
+  it('discards a probe whose pane was re-pointed while it was in flight', async () => {
+    const tab = seed()
+    const d = deferred()
+    vi.mocked(fetchSessionCwd).mockReturnValue(d.promise)
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    rebind(tab.id, 'other-code')
+    d.resolve(answer('/w/stale'))
+    await flush()
+    expect(recordOf(tab.id)?.cwd).toBeUndefined()
+  })
+
+  it('never requests a cwd for a pane that already has one', () => {
+    seed()
+    useTabStore.getState().setPaneRebuild('h1', 'abc123', '222:2000', {
+      kind: 'field', field: 'cwd', value: '/known',
+    })
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    expect(fetchSessionCwd).not.toHaveBeenCalled()
+  })
+
+  it('ignores stream-mode, terminated and foreign-generation panes', () => {
+    seed({ mode: 'stream' })
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    seed({ terminated: 'session-closed' })
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    seed({ tmuxInstance: '111:1000' })
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    expect(fetchSessionCwd).not.toHaveBeenCalled()
+  })
+
+  it('does not write the answer into a sibling that terminated while it was in flight', async () => {
+    // Two panes on one session code. `wantsProbe` excludes terminated panes,
+    // but the write itself is session-scoped, so a pane that dies between the
+    // request and the answer must be skipped by the WRITE, not just by the read.
+    const live = seed()
+    const dying = createTab({
+      kind: 'tmux-session', hostId: 'h1', sessionCode: 'abc123',
+      mode: 'terminal', cachedName: 'dev', tmuxInstance: '222:2000',
+    })
+    useTabStore.setState({
+      tabs: { ...useTabStore.getState().tabs, [dying.id]: dying },
+      tabOrder: [live.id, dying.id],
+      activeTabId: live.id,
+    })
+
+    const d = deferred()
+    vi.mocked(fetchSessionCwd).mockReturnValue(d.promise)
+    probeSessionCwd('h1', 'abc123', '222:2000')
+
+    // The reconciler marks the second pane dead while the request is out.
+    const tab = useTabStore.getState().tabs[dying.id]
+    if (tab.layout.type !== 'leaf' || tab.layout.pane.content.kind !== 'tmux-session') throw new Error('bad seed')
+    useTabStore.setState({
+      tabs: {
+        ...useTabStore.getState().tabs,
+        [dying.id]: { ...tab, layout: { ...tab.layout, pane: { ...tab.layout.pane, content: {
+          ...tab.layout.pane.content, terminated: 'session-closed',
+        } } } },
+      },
+    })
+
+    d.resolve(answer('/w/live'))
+    await flush()
+    expect(recordOf(live.id)?.cwd).toBe('/w/live')
+    expect(recordOf(dying.id)).toBeUndefined()
+  })
+
+  it('releases the dedup slot when the request fails', async () => {
+    seed()
+    const d = deferred()
+    vi.mocked(fetchSessionCwd).mockReturnValueOnce(d.promise)
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    d.reject(new Error('boom'))
+    await flush()
+    vi.mocked(fetchSessionCwd).mockResolvedValue(answer('/w/retry'))
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    expect(fetchSessionCwd).toHaveBeenCalledTimes(2)
+  })
+
+  // --- Generation preconditions (spec §4.6.2) ---
+
+  it('discards an answer stamped with a generation other than the one it asked with', async () => {
+    const tab = seed()
+    vi.mocked(fetchSessionCwd).mockResolvedValue(answer('/w/stranger', '333:3000'))
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    await flush()
+    expect(fetchSessionCwd).toHaveBeenCalledTimes(1)
+    expect(recordOf(tab.id)?.cwd).toBeUndefined()
+  })
+
+  it('does not re-ask after a conclusive generation mismatch', async () => {
+    seed()
+    vi.mocked(fetchSessionCwd).mockResolvedValue(answer('/w/stranger', '333:3000'))
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    await flush()
+    probeMissingCwds('h1')
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    await flush()
+    expect(fetchSessionCwd).toHaveBeenCalledTimes(1)
+  })
+
+  it('discards an answer whose generation is unknown, but allows a later retry', async () => {
+    const tab = seed()
+    // "" is a transient answer (a `tmux display-message` timeout, or a
+    // generation that moved mid-read), not evidence the binding is stale.
+    vi.mocked(fetchSessionCwd).mockResolvedValueOnce(answer('/w/unknown', ''))
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    await flush()
+    expect(recordOf(tab.id)?.cwd).toBeUndefined()
+
+    vi.mocked(fetchSessionCwd).mockResolvedValue(answer('/w/settled'))
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    await vi.waitFor(() => expect(recordOf(tab.id)?.cwd).toBe('/w/settled'))
+    expect(fetchSessionCwd).toHaveBeenCalledTimes(2)
+  })
+
+  it('refuses to write when a generation-less pane gets a generation-less answer', async () => {
+    // Two unknowns are not a match: "" is the answer the daemon gives when its
+    // own two-sided sampling disagreed — the "I could not tell" signal — and an
+    // unknown generation never authorises a write (spec §4.6.2). The pane
+    // adopts a real generation from the next `sessions` payload
+    // (`reconcile.ts`), and the probe succeeds from there.
+    const tab = seed({ tmuxInstance: '' })
+    vi.mocked(fetchSessionCwd).mockResolvedValue(answer('/w/legacy', ''))
+    probeSessionCwd('h1', 'abc123', '')
+    await flush()
+    expect(fetchSessionCwd).toHaveBeenCalledTimes(1)
+    expect(recordOf(tab.id)?.cwd).toBeUndefined()
+  })
+
+  it('refuses to write when a known-generation pane gets a generation-less answer', async () => {
+    const tab = seed()
+    vi.mocked(fetchSessionCwd).mockResolvedValue(answer('/w/unknown', ''))
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    await flush()
+    expect(recordOf(tab.id)?.cwd).toBeUndefined()
+  })
+
+  it('does not ask while the host attach gate is closed', () => {
+    seed()
+    setGate('h1', false)
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    probeMissingCwds('h1')
+    expect(fetchSessionCwd).not.toHaveBeenCalled()
+  })
+
+  it('asks once the attach gate opens', async () => {
+    const tab = seed()
+    setGate('h1', false)
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    expect(fetchSessionCwd).not.toHaveBeenCalled()
+
+    setGate('h1', true)
+    vi.mocked(fetchSessionCwd).mockResolvedValue(answer('/w/gated'))
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    await vi.waitFor(() => expect(recordOf(tab.id)?.cwd).toBe('/w/gated'))
+  })
+
+  it('writes nothing when the host answers with an empty cwd', async () => {
+    const tab = seed()
+    vi.mocked(fetchSessionCwd).mockResolvedValue(answer(''))
+    probeSessionCwd('h1', 'abc123', '222:2000')
+    await flush()
+    expect(fetchSessionCwd).toHaveBeenCalledTimes(1)
+    expect(recordOf(tab.id)?.cwd).toBeUndefined()
+  })
+})
+
+describe('probeMissingCwds', () => {
+  it('probes every distinct binding on the host that has no cwd', async () => {
+    const a = seed()
+    const b = createTab({
+      kind: 'tmux-session', hostId: 'h1', sessionCode: 'def456',
+      mode: 'terminal', cachedName: 'other', tmuxInstance: '222:2000',
+    })
+    const foreign = createTab({
+      kind: 'tmux-session', hostId: 'h2', sessionCode: 'zzz999',
+      mode: 'terminal', cachedName: 'far', tmuxInstance: '222:2000',
+    })
+    useTabStore.setState({
+      tabs: { ...useTabStore.getState().tabs, [b.id]: b, [foreign.id]: foreign },
+      tabOrder: [a.id, b.id, foreign.id],
+    })
+    vi.mocked(fetchSessionCwd).mockImplementation(async (_h, code) => answer(`/w/${code}`))
+
+    probeMissingCwds('h1')
+
+    await vi.waitFor(() => expect(recordOf(b.id)?.cwd).toBe('/w/def456'))
+    expect(recordOf(a.id)?.cwd).toBe('/w/abc123')
+    expect(recordOf(foreign.id)?.cwd).toBeUndefined()
+    expect(fetchSessionCwd).toHaveBeenCalledTimes(2)
+  })
+})

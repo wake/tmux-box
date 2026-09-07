@@ -39,6 +39,13 @@ type FakeExecutor struct {
 	paneCommandCalls     map[string]int         // target → PaneCurrentCommand call count
 	activePaneMetadata   map[string]TmuxPaneMetadata
 	activePaneMetaErrors map[string]error
+	// activePaneMetaHook runs after each ActivePaneMetadata read, outside the
+	// lock. It is the seam for "the world moved while the daemon was reading
+	// metadata" — a tmux server restart being the case that matters.
+	activePaneMetaHook func(sessionName string)
+	// instance is the fake server's generation, the value SendKeysIfInstance
+	// compares against. Tests move it to model a restart.
+	instance             string
 	paneContents         map[string]string   // target → captured text
 	paneContentByRange   map[string][]string // target → per-line slice (for CapturePaneRange / CapturePaneTopLines)
 	paneChildren         map[string][]string // target → child command names
@@ -57,10 +64,10 @@ type FakeExecutor struct {
 	paneIDs              []string // global pane id list for HasPane
 	hasPaneErr           error    // simulated transient tmux error for HasPane
 	listCallCount        int      // how many times ListSessions was called
-	alive                bool   // whether tmux server is "alive"
-	HooksOutput          string // returned by ShowHooksGlobal
-	FailSendKeys         bool   // if true, SendKeysRaw returns an error
-	FailPasteText        bool   // if true, PasteText returns an error
+	alive                bool     // whether tmux server is "alive"
+	HooksOutput          string   // returned by ShowHooksGlobal
+	FailSendKeys         bool     // if true, SendKeysRaw returns an error
+	FailPasteText        bool     // if true, PasteText returns an error
 }
 
 func NewFakeExecutor() *FakeExecutor {
@@ -129,7 +136,48 @@ func (f *FakeExecutor) SetActivePaneMetadataError(sessionName string, err error)
 	delete(f.activePaneMetadata, sessionName)
 }
 
+// SetActivePaneMetadataHook installs a callback run after every
+// ActivePaneMetadata read, with the fake's lock released so the callback may
+// mutate it. On the real thing this read is several tmux subprocesses, which
+// is where a server restart has time to land.
+func (f *FakeExecutor) SetActivePaneMetadataHook(fn func(sessionName string)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.activePaneMetaHook = fn
+}
+
+// SetInstance sets the fake server's generation. Changing it models a tmux
+// server restart: the sessions stay (a new server mints the same ids), but
+// nothing that was authorised against the old generation may still act.
+func (f *FakeExecutor) SetInstance(v string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.instance = v
+}
+
+// Instance reads the fake server's generation. Assign it as a module's
+// `tmuxInstanceFn` so the daemon and the executor sample one world.
+func (f *FakeExecutor) Instance() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.instance
+}
+
 func (f *FakeExecutor) ActivePaneMetadata(sessionName string) (TmuxPaneMetadata, error) {
+	metadata, err := f.readActivePaneMetadata(sessionName)
+	if hook := f.metadataHook(); hook != nil {
+		hook(sessionName)
+	}
+	return metadata, err
+}
+
+func (f *FakeExecutor) metadataHook() func(string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.activePaneMetaHook
+}
+
+func (f *FakeExecutor) readActivePaneMetadata(sessionName string) (TmuxPaneMetadata, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err, ok := f.activePaneMetaErrors[sessionName]; ok {
@@ -269,6 +317,23 @@ func (f *FakeExecutor) SendKeysRaw(target string, keys ...string) error {
 		return fmt.Errorf("send-keys: simulated failure")
 	}
 	return nil
+}
+
+// SendKeysIfInstance models the real contract: the generation is compared by
+// the same "server" that would deliver the keys, so a refusal records nothing
+// at all. An empty expectation matches nothing — unknown authorises no
+// keystroke (spec §4.6.2).
+func (f *FakeExecutor) SendKeysIfInstance(sessionID, expectedInstance string, keys ...string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.FailSendKeys {
+		return false, fmt.Errorf("send-keys: simulated failure")
+	}
+	if expectedInstance == "" || expectedInstance != f.instance {
+		return false, nil
+	}
+	f.rawKeysCalls = append(f.rawKeysCalls, RawKeysCall{Target: sessionID + ":", Keys: keys})
+	return true, nil
 }
 
 func (f *FakeExecutor) PasteText(target, text string) error {
