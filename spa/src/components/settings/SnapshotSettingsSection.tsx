@@ -11,6 +11,7 @@ import {
 } from '@phosphor-icons/react'
 import { SettingItem } from './SettingItem'
 import { EditableCwdCell } from './EditableCwdCell'
+import { ResumeTemplateSettings } from './ResumeTemplateSettings'
 import { useI18nStore } from '../../stores/useI18nStore'
 import { readPrevSnapshot, readSnapshot, setSessionMetaCwd, writeSnapshot } from '../../lib/snapshot/storage'
 import { captureSnapshot } from '../../lib/snapshot/capture'
@@ -478,6 +479,10 @@ export function SnapshotSettingsSection() {
           {t('settings.snapshot.capture')}
         </button>
       </SettingItem>
+
+      {/* Spec §4.5: the templates that compose every command in the records
+          table below, edited next to the records they govern. */}
+      <ResumeTemplateSettings busy={busy} />
 
       <RebuildRecordsBlock
         rows={recordRows}

@@ -248,6 +248,16 @@ describe('SnapshotSettingsSection — per-tab rebuild records (T16)', () => {
     expect((screen.getByTestId('record-rebuild-all-btn') as HTMLButtonElement).disabled).toBe(true)
   })
 
+  // Task 16 (templates plan): the editor is mounted here — above the records —
+  // so the templates sit next to the commands they compose.
+  it('mounts the resume template editor above the records table', () => {
+    seedTabs(recordTab('t1', 'p1'))
+    render(<SnapshotSettingsSection />)
+    const editor = screen.getByTestId('resume-templates')
+    const records = screen.getByTestId('rebuild-records-block')
+    expect(editor.compareDocumentPosition(records) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
   it('a blocked batch reports who is holding the lock instead of failing silently', async () => {
     seedTabs(recordTab('t1', 'p1'))
     mockedRunBatch.mockResolvedValue({ status: 'blocked', blockedBy: 'rebuild:p9', groups: [], excluded: [] })

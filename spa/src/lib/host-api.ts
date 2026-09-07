@@ -242,6 +242,43 @@ export async function fetchSessionProvenance(
   }
 }
 
+/**
+ * The verdict `POST /api/shell/resolve-command` returns (spec §4.4).
+ *
+ * `unverifiable` is not a daemon verdict — it is what a 404 means: a daemon
+ * older than this endpoint. The user's template is already saved and the check
+ * is advice, so an old daemon must read as "could not check", never as an
+ * error the user has to debug (spec §8).
+ */
+export type ShellResolveVerdict =
+  | { status: 'resolved'; detail: string }
+  | { status: 'unresolved'; reason: string }
+  | { status: 'unverifiable' }
+
+/**
+ * `command` must be the COMMAND WORD, not a whole template: the daemon passes
+ * it to the shell as a single positional parameter, so `cld-yolo --resume {id}`
+ * would be looked up verbatim and answer `not_found`. Splitting is the caller's
+ * job (spec §4.4).
+ */
+export async function resolveShellCommand(
+  hostId: string,
+  command: string,
+  signal?: AbortSignal,
+): Promise<ShellResolveVerdict> {
+  const res = await hostFetch(hostId, '/api/shell/resolve-command', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command }),
+    signal,
+  })
+  if (res.status === 404) return { status: 'unverifiable' }
+  if (!res.ok) throw new Error(`resolveShellCommand failed: ${res.status}`)
+  const body = await res.json()
+  if (body.resolved) return { status: 'resolved', detail: String(body.detail ?? '') }
+  return { status: 'unresolved', reason: String(body.reason ?? '') }
+}
+
 export async function fetchSessionHome(
   hostId: string,
   sessionCode: string,
