@@ -763,61 +763,80 @@ changes the hash again, so it self-heals.
 - [ ] **Step 1: Write the failing test**
 
 ```go
-// internal/module/session/watcher_test.go
-func TestWatcher_TmuxRestartWithIdenticalList_Broadcasts(t *testing.T) {
-	m, fake, events := newWatcherTestModule(t)
-	fake.SetSessions([]FakeSession{{ID: "$0", Name: "dev", Cwd: "/w"}})
+// internal/module/session/watcher_test.go — real fixture API:
+//   newWatcherTestModule(t) → (*SessionModule, *tmux.FakeExecutor, *core.EventsBroadcaster)
+//   fake.AddSession(name, cwd) · mod.tickNormal() · events.AddTestSubscriber()
+// tickNormal broadcasts directly (watcher.go:84-88), bypassing the 500ms
+// debounce that broadcastSessions applies, so back-to-back ticks are fine.
 
-	m.tmuxInstanceFn = func() string { return "111:1000" }
-	m.tick()
-	first := events.Drain()
-	if len(first) != 1 {
-		t.Fatalf("expected initial broadcast, got %d", len(first))
+func drainSessions(t *testing.T, sub *core.TestSubscriber) []string {
+	t.Helper()
+	var out []string
+	timeout := time.After(100 * time.Millisecond)
+	for {
+		select {
+		case msg := <-sub.SendCh():
+			if len(msg) > 0 {
+				out = append(out, string(msg))
+			}
+		case <-timeout:
+			return out
+		}
 	}
+}
+
+func TestTickNormal_TmuxRestartWithIdenticalList_Broadcasts(t *testing.T) {
+	mod, fake, events := newWatcherTestModule(t)
+	sub := events.AddTestSubscriber()
+	defer events.RemoveTestSubscriber(sub)
+
+	fake.AddSession("dev", "/w")
+	mod.tmuxInstanceFn = func() string { return "111:1000" }
+	mod.tickNormal()
+	require.Len(t, drainSessions(t, sub), 1, "first tick must broadcast")
 
 	// Same session list, new tmux server.
-	m.tmuxInstanceFn = func() string { return "222:2000" }
-	m.tick()
-	second := events.Drain()
-	if len(second) != 1 {
-		t.Fatalf("restart with identical list must broadcast, got %d", len(second))
-	}
-	if !strings.Contains(second[0].Data, `"tmux_instance":"222:2000"`) {
-		t.Fatalf("broadcast missing new instance: %s", second[0].Data)
-	}
+	mod.tmuxInstanceFn = func() string { return "222:2000" }
+	mod.tickNormal()
+	got := drainSessions(t, sub)
+	require.Len(t, got, 1, "restart with an identical list must still broadcast")
+	assert.Contains(t, got[0], `"tmux_instance":"222:2000"`)
 }
 
-func TestWatcher_UnchangedInstanceAndList_DoesNotBroadcast(t *testing.T) {
-	m, fake, events := newWatcherTestModule(t)
-	fake.SetSessions([]FakeSession{{ID: "$0", Name: "dev", Cwd: "/w"}})
-	m.tmuxInstanceFn = func() string { return "111:1000" }
-	m.tick()
-	events.Drain()
-	m.tick()
-	if got := events.Drain(); len(got) != 0 {
-		t.Fatalf("unchanged state must not broadcast, got %d", len(got))
-	}
+func TestTickNormal_UnchangedInstanceAndList_DoesNotBroadcast(t *testing.T) {
+	mod, fake, events := newWatcherTestModule(t)
+	sub := events.AddTestSubscriber()
+	defer events.RemoveTestSubscriber(sub)
+
+	fake.AddSession("dev", "/w")
+	mod.tmuxInstanceFn = func() string { return "111:1000" }
+	mod.tickNormal()
+	drainSessions(t, sub)
+
+	mod.tickNormal()
+	assert.Empty(t, drainSessions(t, sub), "unchanged state must not broadcast")
 }
 
-func TestWatcher_InstanceProbeFailure_PropagatesEmpty(t *testing.T) {
-	m, fake, _ := newWatcherTestModule(t)
-	fake.SetSessions([]FakeSession{{ID: "$0", Name: "dev", Cwd: "/w"}})
-	m.tmuxInstanceFn = func() string { return "" }
-	m.tick()
-	got := m.listSessionsForTest()
-	if got[0].TmuxInstance != "" {
-		t.Fatalf("probe failure must propagate empty, got %q", got[0].TmuxInstance)
-	}
+func TestTickNormal_InstanceProbeFailure_PropagatesEmpty(t *testing.T) {
+	mod, fake, _ := newWatcherTestModule(t)
+	fake.AddSession("dev", "/w")
+	mod.tmuxInstanceFn = func() string { return "" }
+	mod.tickNormal()
+
+	sessions, err := mod.ListSessions()
+	require.NoError(t, err)
+	require.NotEmpty(t, sessions)
+	assert.Equal(t, "", sessions[0].TmuxInstance, "a probe failure must propagate empty, not a stale value")
 }
 ```
 
-Follow the existing fixture style in `watcher_test.go` for
-`newWatcherTestModule` / `events.Drain`; if those helpers do not exist under
-those names, use whatever the file already provides and keep the assertions.
+`core.TestSubscriber` is what `events.AddTestSubscriber()` already returns
+(see `TestBroadcastSessionsDebounce`, `watcher_test.go:106-135`); check its
+exact exported type name there and match it.
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `go test ./internal/module/session/ -run TestWatcher_Tmux -v`
+Run: `go test ./internal/module/session/ -run TestTickNormal_Tmux -v`
 Expected: FAIL — `tmuxInstanceFn` undefined, `TmuxInstance` undefined.
 
 - [ ] **Step 3: Implement**
@@ -842,7 +861,8 @@ Add the seam on the module (`module.go`), defaulting to the real reader:
 
 initialised to `config.GetTmuxInstance`. Add
 `func (m *SessionModule) currentTmuxInstance() string` returning the last read
-value, refreshed at the top of `tick()`. Populate `info.TmuxInstance` wherever
+value, refreshed at the top of `tickNormal()` (`watcher.go:60-90`). Populate
+`info.TmuxInstance` wherever
 `SessionInfo` is built in `service.go`, and change the hash:
 
 ```go
