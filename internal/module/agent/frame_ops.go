@@ -1960,9 +1960,10 @@ func (m *Module) canonicalizeDescendantsAfterUpsert(self store.Frame, broadcastT
 	return current, nil
 }
 
-// findProxyParent walks the sender's PPID ancestor chain (capped at
-// proxyMaxDepth) looking for an alive, identity-verified, cross-type frame in
-// the same pane. See plan §1.4 for full contract.
+// findProxyParent reports the cross-type ancestor frame a SessionStart should
+// be folded into, or nil when it should not fold. Contract unchanged; the
+// traversal now lives in classifyAncestor (see plan §1.4 for the full
+// contract, spec §4.3 for the verdict split).
 //
 // Returns (parent, nil) when a proxy candidate is found; (nil, nil) when the
 // walk should not proxy-attach (no ancestor has a frame / same-type hard
@@ -1970,67 +1971,12 @@ func (m *Module) canonicalizeDescendantsAfterUpsert(self store.Frame, broadcastT
 // or start_time read errors that make identity unverifiable). Non-nil error
 // is returned only when the frames store fails.
 func (m *Module) findProxyParent(req EventRequest) (*store.Frame, error) {
-	if m.frames == nil {
-		return nil, nil
-	}
-	info, err := readProcessInfoFn(req.SenderPID)
+	verdict, parent, err := m.classifyAncestor(req)
 	if err != nil {
-		return nil, nil
+		return nil, err
 	}
-	ppid := info.PPID
-	for depth := 0; depth < proxyMaxDepth; depth++ {
-		if ppid <= 1 {
-			return nil, nil
-		}
-		candidate, err := m.frames.FindByPanePID(req.TmuxPaneID, ppid)
-		if err != nil {
-			return nil, err
-		}
-		if candidate != nil {
-			// Liveness + identity gating applies to BOTH same-type and
-			// cross-type candidates (R3 fix). A stale same-type frame (PID
-			// reused, or process dead) is leftover data, not a real
-			// "re-session of an existing live sibling"; it must not
-			// hard-stop the walk or we'd strand a legitimate proxy attach
-			// to a live cross-type ancestor above it.
-			if isPidAliveFn(candidate.PID) {
-				actualStart, serr := processStartTimeFn(candidate.PID)
-				if serr != nil {
-					// v5 rule: identity unverifiable → abort walk (consistent
-					// with verify.go's "lookup error → don't infer" convention).
-					// Prevents mis-attaching to an outer cross-type ancestor
-					// when the immediate candidate's start_time is transiently
-					// unreadable.
-					return nil, nil
-				}
-				if actualStart == candidate.ProcessStartTime {
-					// Live + identity-verified candidate.
-					if candidate.AgentType == req.AgentType {
-						// Same-type live ancestor: pane already owns a live
-						// frame of our agent_type, so this SessionStart is a
-						// re-session / update of that frame — not a cross-type
-						// proxy. Hard-stop the walk here (don't continue to a
-						// cross-type grandparent that would be semantically wrong).
-						return nil, nil
-					}
-					// Cross-type live ancestor: this is our proxy parent.
-					return candidate, nil
-				}
-				// Identity mismatch (PID reused) → stale frame; continue walk
-				// to look for a real parent further up. Applies to both
-				// same-type and cross-type.
-			}
-			// Dead candidate: also continue walk; sweep will clear it.
-		}
-		// No frame at this PID — walk one more level up.
-		ancestorInfo, err := readProcessInfoFn(ppid)
-		if err != nil {
-			return nil, nil
-		}
-		if ancestorInfo.PPID == ppid {
-			return nil, nil
-		}
-		ppid = ancestorInfo.PPID
+	if verdict == VerdictProxyParent {
+		return parent, nil
 	}
 	return nil, nil
 }
