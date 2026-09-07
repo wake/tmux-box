@@ -559,6 +559,12 @@ func (m *Module) handleEvent(w http.ResponseWriter, r *http.Request) {
 
 	// Build and broadcast normalized event
 	normalized := buildProjectionNormalized(projection, req.AgentType, req.PurdexName, broadcastTs, result)
+	// Rebuild-record envelope (spec §4.3.1). applyFrameEvent grants it only
+	// when the mutation outcome confirmed the sender kept its own top-level
+	// frame; nil means no envelope. The outer normalized.AgentType keeps its
+	// existing meaning (the session projection winner) — the two identities
+	// coexist and never mix.
+	attachProvenance(&normalized, frameMeta)
 	m.mu.Lock()
 	syncProjectionState(m.currentStatus, m.subagents, req.TmuxSession, projection)
 	m.mu.Unlock()

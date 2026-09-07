@@ -70,6 +70,13 @@ type FrameTraceMeta struct {
 	// distinguish "rebuild confirmed hook owner" vs "rebuild only saw a
 	// different agent in the same pane (e.g. cc parent of a codex hook)".
 	MatchedAgentType string
+
+	// Provenance is non-nil only when this event was a SessionStart that
+	// ended up owning its own top-level frame — i.e. it survived both the
+	// pre-Upsert proxy fast-path and the post-Upsert reconcile. Every other
+	// return path leaves it nil by zero value, which is the fail-safe: no
+	// field set, no envelope emitted. See spec §4.3.1.
+	Provenance *Provenance
 }
 
 func (m *Module) applyFrameEvent(req EventRequest, result agentpkg.DeriveResult, broadcastTs int64) (*SessionProjection, FrameTraceMeta, error) {
@@ -539,12 +546,27 @@ func (m *Module) applyFrameEvent(req EventRequest, result agentpkg.DeriveResult,
 	// creating a standalone frame. Observed in practice for codex spawned from
 	// inside a cc session via codex-companion: cc owns the UX, codex should
 	// show as a dot on cc's tab, not as a separate lit-up frame.
-	if lifecycle == agentpkg.LifecycleSessionStart && frame == nil {
-		parent, perr := m.findProxyParent(req)
-		if perr != nil {
-			return nil, FrameTraceMeta{}, perr
+	//
+	// The walk itself runs once per SessionStart, here: classifyAncestor
+	// reports both the proxy candidate this fast-path needs and the ownership
+	// verdict the provenance gate at the created_frame/updated_frame return
+	// needs (spec §4.3). The verdict stays VerdictIndeterminate for every
+	// other lifecycle — VerdictRoot is the zero value of the type, so the
+	// SessionStart clause on the gate below is load-bearing.
+	verdict := VerdictIndeterminate
+	var proxyParent *store.Frame
+	if lifecycle == agentpkg.LifecycleSessionStart {
+		v, candidate, cerr := m.classifyAncestor(req)
+		if cerr != nil {
+			return nil, FrameTraceMeta{}, cerr
 		}
-		if parent != nil {
+		verdict = v
+		if v == VerdictProxyParent {
+			proxyParent = candidate
+		}
+	}
+	if lifecycle == agentpkg.LifecycleSessionStart && frame == nil {
+		if parent := proxyParent; parent != nil {
 			parentBefore := summarizeFrame(parent)
 			ref := agentpkg.SubagentRef{
 				ID:              fmt.Sprintf("proxy:%s:%d:%s", req.AgentType, req.SenderPID, req.SenderStartTime),
@@ -873,6 +895,19 @@ func (m *Module) applyFrameEvent(req EventRequest, result agentpkg.DeriveResult,
 	if frame != nil {
 		decision = "updated_frame"
 	}
+	// Provenance gate (spec §4.3.1). This is the ONLY site that grants an
+	// envelope, and it sits after both proxy attempts: the pre-Upsert
+	// fast-path and the post-Upsert reconcileCreatedFrameAsProxy both return
+	// earlier, so a canonicalization silently revokes a pre-walk VerdictRoot
+	// without needing an explicit flag. `updated_frame` qualifies as well as
+	// `created_frame`: a SessionStart landing on an existing frame (a /clear)
+	// is how a new session id replaces the recorded one.
+	var prov *Provenance
+	if lifecycle == agentpkg.LifecycleSessionStart && !req.SenderUncertain &&
+		verdict == VerdictRoot && stored.ParentFrameID == "" {
+		p := buildProvenance(req, result, m.sessionTmuxInstance())
+		prov = &p
+	}
 	return projection, FrameTraceMeta{
 		FrameID:          stored.FrameID,
 		ParentFrameID:    stored.ParentFrameID,
@@ -881,6 +916,7 @@ func (m *Module) applyFrameEvent(req EventRequest, result agentpkg.DeriveResult,
 		Before:           before,
 		After:            summarizeFrame(&stored),
 		MatchedAgentType: rebuiltAgentType,
+		Provenance:       prov,
 	}, err
 }
 

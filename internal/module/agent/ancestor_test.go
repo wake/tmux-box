@@ -73,6 +73,34 @@ func withProcessReadError(t *testing.T, pids ...int) {
 	t.Cleanup(func() { readProcessInfoFn = orig })
 }
 
+// withProcessTreeSequence makes readProcessInfoFn report a different PPID for
+// `pid` on each successive call, so a test can describe an ancestor that only
+// becomes visible partway through applyFrameEvent — the pre-walk misses, the
+// post-Upsert reconcile hits. Calls past the end of the sequence keep
+// reporting the last entry. Every other PID reports PPID 1, and only calls for
+// `pid` advance the sequence, mirroring the hand-rolled counter in
+// TestPhase35_IT3_PreWalkMiss_PostReconcileHit.
+func withProcessTreeSequence(t *testing.T, pid int, ppids []int) {
+	t.Helper()
+	if len(ppids) == 0 {
+		t.Fatalf("withProcessTreeSequence: empty ppid sequence")
+	}
+	orig := readProcessInfoFn
+	calls := 0
+	readProcessInfoFn = func(queried int) (agentpkg.ProcessInfo, error) {
+		if queried != pid {
+			return agentpkg.ProcessInfo{PID: queried, PPID: 1}, nil
+		}
+		idx := calls
+		if idx >= len(ppids) {
+			idx = len(ppids) - 1
+		}
+		calls++
+		return agentpkg.ProcessInfo{PID: pid, PPID: ppids[idx]}, nil
+	}
+	t.Cleanup(func() { readProcessInfoFn = orig })
+}
+
 // ---------------------------------------------------------------------------
 // classifyAncestor — the four verdicts (spec §4.3)
 // ---------------------------------------------------------------------------
