@@ -53,6 +53,28 @@ type procReader func(pid int) (agentpkg.ProcessInfo, error)
 type ancestryResult struct {
 	Verdict AncestorVerdict
 	Frame   *store.Frame
+	// SawPanePID reports that opts.PanePID was seen on the chain. It is
+	// purely OBSERVATIONAL: it never terminates the walk and never licenses a
+	// shortcut. Seeing the pane proves membership; it proves nothing about
+	// whether a framed ancestor sits further up, so on its own it can never
+	// justify keeping a frame — only `Verdict == VerdictRoot && SawPanePID`
+	// can. It is false on every walk that passed CheckPane: false.
+	SawPanePID bool
+}
+
+// ancestryOpts carries the optional pane-membership question. The walk answers
+// it only when CheckPane is true; PanePID is never consulted otherwise.
+//
+// The opt-in is a separate boolean rather than a `PanePID == 0` sentinel on
+// purpose. A PPID of 0 is representable and the reader does not exclude it
+// (process_info.go:41-50), and the pane comparison runs at the top of the
+// iteration — ahead of the `ppid <= 1` terminator — so a 0 arriving on the
+// chain would have compared equal to a "disabled" sentinel and spuriously
+// marked a walk as inside the pane. classifyAncestor passes CheckPane: false
+// and is provably unaffected by any of this.
+type ancestryOpts struct {
+	PanePID   int
+	CheckPane bool
 }
 
 // walkPaneAncestry walks startPID's PPID chain, capped at proxyMaxDepth,
@@ -65,15 +87,35 @@ type ancestryResult struct {
 // are responsible for reading it and handing over its PPID, which is what
 // classifyAncestor does. Non-nil error is returned only when the frames store
 // fails.
-func (m *Module) walkPaneAncestry(paneID string, startPID int, agentType string, read procReader) (ancestryResult, error) {
+//
+// opts adds the pane-membership question resolvePaneOwners needs, and nothing
+// else: with opts.CheckPane false — which is what classifyAncestor passes — the
+// walk reads the same PIDs in the same order as before the option existed, and
+// SawPanePID stays false.
+func (m *Module) walkPaneAncestry(paneID string, startPID int, agentType string, read procReader, opts ancestryOpts) (ancestryResult, error) {
+	sawPanePID := false
+	// result closes over sawPanePID so that every exit below — including the
+	// early ones — reports what the walk had already observed.
+	result := func(verdict AncestorVerdict, frame *store.Frame) ancestryResult {
+		return ancestryResult{Verdict: verdict, Frame: frame, SawPanePID: sawPanePID}
+	}
 	ppid := startPID
 	for depth := 0; depth < proxyMaxDepth; depth++ {
+		// The pane comparison happens HERE — at the top of the iteration,
+		// against the current ppid, before the candidate lookup and before
+		// every early return. Checking it after the ancestorInfo read instead
+		// would miss the commonest topology there is: the first parent IS the
+		// pane's shell (measured depth 1), on an iteration that may well take
+		// an early exit of its own.
+		if opts.CheckPane && ppid == opts.PanePID {
+			sawPanePID = true
+		}
 		if ppid <= 1 {
-			return ancestryResult{Verdict: VerdictRoot}, nil
+			return result(VerdictRoot, nil), nil
 		}
 		candidate, err := m.frames.FindByPanePID(paneID, ppid)
 		if err != nil {
-			return ancestryResult{Verdict: VerdictIndeterminate}, err
+			return result(VerdictIndeterminate, nil), err
 		}
 		if candidate != nil {
 			// Liveness + identity gating applies to BOTH same-type and
@@ -90,7 +132,7 @@ func (m *Module) walkPaneAncestry(paneID string, startPID int, agentType string,
 					// Prevents mis-attaching to an outer cross-type ancestor
 					// when the immediate candidate's start_time is transiently
 					// unreadable.
-					return ancestryResult{Verdict: VerdictIndeterminate}, nil
+					return result(VerdictIndeterminate, nil), nil
 				}
 				if actualStart == candidate.ProcessStartTime {
 					// Live + identity-verified candidate.
@@ -100,10 +142,10 @@ func (m *Module) walkPaneAncestry(paneID string, startPID int, agentType string,
 						// re-session / update of that frame — not a cross-type
 						// proxy. Hard-stop the walk here (don't continue to a
 						// cross-type grandparent that would be semantically wrong).
-						return ancestryResult{Verdict: VerdictSameTypeAbove, Frame: candidate}, nil
+						return result(VerdictSameTypeAbove, candidate), nil
 					}
 					// Cross-type live ancestor: this is our proxy parent.
-					return ancestryResult{Verdict: VerdictProxyParent, Frame: candidate}, nil
+					return result(VerdictProxyParent, candidate), nil
 				}
 				// Identity mismatch (PID reused) → stale frame; continue walk
 				// to look for a real parent further up. Applies to both
@@ -114,16 +156,16 @@ func (m *Module) walkPaneAncestry(paneID string, startPID int, agentType string,
 		// No frame at this PID — walk one more level up.
 		ancestorInfo, nerr := read(ppid)
 		if nerr != nil {
-			return ancestryResult{Verdict: VerdictIndeterminate}, nil
+			return result(VerdictIndeterminate, nil), nil
 		}
 		// Self-parent guard: without it the loop would re-query the same PID
 		// until the depth cap.
 		if ancestorInfo.PPID == ppid {
-			return ancestryResult{Verdict: VerdictIndeterminate}, nil
+			return result(VerdictIndeterminate, nil), nil
 		}
 		ppid = ancestorInfo.PPID
 	}
-	return ancestryResult{Verdict: VerdictIndeterminate}, nil
+	return result(VerdictIndeterminate, nil), nil
 }
 
 // classifyAncestor walks the sender's PPID chain (capped at proxyMaxDepth)
@@ -143,6 +185,6 @@ func (m *Module) classifyAncestor(req EventRequest) (AncestorVerdict, *store.Fra
 	if err != nil {
 		return VerdictIndeterminate, nil, nil
 	}
-	res, err := m.walkPaneAncestry(req.TmuxPaneID, info.PPID, req.AgentType, readProcessInfoFn)
+	res, err := m.walkPaneAncestry(req.TmuxPaneID, info.PPID, req.AgentType, readProcessInfoFn, ancestryOpts{})
 	return res.Verdict, res.Frame, err
 }

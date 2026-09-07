@@ -241,7 +241,7 @@ func TestWalkPaneAncestry_NoFramedAncestor_Root(t *testing.T) {
 	// 999 has no frame and no tree entry, so the next hop reports PPID 1.
 	withProcessTree(t, map[int]int{200: 999})
 
-	res, err := m.walkPaneAncestry("%5", 999, "codex", readProcessInfoFn)
+	res, err := m.walkPaneAncestry("%5", 999, "codex", readProcessInfoFn, ancestryOpts{})
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -259,7 +259,7 @@ func TestWalkPaneAncestry_LiveSameTypeAncestor_SameTypeAbove(t *testing.T) {
 	withProcessTree(t, map[int]int{200: 100})
 	withLivePids(t, map[int]string{100: "t100"})
 
-	res, err := m.walkPaneAncestry("%5", 100, "cc", readProcessInfoFn)
+	res, err := m.walkPaneAncestry("%5", 100, "cc", readProcessInfoFn, ancestryOpts{})
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -277,7 +277,7 @@ func TestWalkPaneAncestry_LiveCrossTypeAncestor_ProxyParent(t *testing.T) {
 	withProcessTree(t, map[int]int{200: 100})
 	withLivePids(t, map[int]string{100: "t100"})
 
-	res, err := m.walkPaneAncestry("%5", 100, "codex", readProcessInfoFn)
+	res, err := m.walkPaneAncestry("%5", 100, "codex", readProcessInfoFn, ancestryOpts{})
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -299,7 +299,7 @@ func TestWalkPaneAncestry_StaleSameTypeBelowLiveCrossType_ProxyParent(t *testing
 	withProcessTree(t, map[int]int{200: 150, 150: 100})
 	withLivePids(t, map[int]string{100: "t100"}) // 150 absent = dead
 
-	res, err := m.walkPaneAncestry("%5", 150, "codex", readProcessInfoFn)
+	res, err := m.walkPaneAncestry("%5", 150, "codex", readProcessInfoFn, ancestryOpts{})
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -312,7 +312,7 @@ func TestWalkPaneAncestry_SelfParent_Indeterminate(t *testing.T) {
 	m := newProxyTestModule(t)
 	withProcessTree(t, map[int]int{200: 300, 300: 300})
 
-	res, err := m.walkPaneAncestry("%5", 300, "codex", readProcessInfoFn)
+	res, err := m.walkPaneAncestry("%5", 300, "codex", readProcessInfoFn, ancestryOpts{})
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -334,7 +334,7 @@ func TestWalkPaneAncestry_DepthCapExceeded_Indeterminate(t *testing.T) {
 	}
 	withProcessTree(t, chain)
 
-	res, err := m.walkPaneAncestry("%5", 201, "codex", readProcessInfoFn)
+	res, err := m.walkPaneAncestry("%5", 201, "codex", readProcessInfoFn, ancestryOpts{})
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -347,7 +347,7 @@ func TestWalkPaneAncestry_ProcessReadError_Indeterminate(t *testing.T) {
 	m := newProxyTestModule(t)
 	withProcessReadError(t, 300)
 
-	res, err := m.walkPaneAncestry("%5", 300, "codex", readProcessInfoFn)
+	res, err := m.walkPaneAncestry("%5", 300, "codex", readProcessInfoFn, ancestryOpts{})
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -374,7 +374,7 @@ func TestWalkPaneAncestry_UsesTheSuppliedReader(t *testing.T) {
 		return agentpkg.ProcessInfo{PID: pid, PPID: 1}, nil
 	}
 
-	res, err := m.walkPaneAncestry("%5", 300, "codex", supplied)
+	res, err := m.walkPaneAncestry("%5", 300, "codex", supplied, ancestryOpts{})
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -383,5 +383,170 @@ func TestWalkPaneAncestry_UsesTheSuppliedReader(t *testing.T) {
 	}
 	if len(seen) != 1 || seen[0] != 300 {
 		t.Fatalf("supplied reader saw %v, want exactly [300]", seen)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// walkPaneAncestry — the pane-membership output (Task 6)
+//
+// Task 6 adds one observational bit, SawPanePID, and an explicit opt-in for
+// it. classifyAncestor opts out, and these tests are what prove the opt-out is
+// real: the adapter's reads must be unchanged in count and order, and a PPID
+// of 0 on the chain must not be mistaken for "the pane check is disabled".
+// ---------------------------------------------------------------------------
+
+// TestClassifyAncestor_ReadsUnchangedInCountAndOrder freezes the hook path's
+// process-read cost and sequence across Task 6's change to the walker. The
+// walk is shared with resolvePaneOwners now, so a pane check accidentally
+// added to every walk — or a root check moved outside the loop — would show up
+// here as an extra or missing read.
+//
+// Sender 200 → 300 → 400 → 1, no frames anywhere: classifyAncestor reads the
+// sender itself, then one read per level it steps up. PID 1 is never read
+// because the `ppid <= 1` exit is tested at the top of the iteration, before
+// the read.
+func TestClassifyAncestor_ReadsUnchangedInCountAndOrder(t *testing.T) {
+	m := newProxyTestModule(t)
+	withProcessTree(t, map[int]int{200: 300, 300: 400, 400: 1})
+
+	var seen []int
+	orig := readProcessInfoFn
+	readProcessInfoFn = func(pid int) (agentpkg.ProcessInfo, error) {
+		seen = append(seen, pid)
+		return orig(pid)
+	}
+	t.Cleanup(func() { readProcessInfoFn = orig })
+
+	req := EventRequest{TmuxPaneID: "%5", AgentType: "codex", SenderPID: 200, SenderStartTime: "t200"}
+	verdict, parent, err := m.classifyAncestor(req)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if verdict != VerdictRoot || parent != nil {
+		t.Fatalf("verdict = %v parent = %v, want Root/nil", verdict, parent)
+	}
+	want := []int{200, 300, 400}
+	if len(seen) != len(want) {
+		t.Fatalf("read %v (%d reads), want %v (%d reads)", seen, len(seen), want, len(want))
+	}
+	for i := range want {
+		if seen[i] != want[i] {
+			t.Fatalf("read sequence = %v, want %v", seen, want)
+		}
+	}
+}
+
+// TestWalkPaneAncestry_CheckPaneDisabled_ZeroPPIDIsNotAPaneMatch pins why the
+// opt-in is a separate boolean rather than `panePID == 0`.
+//
+// A PPID of 0 is representable and the process reader does not exclude it
+// (process_info.go:41-50). The loop only treats `ppid <= 1` as a *terminator*,
+// and the pane check runs at the top of the iteration — before that exit — so
+// with a `0` sentinel a chain carrying a 0 would have compared equal and
+// spuriously set SawPanePID on a walk that never asked for the pane check at
+// all. With CheckPane false the field must stay false and the verdict must be
+// exactly what it is today.
+func TestWalkPaneAncestry_CheckPaneDisabled_ZeroPPIDIsNotAPaneMatch(t *testing.T) {
+	m := newProxyTestModule(t)
+	withProcessTree(t, map[int]int{200: 0})
+
+	res, err := m.walkPaneAncestry("%5", 0, "codex", readProcessInfoFn, ancestryOpts{})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.Verdict != VerdictRoot {
+		t.Fatalf("verdict = %v, want VerdictRoot (unchanged from before Task 6)", res.Verdict)
+	}
+	if res.SawPanePID {
+		t.Fatal("SawPanePID set on a walk that opted out of the pane check")
+	}
+
+	// The same chain reached through classifyAncestor, which always opts out.
+	req := EventRequest{TmuxPaneID: "%5", AgentType: "codex", SenderPID: 200, SenderStartTime: "t200"}
+	verdict, parent, err := m.classifyAncestor(req)
+	if err != nil {
+		t.Fatalf("classifyAncestor err = %v", err)
+	}
+	if verdict != VerdictRoot || parent != nil {
+		t.Fatalf("classifyAncestor verdict = %v parent = %v, want Root/nil", verdict, parent)
+	}
+}
+
+// TestWalkPaneAncestry_SawPanePID_SetAtEntryBeforeEarlyReturn covers the
+// second of the two places SawPanePID is written: the top of every iteration,
+// against the current ppid, before the candidate lookup and before any early
+// return.
+//
+// Checking only after reading ancestorInfo would miss the commonest topology
+// there is — the first parent IS the pane shell (measured depth 1) — whenever
+// that same iteration also takes an early exit. Both early exits are covered.
+func TestWalkPaneAncestry_SawPanePID_SetAtEntryBeforeEarlyReturn(t *testing.T) {
+	t.Run("candidate_frame_hit_on_the_same_iteration", func(t *testing.T) {
+		m := newProxyTestModule(t)
+		// The pane shell at 200 also carries a live, identity-verified frame,
+		// so the iteration that first sees panePID returns immediately.
+		seedFrame(t, m, "%5", "cc", 200, "t200", 10)
+		withProcessTree(t, map[int]int{100: 200, 200: 300})
+		withLivePids(t, map[int]string{200: "t200"})
+
+		res, err := m.walkPaneAncestry("%5", 200, "cc", readProcessInfoFn, ancestryOpts{PanePID: 200, CheckPane: true})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		if res.Verdict != VerdictSameTypeAbove {
+			t.Fatalf("verdict = %v, want VerdictSameTypeAbove", res.Verdict)
+		}
+		if !res.SawPanePID {
+			t.Fatal("SawPanePID must be set at the iteration entry, before the candidate lookup")
+		}
+	})
+
+	t.Run("process_read_failure_on_the_same_iteration", func(t *testing.T) {
+		m := newProxyTestModule(t)
+		withProcessReadError(t, 200)
+
+		res, err := m.walkPaneAncestry("%5", 200, "codex", readProcessInfoFn, ancestryOpts{PanePID: 200, CheckPane: true})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		if res.Verdict != VerdictIndeterminate {
+			t.Fatalf("verdict = %v, want VerdictIndeterminate", res.Verdict)
+		}
+		if !res.SawPanePID {
+			t.Fatal("SawPanePID must be set before the read that failed")
+		}
+	})
+}
+
+// TestWalkPaneAncestry_AncestorHit_StopsBeforeReadingAbove makes "the walk
+// stopped" observable rather than merely plausible: when a live,
+// identity-verified frame is found on the chain the walker returns from the
+// candidate lookup, so nothing above that ancestor is ever read.
+//
+// This is asserted at the walker rather than through resolvePaneOwners on
+// purpose. The ancestor frame is itself a surviving frame of the same pane, so
+// the query walks it too and reads exactly the PIDs above it — which would
+// mask the very thing being asserted.
+func TestWalkPaneAncestry_AncestorHit_StopsBeforeReadingAbove(t *testing.T) {
+	m := newProxyTestModule(t)
+	seedFrame(t, m, "%5", "cc", 200, "t200", 10)
+	withProcessTree(t, map[int]int{100: 200, 200: 300, 300: 400, 400: 1})
+	withLivePids(t, map[int]string{200: "t200"})
+
+	var seen []int
+	recording := func(pid int) (agentpkg.ProcessInfo, error) {
+		seen = append(seen, pid)
+		return readProcessInfoFn(pid)
+	}
+
+	res, err := m.walkPaneAncestry("%5", 200, "cc", recording, ancestryOpts{PanePID: 900, CheckPane: true})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.Verdict != VerdictSameTypeAbove {
+		t.Fatalf("verdict = %v, want VerdictSameTypeAbove", res.Verdict)
+	}
+	if len(seen) != 0 {
+		t.Fatalf("reader was called for %v; the walk must stop at the ancestor frame without reading above it", seen)
 	}
 }
