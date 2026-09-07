@@ -51,7 +51,10 @@ hardcoded resume commands with templates, a per-pane override and a shell probe.
   code, no reader.
 - **Never widen an existing behaviour silently.** Task 5 is a pure refactor: if
   any existing test in `internal/module/agent` needs editing to pass, **stop and
-  report** instead of editing it. The same rule applies to
+  report** instead of editing it. The rule protects tests that predate this
+  plan. A test written by an *earlier task of this same plan* whose invariant a
+  later task deliberately changes (Task 4 → 4b) is a normal edit — say so in the
+  commit message. The same rule applies to
   `internal/module/agent/provenance_test.go` for the whole of Phase 1–2 — this
   work adds no envelope, so every assertion there, including
   `TestProvenance_NonSessionStart_NoEnvelope`, must stay green untouched.
@@ -424,6 +427,32 @@ child if it is created again.
 
 ---
 
+### Task 4c: Keep the Go mirror of the plugin honest
+
+**Files:**
+- Modify: `internal/agent/opencode/plugin_template_contract_test.go`
+  (`pluginSimState.simulateChatMessage`, ~line 203)
+
+**Context.** That function is a hand-written Go mirror of the JS `chat.message`
+handler — its own comment says "Mirror of the JS template change" — and the
+contract test drives it as if it were the plugin. After Task 4b it no longer
+mirrors: it still returns `session_id` for a child session, so the contract test
+would keep passing if the JS gate were deleted. The Bun runtime test is the real
+authority, but a mirror that is knowingly wrong about a correctness-critical
+gate is worse than no mirror.
+
+Model the gate: when the session id is in the simulated `subagentSessions` map,
+omit `session_id`. `cwd` was never modelled here and stays unmodelled — that is
+a pre-existing approximation, not something to fix in passing.
+
+- [ ] **Step 1: Write the failing test** — a simulated child `chat.message`
+  yields no `session_id`; a parent's still does.
+- [ ] **Step 2: Run — fail** · [ ] **Step 3: Implement** · [ ] **Step 4: Run — pass**
+- [ ] **Step 5:** `go test ./...`
+- [ ] **Step 6: Commit** — `test(opencode): mirror the child-prompt gate in the contract sim`
+
+---
+
 # Phase 2 — The ownership query (daemon)
 
 ### Task 5: Extract the traversal from `classifyAncestor` (pure refactor)
@@ -438,8 +467,8 @@ child if it is created again.
 // Task 6 passes a request-scoped memoizing wrapper around it.
 type procReader func(pid int) (agentpkg.ProcessInfo, error)
 
-// ancestryResult is what one walk reports. Task 5 fills the first three
-// fields; Task 6 adds SawPanePID and extends this struct, not the signature.
+// ancestryResult is what one walk reports. Task 5 fills these two fields;
+// Task 6 adds SawPanePID by extending this struct, not the signature.
 type ancestryResult struct {
     Verdict AncestorVerdict
     Frame   *store.Frame   // set for SameTypeAbove and ProxyParent only
@@ -473,8 +502,9 @@ memoizing the hook path would break that test's premise while leaving it green
 for the wrong reason.
 
 Note the loop **starts from the PPID**, not from the PID — the existing code
-reads the sender's own info first and then walks from `info.PPID`
-(`ancestor.go:51-56`). Preserve that exactly, along with the depth cap, the
+reads the sender's own info first and then walks from `info.PPID` (around
+`ancestor.go:49-56`; find it by the `ppid := info.PPID` assignment, not the
+line). Preserve that exactly, along with the depth cap, the
 `ppid <= 1` → `VerdictRoot` exit, the self-parent guard, the stale-frame
 continue and the identity-unverifiable abort. Do not change behaviour, only
 where it lives.
