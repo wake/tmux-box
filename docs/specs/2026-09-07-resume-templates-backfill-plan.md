@@ -67,7 +67,16 @@ hardcoded resume commands with templates, a per-pane override and a shell probe.
   in cc/opencode, `deriveWithRaw` in codex). `internal/module/agent`,
   `internal/module/session` and `internal/store` tests are *internal* and may
   call unexported symbols directly. The opencode plugin-template tests are also
-  internal (`package opencode`).
+  internal (`package opencode`). **`internal/agent` itself is both** —
+  `lifecycle_test.go` is `package agent`, `provider_test.go` is
+  `package agent_test`. Anything that must import cc/codex/opencode has to live
+  in the external file, since those packages import `agent` (Task 2 hit this).
+- **`gofmt -l` is not clean at baseline** in `internal/agent/`
+  (`cc/readiness_test.go`, `cc/statusline.go`,
+  `codex/probe_intent_screen_change_test.go`, `opencode/events_test.go`,
+  `opencode/status.go` were already unformatted at `f37792e`). Format your own
+  files; do **not** add a repo-wide `gofmt` gate, and do not reformat those
+  five as a side effect of another task.
 - **The two identity columns never travel inside a `Frame` round-trip write.**
   Spec §5.2 has the per-method table; Task 1 implements it and Task 3 depends on
   it. Any task that adds a column to `UpsertIfUnchanged`, `UpdateHookPath`,
@@ -155,9 +164,16 @@ arguments are empty it must be a no-op that runs no SQL. Returns `sql.ErrNoRows`
 when the frame does not exist (a frame deleted between the mutation and this
 call is normal, and Task 3 must tolerate it).
 
-Migration: additive `ALTER TABLE … ADD COLUMN`, guarded by a column-existence
-check, next to the existing `clearStaleSubagentsJSON` step (`frames.go:62`).
-Existing rows get `''`, which is correct — the frame has not told us yet.
+Migration, both halves: add the two columns to the `CREATE TABLE IF NOT EXISTS`
+body **and** an additive `ALTER TABLE … ADD COLUMN` guarded by a
+column-existence check, next to the existing `clearStaleSubagentsJSON` step
+(`frames.go:62`). A fresh database then gets them from the start and the `ALTER`
+fires only for a pre-existing table. Existing rows get `''`, which is correct —
+the frame has not told us yet.
+
+`UpdateSessionIdentity` with two empty arguments returns `nil`, not
+`sql.ErrNoRows`: it ran no statement, so it has nothing to report — including
+about whether the frame exists.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -211,8 +227,14 @@ shape has somewhere to differ, not to justify three copies today.
 **Decode into a typed struct, not a map.** cc `PostToolUse` payloads embed whole
 tool inputs; `encoding/json` skips an unknown field's value without
 materialising it, whereas `map[string]json.RawMessage` would *copy* every value.
-Malformed JSON returns `("", "")` and never an error — a hook payload we cannot
-parse is not an error condition for this feature.
+**Any decode failure returns `("", "")`** — malformed JSON, and also a
+*well-formed* payload whose `session_id` is not a string. `encoding/json` would
+happily hand back the good `cwd` alongside an `UnmarshalTypeError` for the bad
+`session_id`, and this deliberately does not: a payload whose identity field is
+the wrong type is not one we understand, and recording half of it would put a
+directory on a frame whose session we could not read. It is the same
+"no evidence, no action" rule the rest of the feature runs on. Never returns an
+error — an unparseable hook payload is not an error condition here.
 
 - [ ] **Step 1: Write the failing tests**
   - both fields present; only `session_id`; only `cwd`; neither; malformed JSON;
