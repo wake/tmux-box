@@ -96,6 +96,21 @@ export function renameSession(hostId: string, code: string, name: string) {
 
 /* ─── Session API ─── */
 
+/**
+ * An HTTP error that keeps its status code. The rebuild engine retries a
+ * duplicate session name ONLY on 409 — the status the daemon returns
+ * specifically for that case (`internal/module/session/handler.go:101-104`) —
+ * and must never retry a 400 (validation) or 500 (create failure).
+ */
+export class HostApiError extends Error {
+  status: number
+  constructor(status: number, statusText: string) {
+    super(`${status} ${statusText}`)
+    this.name = 'HostApiError'
+    this.status = status
+  }
+}
+
 export async function listSessions(hostId: string): Promise<Session[]> {
   const res = await hostFetch(hostId, '/api/sessions')
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
@@ -110,7 +125,9 @@ export async function createSession(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, cwd, mode }),
   })
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  // Typed so a 409 (duplicate name) stays distinguishable from 400/500; the
+  // message is unchanged, so existing callers that only render it are unaffected.
+  if (!res.ok) throw new HostApiError(res.status, res.statusText)
   return res.json()
 }
 
