@@ -1,8 +1,15 @@
 # Spec — Per-tab session provenance & one-click rebuild ("Tab Rebuild")
 
-Status: draft v2 (revised after codex spec review R1 `task-mtqxjans-cf1ai3`)
+Status: draft v3 (revised after codex spec reviews R1 `task-mtqxjans-cf1ai3`
+and R2 `task-mtqxyow8-285jje`)
 Date: 2026-09-07
 Branch: `worktree-tab-rebuild`
+
+> **v3 reverses v2's central mechanism.** R1 pushed ownership off the frame
+> layer and onto process ancestry; R2 showed that trade breaks the common case
+> to fix a rare one (§3.3.1). v3 returns ownership to the frame layer with one
+> added distinction, and moves every remaining ambiguity onto data the daemon
+> already knows rather than data the SPA has to infer.
 
 ## 1. Problem
 
@@ -119,35 +126,52 @@ constant; it is stale and gets its own issue.
 | Codex | `codex resume <SESSION_ID>` | `codex resume --last` (the picker is cwd-filtered by default; `--all` disables cwd filtering) |
 | OpenCode | `opencode -s <session-id>` | `opencode -c` |
 
-### 3.3 Nesting: what the frame layer does and does not protect
+### 3.3 Nesting: measured exposure
 
-`frame_ops.go:534-542` — a `SessionStart` from a sender with no frame of its
-own, whose PPID walk finds a live **cross-type** frame in the same pane, is
-collapsed into a proxy ref on that parent. The comment names the case:
-*"codex spawned from inside a cc session via codex-companion: cc owns the UX,
-codex should show as a dot on cc's tab, not as a separate lit-up frame."*
-Production data confirms it — an `agent_frames` row for pane `%1`
-(`agent_type: cc`) carries
-`{"id":"proxy:codex:67658:…","is_proxy":true,"source_turn_id":"01a07a36-…"}`.
+Counted over this machine's `agent_trace_steps` (40 132 rows, `kind='trigger'`
+for the event mix, `kind='frame'` for the decisions):
 
-**But three holes make "is the top frame" the wrong ownership test** (all
-verified against the code during review R1):
+| Fact | Numbers | Consequence |
+|---|---|---|
+| Subagents emit their own event, never `SessionStart` | cc `PdxSubagentStart` 21 vs `PdxSessionStart` 16; codex 9 vs 270 | **Subagents are structurally out of reach of this feature.** The user's original concern is already handled at the event level, not by anything this spec adds |
+| Cross-type nesting is collapsed into a proxy ref | `SessionStart → updated_frame / proxy_subagent_attached` **45 times** | The existing `frame_ops.go:534-572` fast-path is live and heavily exercised. An `agent_frames` row for pane `%1` (`agent_type: cc`) carries `{"id":"proxy:codex:67658:…","is_proxy":true,…}` — codex-companion, exactly as its comment describes |
+| Ordinary starts create their own frame | `created_frame` 159 (143 codex + 16 cc), all via `rebuiltMatched` → `reason: daemon_restart_recovery` (`frame_ops.go:866-871`) | That reason name is misleading: it is the normal path for an agent whose frame does not exist yet, not an exceptional one |
 
-1. **Same-type nesting is not proxied.** `frame_ops.go:2008` hard-stops the
-   walk and returns `(nil, nil)` when the live ancestor has the *same* agent
-   type, so a cc launched inside a cc creates its **own** frame
-   (`frame_ops.go:810`), and `projection.go:110-119` picks the frame with the
-   greatest `StartedAt` as top. The nested cc becomes top frame.
-2. **The walk only sees ancestors that already have a frame.**
-   `findProxyParent` (`frame_ops.go:1972-2030`) looks up
-   `frames.FindByPanePID`. If the child's `SessionStart` is processed before
-   the parent has a frame — daemon restart with process-tree recovery
-   (`frame_ops.go:618`, which builds the frame from the *request's* type/PID),
-   or plain event ordering — the child looks parentless. `sweep.go:112` repairs
-   the frames later but cannot un-write a record.
-3. **`(nil, nil)` is overloaded.** No-ancestor, same-type stop, stale
-   candidates, depth exceeded and *read errors* all return the same value, so
-   a caller cannot distinguish "definitely root" from "could not tell".
+So the only real hole is **same-type nesting**: `frame_ops.go:2008` hard-stops
+the walk and returns `(nil, nil)` when the live ancestor has the *same* agent
+type, so a cc launched inside a cc creates its own frame and — because
+`projection.go:110-119` picks the greatest `StartedAt` — becomes top frame.
+That is why "is the top frame" is not the ownership test. It is *one*
+distinction away from being right, not a wrong layer.
+
+#### 3.3.1 Why v2's process-ancestry classifier was worse (measured)
+
+v2 replaced the frame walk with a PPID walk that identified ancestors via each
+provider's `Identify(ProcessInfo)`. Review R2 predicted a launcher
+counterexample; it reproduces exactly on this machine:
+
+```
+93731  ppid 93730  …/codex-darwin-arm64/vendor/…/bin/codex      ← the agent (hook sender)
+93730  ppid 93727  node /Users/wake/.nvm/…/bin/codex app-server ← npm launcher, still alive
+```
+
+`bin/codex.js` uses `spawn`, not exec-replace, so the Node launcher stays as
+the native binary's parent for the whole session, and
+`codex.Identify` matches any JS runtime whose argv contains `/codex/`
+(`internal/agent/codex/provider.go:33-36`, pinned by
+`codex/provider_test.go:28`). A process-ancestry rule would therefore classify
+**every npm-installed codex as nested inside itself** and record nothing —
+breaking the primary case to fix a rare one.
+
+Frames do not have this problem **by construction**: a frame is only ever
+created for a hook *sender* (`frame_ops.go` keys on `req.SenderPID`), and the
+launcher never sends a hook, so it never has a frame. Requiring a frame is
+precisely what makes the ancestor test safe.
+
+The residual cost of staying frame-based is R1's finding 2: an ancestor that
+has not yet sent its first hook is invisible, so a child-first event ordering
+can briefly look parentless. §4.3 accepts that and shows why it is
+self-healing.
 
 ### 3.4 Frames are per tmux **pane**; SPA panes bind to a tmux **session**
 
@@ -273,62 +297,95 @@ is written; `rebuild` is optional and absent on existing panes.
    on a qualifying event, write the agent group into every pane matching
    `(hostId, sessionCode, tmuxInstance)` (§4.5).
 
-### 4.3 Ownership — ancestry-verified, not projection-derived
+### 4.3 Ownership — frame-based, one distinction added
 
-**Invariant.** The record is written only by a `SessionStart` whose sender has
-**no live agent ancestor inside the same tmux pane**, of any agent type. Being
-the top frame is neither sufficient (§3.3 hole 1) nor necessary (§3.3 hole 2)
-and is not used.
+**Invariant.** The record is written only by a `SessionStart` that **creates or
+updates the sender's own frame and has no live, identity-verified agent frame
+above it in the same tmux pane** — of any agent type, including its own.
 
-A new classifier, extracted so the proxy decision and the ownership decision
-share one traversal:
+This is the existing walk with its overloaded `(nil, nil)` return split. The
+walk at `frame_ops.go:1972-2030` already computes everything needed; it just
+throws the distinction away:
 
 ```go
-type PaneAncestry int
+type AncestorVerdict int
 const (
-    AncestryRoot      PaneAncestry = iota // no agent ancestor in this pane
-    AncestrySameType                      // a live ancestor of the same agent type
-    AncestryCrossType                     // a live ancestor of a different agent type
-    AncestryUnknown                       // could not be determined
+    VerdictRoot          AncestorVerdict = iota // no live framed agent ancestor
+    VerdictSameTypeAbove                        // live, identity-verified same-type ancestor frame
+    VerdictProxyParent                          // live cross-type ancestor frame → existing collapse
+    VerdictIndeterminate                        // walk could not complete (read error, depth cap)
 )
 
-func (m *Module) classifyPaneAncestry(req EventRequest) (PaneAncestry, *store.Frame, error)
+func (m *Module) classifyAncestor(req EventRequest) (AncestorVerdict, *store.Frame, error)
 ```
 
-- Walks the sender's PPID chain, capped at the existing `proxyMaxDepth`,
-  bounded to the same `TmuxPaneID`.
-- At each ancestor it reads `agent.ReadProcessInfo(pid)` and asks every
-  registered provider's `Identify(proc)`. **It does not require the ancestor to
-  have a frame** — that is what closes §3.3 hole 2 (child-first ordering,
-  daemon recovery, sweep transients). When the ancestor does have a frame it is
-  returned, so `findProxyParent`'s existing cross-type behaviour is preserved
-  by re-expressing it in terms of this classifier.
-- Any `ReadProcessInfo` / start-time read failure → `AncestryUnknown`. Depth
-  exceeded with no match → `AncestryUnknown`, not `AncestryRoot`.
+`findProxyParent` becomes a thin caller: `VerdictProxyParent` → the frame it
+already returned; everything else → `nil`. Behaviour for existing callers is
+unchanged by construction, including the stale-frame rule
+(`frame_ops.go:1996-2015`: liveness + identity gating applies to same-type and
+cross-type alike, so a stale same-type frame keeps the walk going and yields
+`VerdictProxyParent` from an outer cross-type ancestor — the regression pinned
+by `frame_ops_test.go:1470`). The two accumulators — ownership verdict and
+proxy candidate — are collected in one traversal but reported separately, so
+neither shadows the other.
 
-`owner_session_start: true` is injected into the broadcast `Detail` when **all**
-hold:
+Provenance is written only on `VerdictRoot`. `VerdictIndeterminate` never
+writes.
+
+**Why requiring a frame is the right call, not a compromise.** A frameless
+ancestor is an agent that has not sent its first hook yet. Two things follow:
+it has written no record that a child could corrupt, and its own
+`SessionStart` is still coming — and when it lands it overwrites, because
+automatic values always win (§4.1). The child-first ordering hole is therefore
+**self-healing within one event**, whereas dropping the frame requirement
+breaks every npm-installed codex permanently (§3.3.1). Frame-based also costs
+zero new `ps` calls per event.
+
+`owner_session_start: true` is emitted when **all** hold:
 
 - `lifecycle == LifecycleSessionStart`;
-- `classifyPaneAncestry(req) == AncestryRoot`;
-- `req.SenderUncertain == false`. This is a defence-in-depth check, not the
-  ownership proof — `verify.go:40` already rejects uncertain senders upstream.
+- `classifyAncestor(req) == VerdictRoot`;
+- `req.SenderUncertain == false` (defence in depth; `verify.go:40` already
+  rejects uncertain senders upstream).
 
-Otherwise the flag is absent and the SPA keeps whatever it had. **Unknown never
-writes**; a missed record degrades to `claude -c` / `codex resume --last`
-(§4.7), a wrong record does not degrade — it misleads.
+#### 4.3.1 Provenance envelope
 
-The classifier's verdict, the flag, the `Detail` payload, the broadcast
-`AgentType` and (if any) DB write must all come from **one** evaluation,
-carried on the request as it flows through the handler. They must not be
-re-derived from a second `projectionForSession` call
-(`handler.go:443`) — that call can select a different tmux pane's projection
-(`frame_ops.go:1170-1182`) and would reintroduce exactly the identity/payload
-mismatch this section exists to prevent.
+The verdict is computed **once**, before the frame mutation, and travels as a
+self-contained envelope inside `Detail`:
 
-The SPA's write path tests exactly one thing:
-`detail.owner_session_start === true`. It never re-derives ownership from
-`agent_type`.
+```json
+"pdx_provenance": {
+  "owner_session_start": true,
+  "agent_type": "codex",
+  "session_id": "01a07ace-…",
+  "cwd": "/Users/wake/Workspace/wake/purdex",
+  "tmux_pane_id": "%2",
+  "tmux_instance": "4471:1788740000"
+}
+```
+
+Self-contained is the point. `buildProjectionNormalized` overwrites the
+event's outer `AgentType` with the **session projection winner**
+(`frame_ops.go:1129`), which can be a different tmux pane of the same tmux
+session (`frame_ops.go:1170-1182`, and `handler.go:443` recomputes the
+projection after the frame mutation). Forcing that outer field back to the
+sender would corrupt session-level status semantics, which it correctly
+serves. So the two identities coexist and never mix:
+
+| Field | Meaning | Consumer |
+|---|---|---|
+| outer `agent_type` | which agent the tmux session's status belongs to | existing status / lights UI, unchanged |
+| `pdx_provenance.agent_type` | which agent this SessionStart came from | rebuild record only |
+
+The SPA's write path reads **only** the envelope, and tests exactly one thing:
+`detail.pdx_provenance?.owner_session_start === true`. It never re-derives
+ownership or agent type from the outer field. No handler restructuring is
+required — one value computed early, carried on the request, serialized into
+`Detail`.
+
+`tmux_instance` in the envelope is the daemon's own answer to "which tmux
+generation is this event about" (§4.6), so the SPA never has to guess it from
+a `/api/info` response that may not have arrived yet.
 
 ### 4.4 What gets recorded, and when
 
@@ -360,6 +417,12 @@ A pane's binding is `(hostId, sessionCode, tmuxInstance)`, not
 - `updateSessionCache` (name refresh);
 - termination marking.
 
+Every writer takes its generation from the payload that carried its data
+(§4.6) — never from ambient state — so there is no window in which a writer
+stamps a generation it merely assumed. An async cwd probe re-verifies the
+pane's binding when it resolves, and discards its result if the binding
+changed.
+
 `markTerminated(hostId, sessionCode, reason)` (`useTabStore.ts:426`) marks
 every pane with that pair and would kill a *new* pane that has legitimately
 attached to the reused code. It is replaced for this flow by a
@@ -373,32 +436,66 @@ Ordering: **classify generation first, then update anything.** Today
 `useMultiHostEventWs.ts:106` refreshes names before deciding what died; the new
 path decides first.
 
-### 4.6 Instance acquisition and death detection
+### 4.6 The generation travels with the data, not alongside it
 
-`tmux_instance` has no producer today (§3.5), so this feature creates one:
+v2 had the SPA fetch `/api/info` and compare against events. Review R2 showed
+that cannot be made correct: the `sessions` snapshot is pushed immediately on
+subscribe (`internal/module/session/module.go:97`) and
+`spa/src/lib/host-events.ts:57` does not await anything, so `sessions` reliably
+beats an async `fetchInfo`; and because the watcher only pushes on a hash
+change (`watcher.go:92`), a restart missed during that window is never
+re-announced. Any design where the SPA supplies the generation has a startup
+window in which it supplies the wrong one.
 
-1. **Fetch.** The per-host connection flow calls `fetchInfo(hostId)` on connect
-   and on every reconnect, and stores the result through
-   `setRuntime(hostId, { info })`. `OverviewSection`'s local copy stays as-is;
-   it is not the source.
-2. **Refresh.** Re-fetch on the `tmux` WS event (`useMultiHostEventWs.ts:147`)
-   so a tmux restart under a running daemon is picked up.
-3. **Populate.** Panes record the host's current instance when their content is
-   created or re-pointed.
-4. **Compare.** On each `sessions` event, a pane is marked
-   `'tmux-restarted'` **only when both** the recorded and the current instance
-   are non-empty **and** they differ. Empty-vs-empty, empty-vs-value and
-   value-vs-empty all mean "unknown" and never mark anything dead — that covers
-   first load, offline hosts, `GetTmuxInstance()` timeouts, host re-add / undo,
-   and a daemon-only restart (where the instance is unchanged, so nothing is
-   marked).
+So the daemon supplies it, on the payloads themselves:
+
+1. **`Session` gains `tmux_instance`** (`internal/module/session/provider.go`),
+   so every `/api/sessions` response and every `sessions` WS event
+   self-describes its generation. Additive field; existing consumers ignore it.
+2. **The provenance envelope carries it** (§4.3.1).
+3. The daemon computes it from `config.GetTmuxInstance()`, cached and
+   recomputed whenever the session list changes, so it costs one `tmux
+   display-message` per changed broadcast rather than one per tick.
+   `GetTmuxInstance()` returns `""` on error/timeout
+   (`internal/config/hostid.go:22-30`); `""` is propagated honestly as
+   "unknown", never as a value.
+
+Death detection then reads only fields that arrived together:
+
+- A pane is marked `'tmux-restarted'` when its recorded instance and the
+  instance on the current `sessions` payload are **both non-empty and
+  different**. Every combination involving `""` means unknown and marks
+  nothing — covering first load, offline hosts, `GetTmuxInstance()` timeouts,
+  host re-add / undo, and daemon-only restarts (instance unchanged → nothing
+  marked, correctly).
+- **Bootstrap gate.** A `tmux-session` pane does not open its terminal WS until
+  the first `sessions` payload for that host has been processed
+  (`SessionPaneContent.tsx:70` currently attaches by code with no such gate).
+  Without the gate a pane can attach to a stranger that reused its code in the
+  window before the first payload. The gate is per host and lifts permanently
+  once any payload lands; an offline host shows its existing offline state, not
+  a spinner.
+- Responses from a superseded connection are discarded: each host connection
+  carries an epoch, and a payload whose epoch is not the current one is
+  dropped.
 
 `'tmux-restarted'` already exists as a `TerminatedReason` with copy
 (`TerminatedPane.tsx:16`).
 
-⚠️ This is a behaviour change beyond the feature: reattachments that are
-silently wrong today become visible terminated panes. That is the intent, and
-it belongs in the Phase 2 PR description.
+⚠️ Behaviour change beyond the feature: reattachments that are silently wrong
+today become visible terminated panes, and terminal attach is gated on the
+first session payload. Both are intended; both belong in that phase's PR
+description.
+
+#### 4.6.1 Snapshot restore must stamp the generation
+
+`spa/src/lib/snapshot/restore.ts:139` re-points a pane by spreading the old
+content and replacing only code and name — carrying the **old**
+`tmuxInstance` onto a session that belongs to the new generation, so the very
+next reconciliation would mark the freshly restored pane dead. Restore (and
+undo) therefore stamp the current instance whenever they re-point. This ships
+in the same phase as the generation guard; "snapshot unchanged" is not
+achievable and is not claimed.
 
 ### 4.7 Resume command composition
 
@@ -410,7 +507,17 @@ sees and edits exactly what will run.
 | `cc` | `claude --resume <id>` | `claude -c` |
 | `codex` | `codex resume <id>` | `codex resume --last` |
 | `opencode` | `opencode -s <id>` | `opencode -c` |
-| unknown / none | *(empty — the resume row is disabled and unchecked)* | — |
+| unknown / none | *(empty — the resume row is disabled and unchecked; Rebuild recreates a shell)* | — |
+
+The composer runs only when an agent group is written, so a pane that never saw
+a qualifying `SessionStart` has no resume command at all — it does **not**
+silently fall back to `claude -c`, because nothing tells it which agent to run.
+§9.1 states that degradation explicitly, and the row is editable so the user
+can supply one.
+
+A record whose agent disagrees with the session's current agent type after a
+reconnect is flagged **unverified** (§9.1): shown, but unchecked by default and
+skipped by "Rebuild all".
 
 Original launch flags are not reconstructed; the field is editable, which
 covers the cases that need more (§9.2).
@@ -434,39 +541,53 @@ interface RebuildReport {
 }
 ```
 
-**Preconditions.** The engine resolves the host explicitly and refuses to run
-when it is absent or unreachable. `hostFetch` → `getDaemonBase`
-(`useHostStore.ts:143`) silently falls back to the **active host** for an
-unknown `hostId`, so a `host-removed` pane would otherwise create the session
-and fire the resume command on a different machine. Rebuild is disabled for
-`terminated === 'host-removed'` with copy telling the user to restore the host
+**Pinned transport.** The engine resolves the host **once**, at operation
+start, into an explicit base URL, and every request in the operation goes
+through that pinned transport. It never calls `hostFetch`, because
+`getDaemonBase` (`useHostStore.ts:143`) silently falls back to the **active
+host** for an unknown `hostId` — so a host removed *during* the operation would
+send the resume command to a different machine
+(`execute-command.ts:4` re-enters `hostFetch` on every call). Before each
+request the engine re-checks that the host still exists with the same
+ip/port/token identity; on any change it stops and reports, keeping whatever
+was already created. Rebuild is disabled up front for
+`terminated === 'host-removed'`, with copy telling the user to restore the host
 first.
 
-**Steps.**
+**Steps — resume before re-point.** The order is dictated by the UI lifecycle:
+`SessionPaneContent.tsx:70` swaps `TerminatedPane` out the moment `terminated`
+is cleared, so clearing it before the resume result exists would unmount the
+panel that is supposed to report that result (review R2 finding 6).
 
-1. **Create.** `createSession(hostId, recordedName, cwd, 'terminal')`. On the
-   daemon's duplicate-name response — and only that response, matched
-   explicitly, not "any failure" — retry `name-2`, `name-3`, up to a fixed cap
-   (5), then fail. The returned `Session` is authoritative for the name
-   actually used.
-2. **cwd.** Passed to `createSession`. When the cwd row is unchecked the
-   session is created in the daemon default and no `cd` is sent.
-3. **Re-point.** Before mutating, re-read the pane and verify it still holds
-   the binding the rebuild started from; if the user closed or re-pointed it
-   meanwhile, stop and report `repointed: false` (the created session is named
-   in the report, not lost). Otherwise update `sessionCode`, `cachedName`,
-   `tmuxInstance`, `rebuild.sessionName`, clear `terminated`, and upsert the
+1. **Create.** `createSession(hostId, recordedName, cwd, 'terminal')` over the
+   pinned transport. Retry `name-2`, `name-3`, … up to a cap of 5 **only on
+   HTTP 409**, which the daemon returns specifically for a duplicate name
+   (`internal/module/session/handler.go:101-104`, body
+   `session already exists: <name>`) and never for validation (400) or create
+   failure (500). `createSession` currently discards the status
+   (`host-api.ts:107` throws `Error(status + " " + statusText)`), so it gains a
+   typed error carrying the status code. The returned `Session` is
+   authoritative for the name actually used.
+2. **cwd** is passed to `createSession`; an unchecked cwd row creates the
+   session in the daemon default and sends no `cd`.
+3. **Resume.** `executeCommand` against the **new** session code, over the
+   pinned transport. Send-keys does not require the pane to be attached, which
+   is why this can precede the re-point (`launcher.go:91-111` sends the same
+   way).
+4. **Re-point, last.** Re-read the pane and verify it still holds the binding
+   the operation started from; if the user closed or re-pointed it meanwhile,
+   stop with `repointed: false` — the created session is named in the report,
+   not lost. Otherwise update `sessionCode`, `cachedName`, `tmuxInstance` (the
+   *new* generation), `rebuild.sessionName`, clear `terminated`, and upsert the
    new `Session` into `useSessionStore` the way `restore.ts:342` does.
-4. **Resume.** `executeCommand` (send-keys + `\n`), immediately after creation
-   per `launcher.go:91-111`.
 
 **Partial failure.** No rollback — a created session is a real, useful session.
-The report carries what was created and which step failed; the pane keeps
-showing the Rebuild panel with the completed rows checked-and-disabled and a
-**"Retry resume"** action, so a send-keys failure does not force the user to
-create a second session. `terminated` is cleared only in step 3, so the panel
-does not vanish before the resume result is known
-(`SessionPaneContent.tsx:71` swaps the view on that field).
+When step 3 fails, step 4 does not run, so the panel stays mounted; it renders
+the completed rows checked-and-disabled plus **"Retry resume"** (re-runs step 3
+against the already-created session) and **"Attach anyway"** (runs step 4 and
+drops the resume). The report — created host/code/name and each step's result —
+lives in a rebuild-operation store keyed by `paneId`, not in component state,
+so it survives any re-render or remount.
 
 ### 4.9 UI — terminated pane
 
@@ -520,83 +641,123 @@ Settings → Snapshot gains a table over the live per-tab records — one row pe
 **Rebuild all** over the 🔴 rows.
 
 `capture.ts`, the `purdex-workspace-snapshot` keys and the layout-restore /
-undo actions **stay**. Review R1 showed `restore.ts:8,445,470` depends on
-capture for the `-prev` backup and undo, and the old capture deliberately
-includes stream panes (`capture.ts:20`) which this feature excludes. The two
-features are separated by job, not merged:
+undo actions **stay**: `restore.ts:8,445,470` depends on capture for the
+`-prev` backup and undo, and the old capture deliberately includes stream
+panes (`capture.ts:20`) which this feature excludes.
 
-- **layout restore / undo** — the existing snapshot pair, unchanged;
-- **session rebuild** — per-tab records, the single source for anything that
-  creates sessions or runs resume commands.
+Review R2 finding 11 is right that "per-tab records are the only thing that
+creates sessions" is then false — `undoLastRestore` → `restoreAll` runs with
+`rebuild: true` and creates sessions from the snapshot's own `sessionMeta`
+(`restore.ts:80,470`). So the boundary is stated by capability, not by
+exclusivity:
 
-"Rebuild all" dedupes by `(hostId, tmuxInstance, sessionCode)` before doing
-anything: two panes pointing at the same dead session must produce **one**
-created session (both panes re-pointed to it), never `name` plus `name-2` with
-the resume command run twice. Batch and single-pane rebuild are mutually
-exclusive while either is running.
+| Action | Creates sessions? | From what | Runs a resume command? |
+|---|---|---|---|
+| Snapshot: restore layout | no | — | no |
+| Snapshot: rebuild all sessions (legacy) | yes | snapshot `sessionMeta` — **name + cwd only, shell** | **no** |
+| Snapshot: undo last restore | yes, via the above | snapshot `sessionMeta` | no |
+| **Tab Rebuild (new)** | yes | per-tab records | **yes** |
+
+Only the new engine ever runs an agent command; the legacy actions remain
+shell-only and are labelled as such in the UI. All four take the same
+operation lock, so a legacy rebuild and a Tab Rebuild cannot interleave, and
+all four stamp the current generation when they re-point (§4.6.1).
+
+**Rebuild all** groups panes by `(hostId, tmuxInstance, sessionCode)` — the
+instance stays in the key, because the same code under two different non-empty
+instances really is two different historical sessions. Within a group:
+
+- one `createSession` and one resume, with **every** pane in the group
+  re-pointed to the result (each re-point re-verifies its own binding first);
+- when panes in a group carry conflicting hand-edited values, the most recent
+  `capturedAt` wins and the UI names the pane it came from before running;
+- panes whose recorded instance is `''` (unknown generation) are **excluded
+  from the automatic batch** and listed separately as "needs attention" with a
+  single-pane Rebuild each — grouping them by code alone is exactly the
+  merge-two-different-sessions mistake the key exists to prevent.
+
+Batch and single-pane rebuild are mutually exclusive while either is running.
 
 ## 5. Phases
 
-| Phase | Scope | Surface |
-|---|---|---|
-| **1** | `classifyPaneAncestry` + `owner_session_start`, expressed as one decision per event; `findProxyParent` re-expressed on top of it with behaviour pinned by its existing tests | daemon |
-| **2** | `session_id` + `cwd` in `SessionStart` `Detail` for cc / codex / opencode, incl. plugin-template `cwd` | daemon |
-| **3** | Instance plumbing: `fetchInfo` → `setRuntime({info})` on connect / reconnect / tmux event; pane `tmuxInstance` populate; generation-scoped termination (§4.5, §4.6) | spa |
-| **4** | `PaneRebuildRecord`, `setPaneRebuild`, WS write path, cwd probe, **and the resume composer** (§4.7 ships with the capture that stores its output, per review R1 finding 12) | spa |
-| **5** | Rebuild engine (§4.8) + `TerminatedPane` action set (§4.9) | spa |
-| **6** | Popover entry-point rework + per-pane blocks (§4.10) | spa |
-| **7** | Snapshot batch view + Rebuild all with dedupe (§4.11) | spa |
+| Phase | Scope | Surface | Shippable alone because |
+|---|---|---|---|
+| **1** | `classifyAncestor` split out of the existing walk; `findProxyParent` re-expressed on it (§4.3) | daemon | Pure refactor — no caller behaviour changes; existing proxy tests are the acceptance criteria |
+| **2** | Provenance envelope: `session_id` / `cwd` / `tmux_pane_id` / `tmux_instance` / `owner_session_start` in `Detail` for cc, codex, opencode (incl. plugin-template `cwd`); `tmux_instance` on `Session` (§4.3.1, §4.6) | daemon | Additive payload fields; nothing consumes them yet |
+| **3** | Generation guard: pane `tmuxInstance` populate from payloads, `markTerminatedForGeneration`, bootstrap attach gate, connection epoch, snapshot re-point stamping (§4.5, §4.6, §4.6.1) | spa | Self-contained correctness fix — wrong reattachments become visible terminated panes; no record exists yet, nothing depends on one |
+| **4** | `PaneRebuildRecord`, `setPaneRebuild`, envelope write path, cwd probe, **and the resume composer** (R1 finding 12: the composer ships with the capture that stores its output) | spa | Records accumulate and are visible in the popover-less state; no UI depends on them yet |
+| **5** | Rebuild engine + operation store + `TerminatedPane` action set (§4.8, §4.9) | spa | The user-facing feature; everything it reads exists |
+| **6** | Popover entry-point rework + per-pane blocks (§4.10) | spa | Pure UI over existing data |
+| **7** | Snapshot batch view, Rebuild all with grouping, legacy-action labelling and shared lock (§4.11) | spa | Pure UI plus a lock over the engine from Phase 5 |
 
-Phase 1 is deliberately alone: it changes ownership semantics in
-`frame_ops.go`, the most heavily-reviewed file in the daemon, and its risk
-profile is nothing like the payload passthrough in Phase 2. Phases 1–5 are the
-feature; 6 and 7 are independently shippable.
+Phase 1 is deliberately alone: it touches `frame_ops.go`, the most
+heavily-reviewed file in the daemon, and its risk profile is nothing like the
+payload passthrough in Phase 2. Phase 3 is the one with user-visible behaviour
+change independent of the feature, and says so in its PR.
 
 ## 6. Testing strategy
 
 TDD per project convention; each task is a red-then-green commit.
 
-**Phase 1 (Go).** Table test over `classifyPaneAncestry`:
-root / same-type ancestor (**cc inside cc**) / cross-type ancestor (**codex
-inside cc**, the shape observed in `agent_frames`) / ancestor alive but
-frameless (child-first ordering) / `ReadProcessInfo` failure / depth exceeded —
-asserting `AncestryUnknown` for the last two and `owner_session_start` present
-only for root. Plus: `SenderUncertain: true` never gets the flag; the outer
-agent's clear/resume still qualifies while a nested child is alive; existing
-`findProxyParent` tests stay green through the refactor.
+**Phase 1 (Go).** `classifyAncestor` table test: no framed ancestor →
+`VerdictRoot`; live identity-verified **same-type** ancestor frame (cc inside
+cc) → `VerdictSameTypeAbove`; live **cross-type** ancestor frame (codex inside
+cc, the shape observed in `agent_frames`) → `VerdictProxyParent`; **stale**
+same-type frame above a live cross-type one → still `VerdictProxyParent`
+(the regression `frame_ops_test.go:1470` pins); read error / depth cap →
+`VerdictIndeterminate`. Behaviour parity: every existing `findProxyParent`
+test passes unchanged, and the ownership verdict and proxy candidate are
+asserted to be reported independently from one traversal.
 
-**Phase 2 (Go).** `SessionStart` emits `session_id` + `cwd` for all three
-providers; missing keys stay absent rather than becoming nil entries; cc
-`source: "compact"` still returns `Valid: false`. The opencode `cwd` addition
-extends the existing `plugin_template_contract_test.go` and bun integration
-fixtures — and must be verified against a real opencode run (§9.3).
+**Phase 2 (Go).** The envelope is emitted with `owner_session_start` only for
+`VerdictRoot`; absent for same-type-above, proxy-collapsed, and
+`SenderUncertain: true`. `session_id` / `cwd` present for all three providers;
+missing keys stay absent rather than becoming nil entries; cc
+`source: "compact"` still returns `Valid: false`. **A proxied codex
+`SessionStart` inside a cc pane broadcasts outer `agent_type: "cc"` and no
+envelope** — the identity-mixing case §4.3.1 exists to prevent. `Session`
+carries `tmux_instance`, and `""` is propagated on `GetTmuxInstance()` failure
+rather than omitted. The opencode `cwd` addition extends
+`plugin_template_contract_test.go` and the bun integration fixtures, and must
+be verified against a real opencode run (§9.3).
 
-**Phase 3 (Vitest).** `runtime.info` is populated on connect and refreshed on
-the tmux event; mismatch marks `'tmux-restarted'` **even when the code is
-present in the live list** (the reused-`$0` regression); every
-empty-instance combination marks nothing; the generation-scoped mark does not
-touch a sibling pane legitimately bound to the same reused code.
+**Phase 3 (Vitest).** An instance mismatch marks `'tmux-restarted'` **even
+when the code is present in the live list** (the reused-`$0` regression);
+every combination involving `''` marks nothing; the generation-scoped mark
+leaves a sibling pane legitimately bound to the same reused code alone; a
+terminal does not attach before the host's first `sessions` payload; a payload
+from a superseded connection epoch is dropped; snapshot restore and undo stamp
+the current instance when re-pointing (§4.6.1), and a restored pane is not
+marked dead by the next reconciliation.
 
-**Phase 4 (Vitest).** Qualifying events write every pane matching the full
-triple and no pane of another generation; non-qualifying events write nothing;
-the agent group is replaced as a unit (a payload without `cwd` does not leave
-the previous cwd attached to a new session id); a `'pane-probe'` cwd never
-overwrites an `'agent-session-start'` one; a user edit applied inside a
-functional update touches only the edited field. Composer: 3 agents × (id / no
-id) + unknown.
+**Phase 4 (Vitest).** Envelope-bearing events write every pane matching the
+full triple and no pane of another generation; events without the envelope
+write nothing; the agent group is replaced as a unit (a payload without `cwd`
+does not leave the previous cwd attached to a new session id); a
+`'pane-probe'` cwd never overwrites an `'agent-session-start'` one and
+re-verifies its binding on resolve; a user edit applied inside a functional
+update touches only the edited field. Composer: 3 agents × (id / no id), and
+**no agent → no command at all** (not a fallback). Unverified flagging when the
+reconnect projection's agent type disagrees with the record.
 
-**Phase 5 (Vitest).** Collision retry fires only on the duplicate-name
-response and stops at the cap; a `host-removed` pane cannot rebuild
-(explicitly: no request is issued against the active host); re-point is skipped
-when the pane's binding changed mid-flight; a send-keys failure keeps the panel
-with a working "Retry resume"; the report names the created session on every
-failure path; `useSessionStore` gets the new session.
+**Phase 5 (Vitest).** Retry fires only on **HTTP 409** — 400 and 500 must not
+trigger a rename retry — and stops at the cap; a `host-removed` pane cannot
+rebuild and **no request is issued against the active host**; a host removed
+*mid-operation* aborts before the resume instead of sending it elsewhere;
+resume runs before re-point, so a send-keys failure leaves the panel mounted
+with a working "Retry resume" and "Attach anyway"; re-point is skipped when the
+pane's binding changed mid-flight; the report names the created session on
+every failure path and survives a remount; `useSessionStore` gets the new
+session.
 
 **Phases 6–7.** Popover opens for a tab whose primary pane is an editor but
 which contains a terminal pane; one block per pane with independent targets;
 editing cwd does not submit the rename. Batch: two panes on one dead session
-produce exactly one `createSession` and one resume; batch and single rebuild
-are mutually exclusive.
+produce exactly one `createSession` and one resume with **both** panes
+re-pointed; panes with an unknown (`''`) instance are excluded from the batch;
+conflicting hand-edits resolve to the latest `capturedAt`; unverified records
+are skipped; the legacy snapshot rebuild and the new engine cannot run
+concurrently.
 
 Verification commands (the root `package.json` has no `lint` / `build`
 scripts):
@@ -623,38 +784,86 @@ Codex's sandbox has no network, so the main session runs these itself
   recent one; rebuild recreates a single-pane session.
 - Records live in this app's storage. Another machine or browser profile has
   its own tabs and its own records.
-- An agent started while Purdex was closed leaves no record (§9.1).
+- An agent started while Purdex was closed leaves no agent record, and Rebuild
+  recreates a **shell** in the right directory rather than guessing an agent
+  (§9.1). Type a command into the resume row to change that.
+- A record whose agent no longer matches what the session is running is shown
+  as **unverified**: still visible, unchecked by default, skipped by
+  "Rebuild all" (§9.1).
+- Panes whose tmux generation is unknown are excluded from "Rebuild all" and
+  must be rebuilt one at a time (§4.11).
+- The legacy Snapshot "rebuild all sessions" and "undo" actions create
+  **shells only** — they never run an agent command (§4.11).
 - Stream-mode panes are out of scope.
 
-## 8. Review R1 disposition
+## 8. Review disposition
 
-Codex spec review `task-mtqxjans-cf1ai3` raised 13 findings (5 Blocker). Five
-claims were independently verified against the code before revising; all five
-held. Disposition:
+### 8.1 Review R2 (`task-mtqxyow8-285jje`) — 5 Blocker, 6 Important
+
+R2's finding 1 is the one that changed the design's direction rather than its
+details: it predicted that identifying ancestors by process rather than by
+frame would misread an agent's own launcher as a nested agent. That reproduces
+exactly (§3.3.1) and would have disabled provenance for every npm-installed
+codex. v3 therefore reverses v2's central mechanism instead of patching it,
+which also dissolves R2-2.
 
 | # | Finding | Disposition |
 |---|---|---|
-| 1 | TopFrame is not ownership (same-type nesting) | **Fixed** — §4.3 ancestry classifier |
-| 2 | Recovery / child-first / sweep can hand a nested sender the flag | **Fixed** — classifier is frame-independent; `Unknown` never writes (§4.3) |
-| 3 | Ownership and broadcast may use different projections | **Fixed** — single decision carried on the request; §3.4 states the pane-vs-session mapping; §4.4 states the multi-pane rule |
+| 1 | Ancestry classifier cannot prove root; launcher counterexample | **Reversed** — §4.3 returns to frame-based ownership, immune to the launcher by construction (§3.3.1) |
+| 2 | One verdict cannot preserve proxy selection | **Dissolved** — the walk is unchanged; only its return value is split, and the two accumulators are reported separately (§4.3) |
+| 3 | Provenance vs session-projection identity | **Fixed** — self-contained `pdx_provenance` envelope; the outer `agent_type` keeps its session-level meaning and is never read for the record (§4.3.1) |
+| 4 | Events carry no generation | **Fixed** — the daemon stamps `tmux_instance` on the envelope and on `Session`; the SPA never infers it (§4.6) |
+| 5 | Bootstrap / reconnect ordering | **Fixed** — generation rides the payload, plus an attach gate and a connection epoch (§4.6) |
+| 6 | Clearing `terminated` unmounts the panel | **Fixed** — resume runs before re-point; the operation report lives in a store keyed by `paneId` (§4.8) |
+| 7 | Host removed mid-operation | **Fixed** — transport pinned at operation start, identity re-checked per request, no `hostFetch` (§4.8) |
+| 8 | Batch: unknown generation and conflicting records | **Fixed** — unknown excluded from the batch, latest `capturedAt` wins, all group panes re-pointed (§4.11) |
+| 9 | Degradation promise false; stale records | **Fixed** — never-captured means shell-only; offline-window mismatch is flagged unverified and skipped by batch (§9.1, §4.7) |
+| 10 | Snapshot restore re-points with the old generation | **Fixed** — restore and undo stamp the current instance (§4.6.1); "snapshot unchanged" withdrawn |
+| 11 | Retained snapshot actions do create sessions | **Fixed** — §4.11 states the boundary by capability, with a shared operation lock; legacy actions are shell-only |
+| — | `createSession` discards the 409 | **Fixed** — typed error carrying the status (§4.8) |
+
+### 8.2 Review R1 (`task-mtqxjans-cf1ai3`) — 5 Blocker, 8 Important
+
+Five claims were independently verified against the code before revising; all
+five held. R2 then judged 3 of the 12 "Fixed" items closed and 9 partially
+closed; the partial ones are folded into §8.1 above.
+
+| # | Finding | Disposition |
+|---|---|---|
+| 1 | TopFrame is not ownership (same-type nesting) | **Closed in v3** — §4.3 splits the existing walk's return value; v2's ancestry classifier withdrawn (R2-1) |
+| 2 | Recovery / child-first / sweep can hand a nested sender the flag | **Accepted, self-healing** — §4.3: a frameless ancestor has written no record, and its own SessionStart overwrites when it lands |
+| 3 | Ownership and broadcast may use different projections | **Closed in v3** — §4.3.1 envelope; the outer `agent_type` keeps its session-level meaning |
 | 4 | `session_meta` backfill needs atomic upsert / clear semantics | **Cut** — backfill removed from v1 (§9.1) |
-| 5 | §4.6 runtime info source does not exist | **Fixed** — §4.6 creates the plumbing; empty instances never mark dead |
-| 6 | Instance guard did not protect SPA writers; `markTerminated` over-reaches | **Fixed** — §4.5 generation guard + scoped mark |
+| 5 | §4.6 runtime info source does not exist | **Closed in v3** — the SPA no longer needs `runtime.info`; the daemon stamps the generation on the payloads (§4.6) |
+| 6 | Instance guard did not protect SPA writers; `markTerminated` over-reaches | **Closed in v3** — §4.5 scoped mark + generation taken from the payload |
 | 7 | Writer ranking allows inconsistent field mixes | **Fixed** — §4.1 agent group is written as one unit; probe cwd never promoted |
-| 8 | Rebuild can hit the wrong host | **Fixed** — §4.8 preconditions, `host-removed` blocked |
-| 9 | Partial success has no recoverable state | **Fixed** — §4.8 report + Retry resume + binding check before re-point |
-| 10 | "Rebuild all" duplicates sessions | **Fixed** — §4.11 dedupe by `(hostId, tmuxInstance, sessionCode)` |
+| 8 | Rebuild can hit the wrong host | **Closed in v3** — §4.8 pinned transport, not just a precondition |
+| 9 | Partial success has no recoverable state | **Closed in v3** — §4.8 resume-before-re-point + operation store |
+| 10 | "Rebuild all" duplicates sessions | **Closed in v3** — §4.11 grouping, unknown-generation exclusion, conflict rule |
 | 11 | Popover entry point insufficient for split tabs | **Fixed** — §4.10 is now an entry-point change |
-| 12 | Phase dependencies; snapshot retirement not closed | **Fixed** — composer moved in with capture (Phase 4); phases split to 7; §4.11 retains capture and separates the two jobs |
+| 12 | Phase dependencies; snapshot retirement not closed | **Closed in v3** — §5 states why each phase ships alone; §4.11 states the capability boundary |
 | 13 | Verification commands wrong | **Fixed** — §6 |
 
 ## 9. Deferred / risks
 
 ### 9.1 Daemon-side backfill (cut from v1)
 
-Records are only written while the SPA is running. An agent started with Purdex
-closed leaves the pane without provenance; it degrades to the cwd-scoped
-fallback (§4.7) once a cwd probe lands.
+Records are only written while the SPA is running, and v2's claim that a missed
+capture "degrades to the cwd-scoped fallback" was wrong (review R2 finding 9):
+the composer only runs on an agent-group write, and a cwd probe cannot know
+which agent to resume. The honest degradation, now specified in §4.7 and §7:
+
+- **Never captured** → the record has `sessionName` + `cwd` and no agent. The
+  resume row is empty, disabled and unchecked; Rebuild recreates a **shell** in
+  the right directory. The user can type a resume command into the row.
+- **Captured, then the SPA was away while the session changed agents** → the
+  record still holds the old agent, and nothing marks it wrong. On reconnect
+  the projection replay (`internal/module/agent/module.go:564`) delivers the
+  session's *current* agent type but no provenance; when that type disagrees
+  with the record, the record is flagged **unverified**. An unverified record
+  still shows its exact resume command, but the row is unchecked by default,
+  the UI says why, and **"Rebuild all" skips unverified exact resumes** rather
+  than silently resuming a stale session id.
 
 The v1 design routed backfill through `session_meta`, and review R1 finding 4
 showed that is not a small addition: `meta.go:137` is UPDATE-only and external
@@ -680,12 +889,14 @@ it is also the payload we author ourselves, so the risk is confined to whether
 `cwd` is reachable from the plugin's event object. Phase 2 verifies against a
 real opencode run before relying on it; `opencode -c` covers the failure.
 
-OpenCode additionally shares a PID between parent and child sessions, which is
-why the plugin filters children by `parentID`
-(`plugin_template.go:47,82`). §4.3's process-ancestry classifier cannot
-distinguish them, so **that provider-level filter is a stated precondition of
-the ownership invariant for opencode** and must not be removed without
-replacing it.
+OpenCode additionally runs parent and child sessions over the same pane and
+sender PID, which is why the plugin filters children by `parentID`
+(`plugin_template.go:47,82`). No frame- or process-level test downstream can
+separate them — they are the same process — so **that provider-level filter is
+a stated precondition of the ownership invariant for opencode** and must not be
+removed without replacing it. The measured event mix (§3.3) shows the filter
+working: subagent lifecycles arrive as `PdxSubagentStart` / `PdxSubagentStop`,
+never as `PdxSessionStart`.
 
 ### 9.4 Send-keys with no readiness wait
 
