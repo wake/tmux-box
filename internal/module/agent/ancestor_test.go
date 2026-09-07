@@ -224,3 +224,164 @@ func TestClassifyAncestor_ProcessReadError_Indeterminate(t *testing.T) {
 		t.Fatalf("verdict = %v, want VerdictIndeterminate", verdict)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// walkPaneAncestry — the shared traversal (Task 5)
+//
+// classifyAncestor is now a thin adapter over this walker: it reads the
+// sender's own ProcessInfo and hands the walker the PPID to start from. These
+// cases mirror the classifyAncestor cases above one for one, entered at that
+// same PPID, so the two sets pin the identical traversal from both sides.
+// Task 6 adds a second caller (resolvePaneOwners) and a second output field;
+// these tests are what keep that addition honest.
+// ---------------------------------------------------------------------------
+
+func TestWalkPaneAncestry_NoFramedAncestor_Root(t *testing.T) {
+	m := newProxyTestModule(t)
+	// 999 has no frame and no tree entry, so the next hop reports PPID 1.
+	withProcessTree(t, map[int]int{200: 999})
+
+	res, err := m.walkPaneAncestry("%5", 999, "codex", readProcessInfoFn)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.Verdict != VerdictRoot {
+		t.Fatalf("verdict = %v, want VerdictRoot", res.Verdict)
+	}
+	if res.Frame != nil {
+		t.Fatalf("frame = %v, want nil", res.Frame)
+	}
+}
+
+func TestWalkPaneAncestry_LiveSameTypeAncestor_SameTypeAbove(t *testing.T) {
+	m := newProxyTestModule(t)
+	parent := seedFrame(t, m, "%5", "cc", 100, "t100", 10)
+	withProcessTree(t, map[int]int{200: 100})
+	withLivePids(t, map[int]string{100: "t100"})
+
+	res, err := m.walkPaneAncestry("%5", 100, "cc", readProcessInfoFn)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.Verdict != VerdictSameTypeAbove {
+		t.Fatalf("verdict = %v, want VerdictSameTypeAbove", res.Verdict)
+	}
+	if res.Frame == nil || res.Frame.FrameID != parent.FrameID {
+		t.Fatalf("frame = %v, want %s", res.Frame, parent.FrameID)
+	}
+}
+
+func TestWalkPaneAncestry_LiveCrossTypeAncestor_ProxyParent(t *testing.T) {
+	m := newProxyTestModule(t)
+	parent := seedFrame(t, m, "%5", "cc", 100, "t100", 10)
+	withProcessTree(t, map[int]int{200: 100})
+	withLivePids(t, map[int]string{100: "t100"})
+
+	res, err := m.walkPaneAncestry("%5", 100, "codex", readProcessInfoFn)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.Verdict != VerdictProxyParent {
+		t.Fatalf("verdict = %v, want VerdictProxyParent", res.Verdict)
+	}
+	if res.Frame == nil || res.Frame.FrameID != parent.FrameID {
+		t.Fatalf("frame = %v, want %s", res.Frame, parent.FrameID)
+	}
+}
+
+func TestWalkPaneAncestry_StaleSameTypeBelowLiveCrossType_ProxyParent(t *testing.T) {
+	// The dead same-type frame must not hard-stop the walk (the rule
+	// TestClassifyAncestor_StaleSameTypeBelowLiveCrossType_ProxyParent guards)
+	// — the walker owns that behaviour now.
+	m := newProxyTestModule(t)
+	seedFrame(t, m, "%5", "codex", 150, "t150", 5) // stale: pid not alive
+	grand := seedFrame(t, m, "%5", "cc", 100, "t100", 10)
+	withProcessTree(t, map[int]int{200: 150, 150: 100})
+	withLivePids(t, map[int]string{100: "t100"}) // 150 absent = dead
+
+	res, err := m.walkPaneAncestry("%5", 150, "codex", readProcessInfoFn)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.Verdict != VerdictProxyParent || res.Frame == nil || res.Frame.FrameID != grand.FrameID {
+		t.Fatalf("verdict = %v frame = %v, want ProxyParent/%s", res.Verdict, res.Frame, grand.FrameID)
+	}
+}
+
+func TestWalkPaneAncestry_SelfParent_Indeterminate(t *testing.T) {
+	m := newProxyTestModule(t)
+	withProcessTree(t, map[int]int{200: 300, 300: 300})
+
+	res, err := m.walkPaneAncestry("%5", 300, "codex", readProcessInfoFn)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.Verdict != VerdictIndeterminate {
+		t.Fatalf("verdict = %v, want VerdictIndeterminate", res.Verdict)
+	}
+	if res.Frame != nil {
+		t.Fatalf("frame = %v, want nil", res.Frame)
+	}
+}
+
+func TestWalkPaneAncestry_DepthCapExceeded_Indeterminate(t *testing.T) {
+	m := newProxyTestModule(t)
+	chain := map[int]int{}
+	pid := 200
+	for i := 0; i < proxyMaxDepth+3; i++ {
+		chain[pid] = pid + 1
+		pid++
+	}
+	withProcessTree(t, chain)
+
+	res, err := m.walkPaneAncestry("%5", 201, "codex", readProcessInfoFn)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.Verdict != VerdictIndeterminate {
+		t.Fatalf("verdict = %v, want VerdictIndeterminate", res.Verdict)
+	}
+}
+
+func TestWalkPaneAncestry_ProcessReadError_Indeterminate(t *testing.T) {
+	m := newProxyTestModule(t)
+	withProcessReadError(t, 300)
+
+	res, err := m.walkPaneAncestry("%5", 300, "codex", readProcessInfoFn)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.Verdict != VerdictIndeterminate {
+		t.Fatalf("verdict = %v, want VerdictIndeterminate", res.Verdict)
+	}
+}
+
+// TestWalkPaneAncestry_UsesTheSuppliedReader pins the seam Task 6 depends on:
+// the walker reads through the `read` argument, never through the package-level
+// readProcessInfoFn. classifyAncestor passes readProcessInfoFn directly (a memo
+// on the hook path would break provenance_test.go:170's premise, which
+// deliberately makes the sender's successive reads differ); Task 6 passes a
+// request-scoped memo. Neither works if the walker ignores the argument.
+func TestWalkPaneAncestry_UsesTheSuppliedReader(t *testing.T) {
+	m := newProxyTestModule(t)
+	// The package-level seam says 300 is its own parent — a tree that would
+	// report Indeterminate at the first hop.
+	withProcessTree(t, map[int]int{300: 300})
+
+	var seen []int
+	supplied := func(pid int) (agentpkg.ProcessInfo, error) {
+		seen = append(seen, pid)
+		return agentpkg.ProcessInfo{PID: pid, PPID: 1}, nil
+	}
+
+	res, err := m.walkPaneAncestry("%5", 300, "codex", supplied)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.Verdict != VerdictRoot {
+		t.Fatalf("verdict = %v, want VerdictRoot — the supplied reader was not used", res.Verdict)
+	}
+	if len(seen) != 1 || seen[0] != 300 {
+		t.Fatalf("supplied reader saw %v, want exactly [300]", seen)
+	}
+}
