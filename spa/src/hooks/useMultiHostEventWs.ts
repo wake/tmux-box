@@ -12,6 +12,7 @@ import { usePathCacheStore } from '../stores/path-cache/usePathCacheStore'
 import { debugStatuslineTest } from '../lib/statusline-test-debug'
 import { scanPaneTree } from '../lib/pane-tree'
 import { reconcileSessionsPayload, type ReconcilePane } from '../lib/rebuild/reconcile'
+import { closeAttachGate, openAttachGate } from '../lib/rebuild/attach-gate'
 import { hostWsUrl, fetchWsTicket, fetchHistory, type Session } from '../lib/host-api'
 import { checkHealth, type HealthResult } from '../lib/host-connection'
 import { ConnectionStateMachine } from '../lib/connection-state-machine'
@@ -87,6 +88,9 @@ export function useMultiHostEventWs() {
           })
           // On recovery → reconnect WS with pre-fetched ticket
           if (result.daemon === 'connected' && connRef.current) {
+            // A new connection starts here; nothing it will say has arrived
+            // yet, so the pane's binding is unverified again (spec §4.6).
+            closeAttachGate(hostId)
             if (result.ticket) {
               connRef.current.reconnectWithTicket(result.ticket)
             } else {
@@ -145,6 +149,12 @@ export function useMultiHostEventWs() {
                 // hosts can mint identical codes (R3 P2).
                 usePathCacheStore.getState().clearBySession(hostId, sessionCode)
               }
+
+              // This connection has now told us which generation is live and
+              // the panes have been reconciled against it: terminals bound to
+              // this host may attach (spec §4.6). A payload we could not parse
+              // is no evidence, so this stays inside the try.
+              openAttachGate(hostId)
             } catch { /* ignore */ }
             return
           }
@@ -208,7 +218,9 @@ export function useMultiHostEventWs() {
         },
         // onClose — trigger SM health check (no auto-reconnect)
         () => {
-          useHostStore.getState().setRuntime(hostId, { status: 'reconnecting' })
+          // Immediately, not on the next open: from here on nothing confirms
+          // the panes' bindings (spec §4.6).
+          useHostStore.getState().setRuntime(hostId, { status: 'reconnecting', attachReady: false })
           sm.trigger()
         },
         // onOpen
@@ -226,6 +238,10 @@ export function useMultiHostEventWs() {
       connRef.current = conn
 
       entries.set(hostId, { conn, sm, configKey })
+
+      // A brand-new connection: the gate starts closed and only this
+      // connection's own `sessions` payload may open it.
+      closeAttachGate(hostId)
 
       // Start negotiation — SM will trigger reconnectWithTicket on success
       sm.trigger()

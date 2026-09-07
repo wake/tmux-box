@@ -20,7 +20,13 @@ export interface HostConfig {
 export interface HostRuntime {
   status: 'connected' | 'disconnected' | 'reconnecting' | 'auth-error'
   latency?: number
-  info?: HostInfo
+  /**
+   * Terminal attach gate (spec §4.6): true only once the *current* host-events
+   * connection has delivered and reconciled a `sessions` payload. Closed on
+   * every (re)connect and on every drop, so a pane can never attach to a
+   * session code that a tmux restart handed to a stranger. Not persisted.
+   */
+  attachReady?: boolean
   daemonState?: 'connected' | 'refused' | 'unreachable' | 'auth-error'
   tmuxState?: 'ok' | 'unavailable'
   manualRetry?: () => Promise<void> | void  // safe: runtime excluded from persist partialize

@@ -29,6 +29,14 @@ export function connectTerminal(
       return
     }
     if (closed) return
+    // The gate can close while the ticket is in flight (the host-events
+    // connection dropped, or restarted and has not re-delivered its session
+    // list). Re-check before the socket exists, or the attach the gate was
+    // meant to stop happens anyway.
+    if (canReconnect && !canReconnect()) {
+      scheduleRetry()
+      return
+    }
     setupWs(wsUrl)
   }
 

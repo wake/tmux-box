@@ -132,14 +132,10 @@ describe('SessionPickerList', () => {
         [HOST_A]: { id: HOST_A, name: 'Host A', ip: '1.2.3.4', port: 7860, order: 0 },
       },
       hostOrder: [HOST_A],
-      runtime: {
-        // A populated runtime.info must NOT be used as the pane's generation:
-        // it is ambient state, not the payload that carried the session.
-        [HOST_A]: {
-          status: 'connected',
-          info: { host_id: HOST_A, tmux_instance: '99999:99999', purdex_version: '1.0', tmux_version: '3.6', os: 'darwin', arch: 'arm64' },
-        },
-      },
+      // No ambient generation exists to fall back on — `HostRuntime` carries
+      // none, by design: the generation only ever comes from the payload that
+      // carried the session.
+      runtime: { [HOST_A]: { status: 'connected' } },
     })
     useSessionStore.setState({
       sessions: {
