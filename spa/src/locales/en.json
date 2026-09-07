@@ -892,6 +892,22 @@
   "terminated.close_tab": "Close tab",
   "terminated.select_session": "Select a session to reconnect",
 
+  "rebuild.create_session": "Create tmux session",
+  "rebuild.working_directory": "Working directory",
+  "rebuild.run_resume": "Run resume command",
+  "rebuild.button": "Rebuild",
+  "rebuild.retry_resume": "Retry resume",
+  "rebuild.attach_anyway": "Attach anyway",
+  "rebuild.host_removed_hint": "The host this pane belonged to has been removed. Add the host back before rebuilding.",
+  "rebuild.no_agent_hint": "No agent was recorded for this pane, so Rebuild just opens a shell in the directory above. Type a command here to resume an agent instead.",
+  "rebuild.unverified_hint": "This session was last reported running a different agent, so the recorded command is left unchecked. Tick it only if you are sure it still applies.",
+  "rebuild.limits_title": "Limitations",
+  "rebuild.limits_agent_only": "Only the agent comes back — no scrollback, no shell history, no other processes.",
+  "rebuild.limits_minimal_flags": "The resume command is the minimal one; the original launch flags are not reconstructed. Edit the field if you need them.",
+  "rebuild.limits_cwd_scoped": "Without an exact session id the command resumes the most recent session in that directory, which may not be the one this tab had.",
+  "rebuild.limits_multi_pane": "A tmux session running agents in several tmux panes records only the most recent one, and comes back as a single-pane session.",
+  "rebuild.limits_local_storage": "These records live in this app's storage. Another machine or browser profile has its own tabs and its own records.",
+
   "connection.reconnect": "Reconnect",
 
   "notification.daemon_refused": "{{name}} — Daemon not running",

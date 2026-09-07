@@ -892,6 +892,22 @@
   "terminated.close_tab": "關閉分頁",
   "terminated.select_session": "選擇 session 以重新連線",
 
+  "rebuild.create_session": "建立 tmux session",
+  "rebuild.working_directory": "工作目錄",
+  "rebuild.run_resume": "執行 resume 指令",
+  "rebuild.button": "重建",
+  "rebuild.retry_resume": "重試 resume",
+  "rebuild.attach_anyway": "直接接上",
+  "rebuild.host_removed_hint": "這個 pane 原本所屬的主機已被移除，請先把主機加回來再重建。",
+  "rebuild.no_agent_hint": "這個 pane 沒有記錄到 agent，重建只會在上方目錄開一個 shell。若要接回 agent，請在這裡輸入指令。",
+  "rebuild.unverified_hint": "這個 session 最近回報的 agent 與紀錄不同，因此預設不勾選；確定指令仍適用再勾選。",
+  "rebuild.limits_title": "限制",
+  "rebuild.limits_agent_only": "只會還原 agent，不包含 scrollback、shell 歷史或其他行程。",
+  "rebuild.limits_minimal_flags": "resume 指令只會用最精簡的形式，不會重建當初的啟動參數；需要的話請直接編輯欄位。",
+  "rebuild.limits_cwd_scoped": "沒有確切的 session id 時，指令只會接回該目錄下最近一次的 session，未必是這個分頁原本那一個。",
+  "rebuild.limits_multi_pane": "一個 tmux session 若在多個 tmux pane 跑 agent，只會記錄最後一個，重建後會是單一 pane 的 session。",
+  "rebuild.limits_local_storage": "這些紀錄只存在這個應用的本機儲存空間，換一台機器或另一個瀏覽器設定檔會有各自的分頁與紀錄。",
+
   "connection.reconnect": "重新連線",
 
   "notification.daemon_refused": "{{name}} — Daemon 未啟動",
