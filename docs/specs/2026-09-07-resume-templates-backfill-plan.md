@@ -1,5 +1,7 @@
 # Resume Templates & Provenance Backfill — Implementation Plan
 
+**Status:** v2 — revised after codex plan review `task-mtrhhdht-bl382f` (1 Blocker, 11 Important, 1 Minor); dispositions at the end.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Two follow-ups to Tab Rebuild. **(B)** A tmux session that was already
@@ -70,6 +72,16 @@ hardcoded resume commands with templates, a per-pane override and a shell probe.
   Spec §5.2 has the per-method table; Task 1 implements it and Task 3 depends on
   it. Any task that adds a column to `UpsertIfUnchanged`, `UpdateHookPath`,
   `UpdateHookPathAndResetSubagents` or `UpdateStatusAndLastSeen` is wrong.
+- **Do not add memoization to `classifyAncestor`.** Task 6's memo is
+  request-scoped and belongs to the query only.
+  `provenance_test.go:170` deliberately makes the sender's 1st/2nd/3rd process
+  read return *different* values to exercise the post-Upsert reconcile; a memo
+  on the hook path would silently break that test's premise.
+- **Every commit must type-check on its own.** `vitest` and `lint` do not catch
+  a reference to a field that does not exist yet, so any task that touches
+  `spa/` runs `pnpm --prefix spa run build` before committing. This is why the
+  override field is *added* in Task 12 and the old one *removed* in Task 13,
+  rather than swapped in one step (see those tasks).
 
 ---
 
@@ -241,11 +253,25 @@ Placement matters:
 - It must **not** run on paths where `stored` is not the sender's own frame:
   the proxy-attach fast path and `reconcileCreatedFrameAsProxy` both return
   early with a *parent's* frame. Writing the child's session id onto the
-  parent's row would be a real mis-attribution. Guard by reaching the call only
-  from return points where the frame is the sender's own.
+  parent's row would be a real mis-attribution.
 - `sql.ErrNoRows` is logged and swallowed; a frame deleted concurrently is not
   an error for the caller.
 - A provider that does not implement `SessionIdentifier` skips the call.
+
+**`applyFrameEvent` has several success returns and only the general one is
+obvious. Wire all three own-frame returns, and neither proxy return:**
+
+| Site | Frame returned | Identity write |
+|---|---|---|
+| `frame_ops.go:213-221` — native `SubagentStart`/`SubagentStop` membership change, after `mutateSubagentsWithRetry` | the sender's own | **yes** |
+| `frame_ops.go:348-357` — `StopFailure` proxy-subagent detach path, when the mutation applied to the sender's own frame | the sender's own | **yes** |
+| `frame_ops.go:880` onward — the general `created_frame` / `updated_frame` return | the sender's own | **yes** |
+| the pre-Upsert proxy fast path (`frame_ops.go:568` onward) | the **parent's** | **no** |
+| `reconcileCreatedFrameAsProxy` canonicalization (`frame_ops.go:860-871`) | the **parent's** | **no** |
+
+Hooking only the general return would still pass a naive test while silently
+dropping the identity for every `Stop` / subagent event — spec §5.2 says *every*
+own-frame event contributes.
 
 - [ ] **Step 1: Write the failing tests**
   - an ordinary event (`PdxStop`) on an existing frame writes the id;
@@ -255,15 +281,22 @@ Placement matters:
   - a `cwd` arriving on a later event than the id fills in;
   - a `SessionStart` with `source == "compact"` (rejected upstream by
     `deriveCCStatus`) writes nothing;
-  - **a proxy-collapsed sender writes nothing to the parent's frame** — reuse
-    the proxy fixtures in `frame_ops_test.go`;
+  - **each of the two proxy paths separately** writes nothing to the parent's
+    frame — the pre-Upsert fast path and the post-Upsert canonicalization are
+    different code, and one case cannot stand for both. Reuse the proxy fixtures
+    in `frame_ops_test.go`;
+  - a native `SubagentStart` and a `StopFailure` detach each write the id,
+    covering the two non-obvious return points in the table above;
   - interleaving: an identity write between a proxy attach's read and its
     `UpsertIfUnchanged` retry leaves both the merged subagents list and the new
     id intact.
 - [ ] **Step 2: Run — fail**
 - [ ] **Step 3: Implement**
 - [ ] **Step 4: Run — pass**
-- [ ] **Step 5:** `go test ./...`. `provenance_test.go` must be green **unedited**.
+- [ ] **Step 5:** `go test ./...`. `provenance_test.go` must be green **unedited**
+  — but note that its fixtures' providers do **not** implement
+  `SessionIdentifier`, so its staying green proves nothing about this wiring.
+  Build the new tests on a fixture whose provider does implement it.
 - [ ] **Step 6: Commit** — `feat(agent): record the session id from ordinary hook events`
 
 ---
@@ -277,8 +310,10 @@ Placement matters:
 
 **Context.** Add `cwd: pdxCwd()` to the `PdxStop` and `PdxUserPromptSubmit`
 emits. `pdxCwd()` already exists (line ~75) and already returns `''` rather than
-throwing. **Do not touch the `parentID` child-session filter** (lines 47, 97) —
-spec v1 §9.3 states it is a precondition of the ownership invariant for opencode.
+throwing. **Do not touch the `parentID` child-session filter** — the two guards are at
+`plugin_template.go:99-106` and `150-157` (line 47 is its comment and 97 the
+enclosing case, not the guard). Spec v1 §9.3 states the filter is a precondition
+of the ownership invariant for opencode.
 
 - [ ] **Step 1: Write the failing tests** — the rendered template contains
   `cwd: pdxCwd()` in both emits; the Bun integration test asserts both emitted
@@ -303,15 +338,25 @@ spec v1 §9.3 states it is a precondition of the ownership invariant for opencod
 **Interfaces produced:**
 ```go
 // procReader is the seam: classifyAncestor passes readProcessInfoFn directly,
-// Task 6 passes a memoizing wrapper around it.
+// Task 6 passes a request-scoped memoizing wrapper around it.
 type procReader func(pid int) (agentpkg.ProcessInfo, error)
+
+// ancestryResult is what one walk reports. Task 5 fills the first three
+// fields; Task 6 adds SawPanePID and extends this struct, not the signature.
+type ancestryResult struct {
+    Verdict AncestorVerdict
+    Frame   *store.Frame   // set for SameTypeAbove and ProxyParent only
+}
 
 // walkPaneAncestry walks startPID's PPID chain, capped at proxyMaxDepth,
 // applying the existing liveness + identity gating to each candidate frame.
 func (m *Module) walkPaneAncestry(
     paneID string, startPID int, agentType string, read procReader,
-) (AncestorVerdict, *store.Frame, error)
+) (ancestryResult, error)
 ```
+
+Task 6 **modifies this file again** to add the pane-membership output. Returning
+a struct now is what makes that additive instead of a second signature churn.
 
 **Context.** This is a **pure refactor**. `classifyAncestor` becomes:
 
@@ -320,9 +365,15 @@ func (m *Module) classifyAncestor(req EventRequest) (AncestorVerdict, *store.Fra
     if m.frames == nil { return VerdictIndeterminate, nil, nil }
     info, err := readProcessInfoFn(req.SenderPID)
     if err != nil { return VerdictIndeterminate, nil, nil }
-    return m.walkPaneAncestry(req.TmuxPaneID, info.PPID, req.AgentType, readProcessInfoFn)
+    res, err := m.walkPaneAncestry(req.TmuxPaneID, info.PPID, req.AgentType, readProcessInfoFn)
+    return res.Verdict, res.Frame, err
 }
 ```
+
+**Pass `readProcessInfoFn` here, never a memo.** `provenance_test.go:170`
+deliberately makes the sender's successive reads return different values;
+memoizing the hook path would break that test's premise while leaving it green
+for the wrong reason.
 
 Note the loop **starts from the PPID**, not from the PID — the existing code
 reads the sender's own info first and then walks from `info.PPID`
@@ -346,10 +397,18 @@ where it lives.
 
 **Files:**
 - Create: `internal/module/agent/pane_owner.go`, `pane_owner_test.go`
+- **Modify: `internal/module/agent/ancestor.go`** — `ancestryResult` gains
+  `SawPanePID`, and `walkPaneAncestry` gains a `panePID int` parameter. Adding a
+  field and a parameter keeps `classifyAncestor`'s adapter a one-line change;
+  it passes `0`, which can never match a real PID, so its behaviour and its
+  read order are untouched.
+- Modify: `internal/module/agent/ancestor_test.go` — assert the adapter's reads
+  are unchanged in count and order.
 
 **Interfaces produced:**
 ```go
 type PaneOwner struct {
+    FrameID    string   // REQUIRED: Task 7's deterministic tie-break sorts on it
     AgentType, SessionID, Cwd, TmuxPaneID string
     LastSeenAt int64
 }
@@ -373,18 +432,23 @@ Then, for each survivor, decide two things **in one walk**:
   signature `func(tmux.Executor, string) (int, error)`) appears on the chain;
 - **not a root** — another surviving frame of this pane appears on the chain.
 
-Three boundary rules the existing loop does not give you for free:
+**The complete boundary matrix.** The existing loop gives you none of this for
+free, so decide every row explicitly:
 
-1. **`frame.PID == panePID` must be handled before the loop.** The walk starts
-   from the PPID, so a frame whose PID *is* the pane process would never see
-   itself. `PidAncestorIncludes` treats that as inside the tree; match it.
-2. **An early ancestor hit ends the walk without deciding pane membership, and
-   that is fine.** The frame is already not a root, so it is excluded either
-   way. Do not extend the walk to establish membership you no longer need.
-3. **The depth cap applies to both questions.** Measured depth is 1 for an
-   agent under its pane shell and 2 for an npm launcher (spec §3.5); the cap is
-   5. A chain that exceeds it yields "cannot determine" → the frame is
-   **excluded**, never promoted.
+| Situation | `SawPanePID` | Verdict | Frame kept? |
+|---|---|---|---|
+| `frame.PID == panePID`, checked **before** entering the loop | true | continue the walk from the PPID as usual | depends on the rest |
+| `panePID` found at some depth ≤ cap | true | continue | depends on the rest |
+| `panePID` found at exactly the **last** allowed depth | true | continue | yes if no ancestor frame — the cap must not turn a legitimate hit into a refusal |
+| another surviving frame of this pane found first | irrelevant | `SameTypeAbove` / `ProxyParent`, walk stops | **excluded** — already not a root, so membership is moot and the walk must **not** be extended to establish it |
+| `ppid <= 1` before `panePID` | false | `Root` | **excluded** — a root that is not in the pane's tree is the reused-pane-id case |
+| depth cap exhausted, `panePID` never seen | false | `Indeterminate` | **excluded** |
+| a process read fails mid-walk | false | `Indeterminate` | **excluded** |
+
+The rule underneath all of it: a frame is kept only when
+`SawPanePID && Verdict == VerdictRoot`. Everything else is excluded — never
+promoted. Measured depth is 1 for an agent under its pane shell and 2 for an npm
+launcher (spec §3.5); the cap is 5.
 
 `ctx.Err()` is checked between process reads (it cannot interrupt one —
 `readProcessInfoPlatform` has no context). On expiry, return what is decided so
@@ -411,9 +475,20 @@ created per request in Task 7, never package-level.
   - a stale frame (start-time mismatch) does not shadow a live root;
   - an unreadable process mid-walk → that frame excluded, others unaffected;
   - a chain longer than `proxyMaxDepth` → excluded;
+  - **`panePID` at exactly the last allowed depth → kept** (the cap must not
+    reject a legitimate hit);
+  - **an early ancestor-frame hit stops the walk**: assert the reader is *not*
+    called for PIDs above that ancestor, so "we stopped" is observable rather
+    than merely plausible;
+  - a root whose chain reaches PID 1 without passing `panePID` → excluded;
   - `resolvePanePIDFn` failing → empty result, no error escalation;
-  - **memoization**: a layout where three frames share an ancestor chain asserts
-    the underlying reader is called once per distinct PID for the whole call;
+  - **memoization, asserted positively.** "at most once per PID" also passes for
+    a walk that never happened, so the test fixes one topology and asserts all
+    four of: the returned owners are correct; the set of PIDs read equals the
+    expected set exactly; each was read exactly once, including the shared
+    ancestor; and a PID whose read failed is not retried within the request.
+    Stub liveness, start time and pane PID so the branch under test is actually
+    entered;
   - a cancelled context stops between reads.
 - [ ] **Step 2: Run — fail**
 - [ ] **Step 3: Implement**
@@ -442,20 +517,39 @@ after the frame work and report `""` when the samples disagree or a read fails.
 `""` authorises nothing on the SPA side, so this is the safety property, not a
 nicety.
 
-Resolve `{code}` → tmux session → its panes. Build **one** memoized reader and
-**one** 5 s context for the whole request, and pass them to `resolvePaneOwners`
-for every pane. Collect owners with a non-empty `session_id`; none →
-`found: false`; several → largest `last_seen_at`, ties broken by frame id so the
-answer is deterministic.
+**How to enumerate the session's panes — no new `Executor` method.** The
+interface has no way to list a session's panes (`ActivePaneMetadata` is the
+active pane only), and widening it would drag `FakeExecutor` and every existing
+test along. Instead, go through the frames, which are the only panes that can
+possibly answer:
+
+1. `frames.ListAll()` → the distinct `pane_id`s that have any frame;
+2. for each, `m.resolvePaneSession(paneID)` (`module.go:644`, already
+   pane → `(sessionName, sessionCode)` via `PaneSessionName`) and keep the ones
+   whose code equals `{code}`;
+3. run `resolvePaneOwners` on those.
+
+A pane with no frame has no agent to report, so skipping it costs nothing.
+
+Build **one** memoized reader and **one** 5 s context for the whole request, and
+pass them to `resolvePaneOwners` for every pane. Collect owners with a non-empty `session_id`; none →
+`found: false`; several → largest `LastSeenAt`, ties broken by **ascending
+`FrameID`** so the answer is deterministic and testable.
 
 An unknown session code returns `found: false` with a 200, not a 404 — the SPA
 treats "no answer" uniformly and a dead code is a normal race.
 
-- [ ] **Step 1: Write the failing tests** — one root; no roots; two roots across
-  two panes (recency, then the tie-break); unknown code; a disagreeing
-  generation sample → `tmux_instance: ""`; the deadline expiring →
-  `found: false`; and **one memoized reader across two panes** (the reader is
-  called once per distinct PID for the request, not once per pane).
+- [ ] **Step 1: Write the failing tests** — one root; no roots; a root whose
+  `session_id` is empty → `found: false` (the filter lives here, not in Task 6);
+  two roots across two panes of the same session (recency, then equal
+  `LastSeenAt` → ascending `FrameID`); **two panes in two different windows of
+  the same session** are both considered, so an implementation that only ever
+  looks at the active pane fails; a framed pane belonging to a *different*
+  session is not considered; unknown code → `found: false` with a 200; a
+  disagreeing generation sample → `tmux_instance: ""`; the deadline expiring →
+  `found: false`; and **memoization across two panes**, asserted the same
+  positive way as Task 6 — the exact PID set, once each, including the ancestor
+  the two panes share.
 - [ ] **Step 2: Run — fail**
 - [ ] **Step 3: Implement**
 - [ ] **Step 4: Run — pass**
@@ -481,8 +575,20 @@ without it: a hand-typed cwd currently keeps whatever source it inherited
 Check every reader of `cwdSource` before widening the union and update any
 exhaustive switch.
 
+**The `field` arm has a same-value early return in front of it**
+(`useTabStore.ts:206`, `if (prev[patch.field] === patch.value) return c`). A user
+who re-types the directory the probe already found is *confirming* it, and must
+end up with `cwdSource: 'user'` — otherwise Task 9's fill mode may still
+overwrite the value they just approved. So the early return must not fire for a
+`cwd` patch whose value matches but whose `cwdSource` is not yet `'user'`.
+Narrow that condition; do not delete it — it still protects the other two
+fields.
+
 - [ ] **Step 1: Write the failing test** — editing `cwd` sets `cwdSource: 'user'`;
-  a subsequent `probe-cwd` patch still does not overwrite it (existing rule).
+  **submitting the *same* cwd that a probe supplied also sets it**, and returns
+  a new object; submitting the same cwd when it is already `'user'` is still a
+  no-op that returns the identical object; a subsequent `probe-cwd` patch still
+  does not overwrite it (existing rule).
 - [ ] **Step 2: Run — fail** · [ ] **Step 3: Implement** · [ ] **Step 4: Run — pass**
 - [ ] **Step 5:** `pnpm --prefix spa exec vitest run` + `lint`
 - [ ] **Step 6: Commit** — `feat(rebuild): mark a hand-typed cwd as user-sourced`
@@ -506,15 +612,20 @@ because v3's unordered table let one state match two rows:
 | 3 | `prev.unverified` and the identity matches | **confirm** |
 | 4 | otherwise | **no-op** |
 
+**Phase 3 predates the override field, so it touches only `resumeCommand`.**
+`resumeCommandOverride` does not exist until Task 12 and the old field is not
+removed until Task 13; writing Phase 3 against the final field names would not
+type-check. Where the spec's mode descriptions mention the override, Phase 3
+does the equivalent thing to `resumeCommand`, and Task 13 migrates it.
+
 - **fill** — write `agent`; write `cwd` only if the answer has one *and* the
   existing `cwd` is absent or `cwdSource === 'pane-probe'`; set
-  `cwdSource: 'agent-backfill'` when writing one; leave `resumeCommandOverride`
-  alone; write `resumeCommand` (via the existing `composeResumeCommand`) **only
-  when it is currently empty**, so a hand-typed command survives.
+  `cwdSource: 'agent-backfill'` when writing one; write `resumeCommand` (via the
+  existing `composeResumeCommand`) **only when it is currently empty**, so a
+  hand-typed command survives.
 - **replace** — whole group as one unit, exactly like `agent-group`: new
-  `agent`, the answer's `cwd` or none, `unverified` cleared,
-  `resumeCommandOverride` cleared, `resumeCommand` recomposed. A
-  `cwdSource: 'user'` cwd is the one thing kept.
+  `agent`, the answer's `cwd` or none, `unverified` cleared, `resumeCommand`
+  recomposed. A `cwdSource: 'user'` cwd is the one thing kept.
 - **confirm** — clear `unverified`, change nothing else. This is what makes the
   probe terminate; without it an agreeing answer would leave the pane eligible
   forever.
@@ -570,18 +681,19 @@ Export a `resetProvenanceProbes()` test seam like `resetCwdProbes`.
   disowns; an answered `''` does not disown but blocks the write; a requested
   `''` likewise; a pane re-pointed mid-flight takes nothing; a pane with
   `unverified` asks even though it has an agent; a fetch rejection is swallowed.
+  **And the positive case, which the negatives cannot stand in for:** a
+  `found: true` answer with a matching generation maps every field onto the
+  `agent-backfill` patch and the record actually changes.
 - [ ] **Step 2: Run — fail** · [ ] **Step 3: Implement** · [ ] **Step 4: Run — pass**
 - [ ] **Step 5:** vitest + lint
 - [ ] **Step 6: Commit** — `feat(rebuild): ask the daemon which agent owns a pane`
 
 ---
 
-### Task 11: The defer-never-drop scheduler and its three triggers
+### Task 11a: The defer-never-drop scheduler
 
 **Files:**
 - Modify: `spa/src/lib/rebuild/provenance-probe.ts` + `.test.ts`
-- Modify: `spa/src/components/SessionPaneContent.tsx`
-- Modify: `spa/src/hooks/useMultiHostEventWs.ts`
 
 **Context — this task carries review round 4's finding 1. Read spec §5.4.1 in
 full before starting.** Per binding:
@@ -615,33 +727,77 @@ scheduler believe a timer is already armed.
 
 Coalescing is the point: ten hooks in one cooldown buy one request.
 
-**Three triggers:**
-1. the reconciled `sessions` payload in `useMultiHostEventWs` (a sweep, next to
-   the existing `probeMissingCwds` call, ~line 160);
-2. pane attach in `SessionPaneContent` (~line 59, next to `probeSessionCwd`);
-3. **a hook broadcast for a session whose pane still wants provenance** — the
-   new one. Without it the everyday case fails: the first probe runs before any
-   event has filled the frame's `session_id`, gets `found: false`, and nothing
-   asks again.
+A rejected request enters the cooldown exactly like a resolved one — otherwise a
+host that is briefly down would be hammered. `resetProvenanceProbes()` must
+`clearTimeout` every armed timer as well as clearing the maps, or one test's
+timer fires inside the next.
 
 - [ ] **Step 1: Write the failing tests** (fake timers)
-  - **the single-hook case**: `found: false` at t=0, one hook at t=5 s, then
-    silence → a request runs at t≈30 s. This is the round-3 Blocker and it fails
-    against a drop-on-cooldown implementation;
+  Every timing assertion names an exact instant, because "eventually" would pass
+  against the implementations this task exists to rule out.
+
+  - **the single-hook case**: request completes at t=0 with `found: false`, one
+    hook at t=5 s, then silence → a request starts at t=30 s. This is the
+    round-3 Blocker and it fails against drop-on-cooldown;
   - **no deadline extension**: hooks at t=5/10/15/20 s → exactly one deferred
-    request, at t≈30 s, not t≈50;
+    request, starting at t=30 s, **not** t=50 s;
+  - **the boundary**: at t=29.999 s still exactly one request has been made;
   - **coalescing**: ten hooks in one cooldown → one request;
-  - **in-flight**: a hook during an open request → exactly one follow-up, and it
-    runs at the *new* deadline, not at completion;
+  - **in-flight**: a request that completes at t=40 s with a hook received at
+    t=10 s schedules its follow-up for **t=70 s**, not t=40 s — the deadline is
+    computed at completion and the follow-up waits for it;
+  - **a rejected request** sets the cooldown just like a resolved one;
   - **guards on the deferred run**: a pane that gained an agent, was re-pointed,
     terminated, was disowned, or lost its attach gate during the cooldown issues
-    no request — and the timer handle is cleared in each case;
+    no request — and the timer handle is cleared in each case, so a later
+    trigger can arm a fresh one;
+  - **regained eligibility**: a pane that was ineligible when the timer fired
+    can be scheduled again by the next trigger;
   - **re-point away and back** during a cooldown leaves no stale timer handle;
+  - **`resetProvenanceProbes()` cancels armed timers** — advancing the clock
+    after a reset fires nothing;
   - **termination**: after a `confirm`, no further request on any number of
-    broadcasts.
+    triggers.
 - [ ] **Step 2: Run — fail** · [ ] **Step 3: Implement** · [ ] **Step 4: Run — pass**
 - [ ] **Step 5:** vitest + lint + build
 - [ ] **Step 6: Commit** — `feat(rebuild): defer a suppressed provenance probe instead of dropping it`
+
+---
+
+### Task 11b: Wire the three triggers
+
+**Files:**
+- Modify: `spa/src/components/SessionPaneContent.tsx` + its test
+- Modify: `spa/src/hooks/useMultiHostEventWs.ts` + its test
+
+**Context.** A green Task 11a proves the scheduler, not that anything calls it.
+These are separate failure modes — a handler that never fires, or one that
+passes the wrong host or generation — and they need tests at the call sites, not
+more scheduler tests.
+
+1. **Session-list sweep** — in `useMultiHostEventWs`, beside the existing
+   `probeMissingCwds(hostId)` call (~line 158), which already runs *after* the
+   payload is reconciled and the attach gate opens. Same placement, same
+   ordering: a sweep before reconciliation would ask with a generation the SPA
+   has not adopted.
+2. **Pane attach** — in `SessionPaneContent`, in the effect beside
+   `probeSessionCwd` (~line 69), which already depends on the attach gate.
+3. **Hook broadcast** — the new one, at the hook entry point
+   (`useMultiHostEventWs.ts:167`). It must pass the **pane's recorded**
+   generation, the same value the other two triggers pass — *not* anything read
+   off the event — so all three requests share one binding key and one cooldown.
+   Schedule **after** `handleNormalizedEvent` has run, so a broadcast that
+   itself writes the record leaves the pane ineligible and costs no request.
+
+- [ ] **Step 1: Write the failing tests** — a reconciled `sessions` payload
+  schedules a sweep for each eligible binding and none for ineligible ones;
+  mounting a pane schedules one; a hook broadcast for an eligible pane schedules
+  one **with the pane's recorded generation**; a hook broadcast for a pane that
+  already has a verified agent schedules none; nothing is scheduled before the
+  attach gate opens.
+- [ ] **Step 2: Run — fail** · [ ] **Step 3: Implement** · [ ] **Step 4: Run — pass**
+- [ ] **Step 5:** vitest + lint + build
+- [ ] **Step 6: Commit** — `feat(rebuild): ask for provenance on attach, sweep and hook`
 
 **Phase 3 gate:** after this task, Phase 1 + 2 + 3 is independently shippable — a
 pre-deploy session acquires its agent and a working resume command built from
@@ -657,7 +813,9 @@ before starting Phase 4.
 **Files:**
 - Create: `spa/src/stores/useResumeTemplateStore.ts` + `.test.ts`
 - Modify: `spa/src/lib/rebuild/composer.ts` + `composer.test.ts`
-- Modify: `spa/src/lib/storage` (a `STORAGE_KEYS` entry)
+- Modify: `spa/src/lib/storage/keys.ts` (a `STORAGE_KEYS` entry)
+- Modify: `spa/src/types/tab.ts` — **add** `resumeCommandOverride?: string`
+  beside the existing `resumeCommand`
 
 **Context.** Model the store on `useNotificationSettingsStore.ts`: sparse
 per-agent record, `purdexStorage`, `syncManager.register`. Defaults reproduce
@@ -668,8 +826,14 @@ today's shapes exactly, so a user who configures nothing sees no change.
 outside it degrades to `fallback`. `{id}` is replaced at **every** occurrence in
 `exact`, and left **literal** in `fallback`.
 
-Add `resolveResumeCommand` alongside `composeResumeCommand` in this task; Task 13
-removes the old one.
+**Add the override field here, remove the old one in Task 13.** The spec's
+signature is `Pick<PaneRebuildRecord, 'agent' | 'resumeCommandOverride'>`, which
+does not compile against a type that has no such key — so this task adds the
+optional field (nothing writes it yet) and Task 13 deletes `resumeCommand`. Both
+commits type-check on their own; a single swap would not.
+
+Add `resolveResumeCommand` alongside `composeResumeCommand` here; Task 13 removes
+the old one and every caller of it.
 
 - [ ] **Step 1: Write the failing tests** — store defaults, per-agent set, reset,
   persistence shape; resolver across three layers × (usable id / unusable id / no
@@ -683,11 +847,27 @@ removes the old one.
 
 ### Task 13: `resumeCommand` → `resumeCommandOverride`, everywhere
 
-**Files:** the full list in spec §4.2 — `types/tab.ts`, `useAgentStore.ts:94`,
-`useTabStore.ts:200,209`, `RebuildActionSet.tsx:18,226,229,294,298,379`,
-`RenamePopover.tsx:149,153`, `TerminatedPane.tsx`, `batch.ts:68,82`,
-`eligibility.ts`, `engine.ts:164,496-502`, `SnapshotSettingsSection.tsx:664`,
-plus the seven fixture files.
+**Files:** `types/tab.ts` (remove `resumeCommand`, keep the override),
+`useAgentStore.ts:94`, `useTabStore.ts:200,209`,
+`RebuildActionSet.tsx:18,229,294,298`, `RenamePopover.tsx:149,153`,
+`TerminatedPane.tsx`, `batch.ts:68,82`, `engine.ts:164,496-502`,
+`SnapshotSettingsSection.tsx:664`, and the Task 9 `agent-backfill` writer.
+
+Test fixtures that reference the old field — the list is longer than spec §4.2's
+and **must not be applied by blind search-and-replace**, because two of these
+files also hold an *operation* `resumeCommand` that keeps its name:
+
+| File | Note |
+|---|---|
+| `useTabStore.rebuild.test.ts` | record fixtures |
+| `useAgentStore.provenance.test.ts:46,65,107,137` | still asserts the automatic `resumeCommand` write that this task removes — these assertions change meaning, not just names |
+| `RebuildActionSet.test.tsx` | record fixtures **and** operation fixtures — only the former are renamed |
+| `TerminatedPane.test.tsx:224` | record fixture — renamed |
+| `TerminatedPane.test.tsx:253` | **operation** field — must NOT be renamed |
+| `RenamePopover.rebuild.test.tsx`, `composer.test.ts`, `batch.test.ts`, `engine.test.ts` | record fixtures |
+
+`eligibility.ts` has no reader of this field today; it is in scope only to
+confirm that, not to change.
 
 **Context.** Three rules that make this more than a rename:
 
@@ -703,12 +883,28 @@ plus the seven fixture files.
    arm now matches that rule instead of clearing unconditionally.
 
 `composeResumeCommand` and the `resumeCommand` write in Task 9's fill/replace
-modes both disappear here.
+modes both disappear here. Task 9's fill mode preserved a hand-typed command;
+after this task the equivalent value lives in `resumeCommandOverride`, and the
+fill mode leaves it alone.
+
+**An empty resolved command turns off the resume step; it does not exclude the
+pane.** `planForRecord` (`batch.ts:64`) already sets
+`runResume: !!record.resumeCommand && !record.unverified` while leaving
+`createSession` and `applyCwd` on. That is spec §4.2's "an unknown agent
+rebuilds as a shell", and it must survive the rename — turning an empty command
+into an exclusion would be a real behaviour regression.
 
 - [ ] **Step 1: Write the failing tests** — same identity keeps the override; a
-  different sessionId clears it; a different type clears it; every renamed
-  consumer reads through `resolveResumeCommand`; the engine sends the resolved
-  string; `batch` skips a pane that resolves to `''`.
+  different sessionId clears it; a different type clears it; the engine sends
+  the resolved string; **a pane resolving to `''` is still rebuilt with
+  `createSession` and `applyCwd`, only `runResume` off, and no send-keys is
+  issued**; editing a row writes an override and clearing it restores the
+  template (spec §7).
+
+  Plus the one thing "every consumer calls the resolver" does not prove:
+  **changing a template in the store re-renders the panel, the popover and the
+  Settings table without a remount.** Calling the resolver from an unsubscribed
+  render path would pass every other test here and still show a stale command.
 - [ ] **Step 2: Run — fail** · [ ] **Step 3: Implement** · [ ] **Step 4: Run — pass**
 - [ ] **Step 5:** vitest + lint + build
 - [ ] **Step 6: Commit** — `refactor(rebuild): the pane stores an override, not a command`
@@ -719,17 +915,39 @@ modes both disappear here.
 
 **Files:**
 - Modify: `spa/src/components/RebuildActionSet.tsx` + `.test.tsx`
+  (the pinning decision sits beside the existing `frozen` computation at
+  line 226 — `busy || !!created || hostRemoved` — which already knows both
+  states this rule needs; the Rebuild button it guards is at line 379)
 
-**Context.** Spec §4.3. Render `resolveResumeCommand(...)` **except** while the
-pane's operation is in flight or has `op.created` — in those two states every
-row renders `op.resumeCommand`. An operation that failed *before* creating
-anything is not actionable, so the panel returns to the live resolution and a
-template edited meanwhile is visible before the user presses Rebuild.
+**Context.** Spec §4.3. Use the **real** symbols — the component does not have
+an `op.created`:
 
-- [ ] **Step 1: Write the failing tests** — no operation → composed; in flight →
-  pinned, even after a template change from another window; `op.created` present
-  → pinned; **create failed with no `op.created` → composed, and the next
-  Rebuild sends what is shown**.
+```ts
+const busy    = op?.status === 'running'      // RebuildActionSet.tsx:214
+const created = op?.report?.created           // RebuildActionSet.tsx:215
+const pinned  = busy || !!created             // the new rule
+```
+
+`useRebuildStore`'s operation field is `createdSession`
+(`useRebuildStore.ts:42`), but the component reads the operation through
+`RebuildOperationView` (`RebuildActionSet.tsx:25`), which exposes
+`report.created`. Stay on the view type — and **add `resumeCommand?: string` to
+it**, since it does not declare one today and the pinned string has to arrive
+through it.
+
+Render `resolveResumeCommand(...)` except when `pinned`, in which case every row
+renders `op.resumeCommand`. An operation that failed *before* creating anything
+is not actionable, so the panel returns to the live resolution and a template
+edited meanwhile is visible before the user presses Rebuild.
+
+Fixtures must build operations in the real shape. A test that invents
+`{ created: … }` at the top level would make a wrong implementation pass.
+
+- [ ] **Step 1: Write the failing tests** — no operation → composed;
+  `status: 'running'` → pinned, even after a template change from another
+  window; `report.created` present on a finished operation → pinned;
+  **`status: 'done'` with no `report.created` → composed, and the next Rebuild
+  sends what is shown**.
 - [ ] **Step 2: Run — fail** · [ ] **Step 3: Implement** · [ ] **Step 4: Run — pass**
 - [ ] **Step 5:** vitest + lint
 - [ ] **Step 6: Commit** — `fix(rebuild): pin the displayed command only while it is actionable`
@@ -743,7 +961,13 @@ template edited meanwhile is visible before the user presses Rebuild.
 **Files:**
 - Create: `internal/module/session/shell_resolve.go` + `_test.go`
 - Modify: `internal/module/session/module.go` (route)
-- Modify: `internal/tmux/executor.go` (a global-option read)
+- Modify: `internal/tmux/executor.go` — add `ShowGlobalOption(option string)
+  (string, error)` to the `Executor` **interface** (~line 80, beside
+  `ShowWindowOption`) and to `RealExecutor` (~line 432)
+- **Modify: `internal/tmux/fake_executor.go`** — the matching method plus a
+  settable value/error seam, next to the existing `ShowWindowOption`
+  (~line 613). `SessionModule.tmux` is the interface, so omitting this breaks
+  compilation for every existing test in the package
 
 **Context.** Spec §4.4. The contract is deliberately narrow:
 
@@ -759,8 +983,8 @@ body), and `command -v` output is not "path or word" (an alias prints its
 definition; a relative PATH entry prints a relative path). Report that it
 resolved and what the shell printed.
 
-Shell selection: `tmux show-options -gv default-shell` via a **new** executor
-method — `ShowWindowOption` passes `-w` and cannot read a server option. Fall
+Shell selection: `tmux show-options -gv default-shell` via the new executor
+method — `ShowWindowOption` passes `-w` and cannot read a global option. Fall
 back to `$SHELL`, then the passwd shell, then `/bin/sh`. Invoke as an
 interactive login shell:
 
@@ -787,6 +1011,12 @@ Rejected before exec: a token over 256 bytes, or containing any of
   pipe still returns within the deadline with the process group gone. Cover the
   §4.4 shapes — absolute path, relative PATH entry, function, alias, builtin,
   keyword — asserting `resolved` only.
+
+  Also the shell-selection ladder, which the verdict tests do not touch: the
+  executor's answer is used when present; a tmux error falls back to `$SHELL`;
+  an unset `$SHELL` falls back to the passwd shell and then `/bin/sh`. And one
+  argv assertion that the tmux invocation uses the **global** option form, not
+  `ShowWindowOption`'s `-w`.
 - [ ] **Step 2: Run — fail** · [ ] **Step 3: Implement** · [ ] **Step 4: Run — pass**
 - [ ] **Step 5:** `go test ./...`
 - [ ] **Step 6: Commit** — `feat(session): resolve a command word in the pane's login shell`
@@ -822,9 +1052,13 @@ machine must never sit beside a command being judged for this one.
 
 - [ ] **Step 1: Write the failing tests** — rows render per agent with defaults;
   editing persists; reset restores defaults; the two warnings appear and do not
-  block; Test renders each verdict; switching hosts clears the result; a late
-  response from the previous host is discarded; IME composition does not commit;
-  no literal English in the component (assert through i18n keys).
+  block; **testing `cld-yolo --resume {id}` POSTs exactly `cld-yolo`**; Test
+  renders each verdict; **a 404 renders as `unverifiable` and the template stays
+  saved**; a network rejection likewise; switching hosts clears the result; a
+  late response from the previous host is discarded; **a late response for a
+  command word the user has since edited is discarded**; the picker defaults to
+  the active host; IME composition does not commit; no literal English in the
+  component (assert through i18n keys).
 - [ ] **Step 2: Run — fail** · [ ] **Step 3: Implement** · [ ] **Step 4: Run — pass**
 - [ ] **Step 5:** vitest + lint + build
 - [ ] **Step 6: Commit** — `feat(settings): edit and test the resume command templates`
@@ -843,8 +1077,33 @@ themselves** — do not schedule it, and do not kill any tmux server.
 3. `tmux kill-server`, then Rebuild each of cc / codex / opencode.
 4. Uncheck the resume row → expect a bare shell in the right directory.
 
-## Review items carried from the spec
+## Review items carried in
 
-- **Round 4 finding 1** → Task 11's scheduling contract and its test list.
-- **Round 4 finding 2** → Task 6's three boundary rules and their tests.
-- Everything else is dispositioned in spec §10 and needs no plan action.
+**From the spec's round 4** — spec §10.1:
+
+- finding 1 → Task 11a's scheduling contract and its exact-instant test list;
+- finding 2 → Task 6's boundary matrix and its tests.
+
+**From the plan review** (codex `task-mtrhhdht-bl382f`, 1 Blocker / 11 Important
+/ 1 Minor), all folded into the tasks above:
+
+| # | Finding | Where it landed |
+|---|---|---|
+| B1 | `PaneOwner` had no `FrameID` for Task 7's tie-break; the walker's pane-membership handoff and its boundaries were undefined | Task 6: `FrameID`, the `ancestor.go` modification, the boundary matrix, the last-allowed-depth and early-stop tests |
+| I1 | Task 3 named only the general return; two own-frame early returns were missing | Task 3's return-point table + per-path tests |
+| I2 | Tasks 9/12/13 referenced fields that did not exist yet | Task 12 *adds* the override, Task 13 *removes* the old field; Phase 3 uses only the old one; a build step per task |
+| I3 | No way to enumerate a session's panes — `Executor` has none | Task 7 goes through `frames.ListAll()` + `resolvePaneSession`, no interface change |
+| I4 | "batch skips a pane that resolves to `''`" would have been a regression | Task 13: an empty command turns off `runResume` only |
+| I5 | `op.created` does not exist | Task 14 uses `status` / `report.created`, and extends `RebuildOperationView` |
+| I6 | Fixture list incomplete; two files mix record and operation fields; no reactivity test | Task 13's fixture table and the template-change re-render test |
+| I7 | A green scheduler proves nothing about the triggers | Task 11 split into 11a (scheduler) and 11b (call sites) |
+| I8 | "at most once per PID" also passes for a walk that never ran | Tasks 6 and 7 assert the exact PID set, positively |
+| I9 | A new `Executor` method without `FakeExecutor` breaks compilation | Task 15's Files |
+| I10 | Task 16 was missing five spec contracts | Task 16's Context and tests |
+| I11 | The `field` arm's same-value early return would skip `cwdSource: 'user'` | Task 8's narrowed condition + its test |
+| M1 | Reference drift: opencode guard lines, `storage/keys.ts`, `eligibility.ts` | corrected in place |
+
+Also adopted from that review: **do not memoize `classifyAncestor`**
+(`provenance_test.go:170` depends on successive reads differing), and **a green
+`provenance_test.go` does not prove Task 3's wiring** — its fixtures' providers
+do not implement `SessionIdentifier`.
