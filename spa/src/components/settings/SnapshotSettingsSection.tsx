@@ -19,7 +19,9 @@ import {
   restoreAll,
   restoreTabLayout,
   undoLastRestore,
+  SNAPSHOT_LOCK_OWNER,
 } from '../../lib/snapshot/restore'
+import { useRebuildStore } from '../../stores/useRebuildStore'
 import { RestoreError } from '../../lib/snapshot/types'
 import type { RestoreReport, SessionMeta, WorkspaceSnapshot } from '../../lib/snapshot/types'
 import { listSessions } from '../../lib/host-api'
@@ -39,6 +41,13 @@ interface Status {
 }
 
 const IDLE: Status = { tone: 'idle', message: '' }
+
+/**
+ * Capture never takes the operation lock — it creates nothing — but it must not
+ * photograph a half-rebuilt world either, so it carries an owner purely so the
+ * "is anyone else holding the lock" test disables it like the rest.
+ */
+const CAPTURE_OWNER = 'snapshot:capture'
 
 function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
@@ -117,8 +126,15 @@ export function SnapshotSettingsSection() {
   const [snap, setSnap] = useState<WorkspaceSnapshot | null>(() => readSnapshot())
   const [busy, setBusy] = useState(false)
   // Single-flight guard as a ref (not state) so two synchronous clicks — which
-  // share one render's `busy` closure — still only fire one action.
+  // share one render's `busy` closure — still only fire one action. This is the
+  // component's own guard and stays: it also covers Capture and the cwd edit,
+  // neither of which takes the global lock below.
   const busyRef = useRef(false)
+  // The GLOBAL operation lock (spec §4.11). A Tab Rebuild takes it too, so a
+  // legacy restore must not be reachable while one is in flight — every button
+  // whose owner is not the current holder is disabled.
+  const lockedBy = useRebuildStore((s) => s.lockedBy)
+  const lockedOut = (owner: string) => lockedBy !== null && lockedBy !== owner
   const [status, setStatus] = useState<Status>(IDLE)
   // Read fresh each render: setBusy re-renders after every action, so once a
   // restore writes the `-prev` backup the Undo button re-enables on its own.
@@ -163,6 +179,19 @@ export function SnapshotSettingsSection() {
   // and the restore handlers close over the latest snapshot on their next click.
   const refresh = () => setSnap(readSnapshot())
 
+  /**
+   * The residual window the `disabled` props cannot cover: the lock can be
+   * taken between the last render and this click. Read it fresh and say why
+   * nothing happened, rather than firing an action that `restore.ts` would
+   * refuse — by throwing — one frame later.
+   */
+  const refuseWhileLocked = (owner: string): boolean => {
+    const holder = useRebuildStore.getState().lockedBy
+    if (holder === null || holder === owner) return false
+    setStatus({ tone: 'warn', message: t('settings.snapshot.toast.locked', { owner: holder }) })
+    return true
+  }
+
   // Persist a manual cwd edit for one session, then re-read + re-reconcile via
   // `refresh()` so the row's health badge reflects the new restorable state. Pure
   // client-side: no daemon call, live sessions untouched.
@@ -172,6 +201,9 @@ export function SnapshotSettingsSection() {
     // overwrite this write. (The cell is also `disabled` while busy so a row
     // normally cannot even enter edit mode — this guards the residual window.)
     if (busyRef.current) return
+    // Same reasoning for the global lock: a rebuild re-points panes and the
+    // snapshot this edit writes into would be stale the moment it lands.
+    if (useRebuildStore.getState().lockedBy !== null) return
     const cur = readSnapshot()
     if (!cur) return
     writeSnapshot(setSessionMetaCwd(cur, hostId, code, value))
@@ -180,6 +212,7 @@ export function SnapshotSettingsSection() {
 
   const handleCapture = async () => {
     if (busyRef.current) return
+    if (refuseWhileLocked(CAPTURE_OWNER)) return
     busyRef.current = true
     setBusy(true)
     setStatus({ tone: 'busy', message: t('settings.snapshot.toast.capturing') })
@@ -246,8 +279,9 @@ export function SnapshotSettingsSection() {
     }
   }
 
-  const runRestore = async (action: () => Promise<RestoreReport | null>) => {
+  const runRestore = async (owner: string, action: () => Promise<RestoreReport | null>) => {
     if (busyRef.current) return
+    if (refuseWhileLocked(owner)) return
     busyRef.current = true
     setBusy(true)
     setStatus({ tone: 'busy', message: t('settings.snapshot.toast.restoring') })
@@ -274,10 +308,15 @@ export function SnapshotSettingsSection() {
     }
   }
 
-  const handleRebuild = () => snap && runRestore(() => rebuildAllSessions(snap))
-  const handleRestoreTab = () => snap && runRestore(() => restoreTabLayout(snap))
-  const handleRestoreAll = () => snap && runRestore(() => restoreAll(snap))
-  const handleUndo = () => runRestore(() => undoLastRestore())
+  const handleRebuild = () =>
+    snap && runRestore(SNAPSHOT_LOCK_OWNER.rebuildAll, () => rebuildAllSessions(snap))
+  const handleRestoreTab = () =>
+    snap && runRestore(SNAPSHOT_LOCK_OWNER.restoreLayout, () => restoreTabLayout(snap))
+  // "Restore everything" — the one entry that both rebuilds and replaces the
+  // tab tree, and therefore the one a Tab Rebuild most needs locking out.
+  const handleRestoreAll = () =>
+    snap && runRestore(SNAPSHOT_LOCK_OWNER.restoreAll, () => restoreAll(snap))
+  const handleUndo = () => runRestore(SNAPSHOT_LOCK_OWNER.undo, () => undoLastRestore())
 
   return (
     <div>
@@ -296,7 +335,7 @@ export function SnapshotSettingsSection() {
           type="button"
           data-testid="snapshot-capture-btn"
           onClick={handleCapture}
-          disabled={busy}
+          disabled={busy || lockedOut(CAPTURE_OWNER)}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-border-default text-text-secondary text-xs hover:text-text-primary hover:border-border-active disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <Camera size={14} className={busy ? 'animate-pulse' : ''} />
@@ -319,7 +358,7 @@ export function SnapshotSettingsSection() {
                 type="button"
                 data-testid="snapshot-restore-all-btn"
                 onClick={handleRestoreAll}
-                disabled={busy}
+                disabled={busy || lockedOut(SNAPSHOT_LOCK_OWNER.restoreAll)}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-border-default text-text-secondary text-xs hover:text-text-primary hover:border-border-active disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <ArrowsClockwise size={14} />
@@ -329,7 +368,7 @@ export function SnapshotSettingsSection() {
                 type="button"
                 data-testid="snapshot-undo-btn"
                 onClick={handleUndo}
-                disabled={busy || !hasPrev}
+                disabled={busy || !hasPrev || lockedOut(SNAPSHOT_LOCK_OWNER.undo)}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-border-default text-text-secondary text-xs hover:text-text-primary hover:border-border-active disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <ArrowCounterClockwise size={14} />
@@ -341,12 +380,17 @@ export function SnapshotSettingsSection() {
           <TmuxBlock
             snap={snap}
             liveByHost={liveByHost}
-            busy={busy}
+            busy={busy || lockedOut(SNAPSHOT_LOCK_OWNER.rebuildAll)}
             onRebuild={handleRebuild}
             onCommitCwd={handleCommitCwd}
             t={t}
           />
-          <TabsBlock snap={snap} busy={busy} onRestoreLayout={handleRestoreTab} t={t} />
+          <TabsBlock
+            snap={snap}
+            busy={busy || lockedOut(SNAPSHOT_LOCK_OWNER.restoreLayout)}
+            onRestoreLayout={handleRestoreTab}
+            t={t}
+          />
         </>
       )}
 

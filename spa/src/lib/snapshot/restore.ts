@@ -5,6 +5,7 @@ import type { PaneContent, PaneLayout, Tab } from '../../types/tab'
 import { useTabStore } from '../../stores/useTabStore'
 import { useWorkspaceStore } from '../../features/workspace/store'
 import { useSessionStore } from '../../stores/useSessionStore'
+import { withOperationLock } from '../../stores/useRebuildStore'
 import { buildSnapshot } from './capture'
 import { readPrevSnapshot, writePrevSnapshot } from './storage'
 import { RestoreError } from './types'
@@ -321,6 +322,32 @@ export function replaceTabSnapshot(snap: WorkspaceSnapshot): void {
 export interface RestoreDeps {
   now?: number
   buildSnapshotFn?: typeof buildSnapshot
+  /**
+   * Internal: the operation-lock owner the CALLER already holds. Only
+   * {@link undoLastRestore} sets it, so the {@link restoreAll} it delegates to
+   * re-enters the undo's own lock instead of being refused by it.
+   */
+  lockOwner?: string
+}
+
+/**
+ * Operation-lock owners for the legacy snapshot actions (spec §4.11). All four
+ * create tmux sessions and/or replace the whole tab tree, so none of them may
+ * interleave with a Tab Rebuild — see {@link useRebuildStore}.
+ */
+export const SNAPSHOT_LOCK_OWNER = {
+  rebuildAll: 'snapshot:rebuildAllSessions',
+  restoreLayout: 'snapshot:restoreTabLayout',
+  restoreAll: 'snapshot:restoreAll',
+  undo: 'snapshot:undoLastRestore',
+} as const
+
+/**
+ * Refuse rather than run: a legacy restore replaces the entire tab snapshot,
+ * which would silently overwrite an in-flight rebuild's re-point.
+ */
+function lockRefused(owner: string, holder: string): never {
+  throw new Error(`${owner} refused: another operation is already running (${holder})`)
 }
 
 /**
@@ -400,6 +427,14 @@ function rewriteSnapshotTabs(
  * uses {@link replaceTabState}, which does not validate navigation refs.
  */
 export async function rebuildAllSessions(snap: WorkspaceSnapshot): Promise<RestoreReport> {
+  return withOperationLock(
+    SNAPSHOT_LOCK_OWNER.rebuildAll,
+    () => runRebuildAllSessions(snap),
+    (holder) => lockRefused(SNAPSHOT_LOCK_OWNER.rebuildAll, holder),
+  )
+}
+
+async function runRebuildAllSessions(snap: WorkspaceSnapshot): Promise<RestoreReport> {
   const { remap, report } = await ensureSessions(snap.sessionMeta)
 
   const { tabs, tabOrder, activeTabId } = useTabStore.getState()
@@ -424,7 +459,12 @@ export async function restoreTabLayout(
   snap: WorkspaceSnapshot,
   deps?: RestoreDeps,
 ): Promise<RestoreReport> {
-  return applySnapshotRestore(snap, { rebuild: false }, deps)
+  const owner = deps?.lockOwner ?? SNAPSHOT_LOCK_OWNER.restoreLayout
+  return withOperationLock(
+    owner,
+    () => applySnapshotRestore(snap, { rebuild: false }, deps),
+    (holder) => lockRefused(owner, holder),
+  )
 }
 
 /**
@@ -436,7 +476,12 @@ export async function restoreAll(
   snap: WorkspaceSnapshot,
   deps?: RestoreDeps,
 ): Promise<RestoreReport> {
-  return applySnapshotRestore(snap, { rebuild: true }, deps)
+  const owner = deps?.lockOwner ?? SNAPSHOT_LOCK_OWNER.restoreAll
+  return withOperationLock(
+    owner,
+    () => applySnapshotRestore(snap, { rebuild: true }, deps),
+    (holder) => lockRefused(owner, holder),
+  )
 }
 
 /**
@@ -477,9 +522,18 @@ async function applySnapshotRestore(
 /**
  * Undo the most recent restore by replaying the `-prev` backup through
  * {@link restoreAll}. Returns `null` when there is no backup to undo.
+ *
+ * The nested {@link restoreAll} is told to run under THIS action's lock owner,
+ * so its acquire is a re-entry that cannot drop the lock when it returns — the
+ * undo owns the lock from its first line to its last.
  */
 export async function undoLastRestore(deps?: RestoreDeps): Promise<RestoreReport | null> {
   const prev = readPrevSnapshot()
   if (!prev) return null
-  return restoreAll(prev, deps)
+  const owner = deps?.lockOwner ?? SNAPSHOT_LOCK_OWNER.undo
+  return withOperationLock(
+    owner,
+    () => restoreAll(prev, { ...deps, lockOwner: owner }),
+    (holder) => lockRefused(owner, holder),
+  )
 }

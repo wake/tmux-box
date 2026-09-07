@@ -117,6 +117,7 @@
   "settings.snapshot.toast.restoreError": "還原失敗。",
   "settings.snapshot.toast.restoreFailed": "還原失敗：{{reason}}",
   "settings.snapshot.toast.undoNothing": "沒有可復原的項目。",
+  "settings.snapshot.toast.locked": "已有其他操作進行中（{{owner}}），請等它結束後再試。",
   "settings.sync.import.error.tooLarge": "檔案過大（最大 {{mb}} MB）",
   "settings.sync.import.error.tooDeep": "匯入結構太深（最多 {{depth}} 層）",
   "settings.sync.history.title": "同步歷史",

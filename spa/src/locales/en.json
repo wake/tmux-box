@@ -117,6 +117,7 @@
   "settings.snapshot.toast.restoreError": "Restore failed.",
   "settings.snapshot.toast.restoreFailed": "Restore failed: {{reason}}",
   "settings.snapshot.toast.undoNothing": "Nothing to undo.",
+  "settings.snapshot.toast.locked": "Another operation is already running ({{owner}}). Try again when it finishes.",
   "settings.sync.import.error.tooLarge": "File too large (max {{mb}} MB)",
   "settings.sync.import.error.tooDeep": "Import structure too deep (max {{depth}} levels)",
   "settings.sync.history.title": "Sync History",

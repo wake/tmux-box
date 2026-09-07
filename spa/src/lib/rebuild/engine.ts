@@ -13,7 +13,7 @@
 // There is no rollback: a created session is a real session, so every partial
 // failure keeps it named in the report.
 import { pinHost, type PinnedTransport } from './transport'
-import { useRebuildStore, type RebuildBinding } from '../../stores/useRebuildStore'
+import { useRebuildStore, withOperationLock, type RebuildBinding } from '../../stores/useRebuildStore'
 import { useTabStore } from '../../stores/useTabStore'
 import { useSessionStore } from '../../stores/useSessionStore'
 import { findPane } from '../pane-tree'
@@ -55,6 +55,31 @@ function skipped(error?: string): StepResult {
 
 function failed(err: unknown): StepResult {
   return { status: 'failed', error: err instanceof Error ? err.message : String(err) }
+}
+
+/**
+ * The operation-lock owner for everything that acts on one pane (spec §4.11).
+ * Pane-specific on purpose: two panes may not rebuild at once either, but the
+ * owner is what tells the UI whose button to keep enabled.
+ */
+function paneOwner(paneId: string): string {
+  return `rebuild:${paneId}`
+}
+
+/**
+ * The same-pane refusal. The lock is re-entrant per owner, so without this a
+ * second operation on ONE pane would be handed a re-entry token and run
+ * concurrently with the first — the exact merge the lock exists to prevent.
+ */
+function paneBusy(paneId: string): boolean {
+  return useRebuildStore.getState().operations[paneId]?.status === 'running'
+}
+
+/** A report for an operation that never started, so nothing is left half-run. */
+function refusedReport(hostId: string, step: 'create' | 'resume', reason: string): RebuildReport {
+  const steps: RebuildReport['steps'] = { create: skipped(), resume: skipped(), repoint: skipped() }
+  steps[step] = { status: 'failed', error: reason }
+  return { hostId, steps, repointed: false }
 }
 
 /** The daemon returns 409 only for a duplicate session name; 400/500 never retry. */
@@ -202,6 +227,9 @@ function publish(paneId: string, report: RebuildReport, created?: Session): void
  *
  * Never throws: every failure lands in the returned report, which is also
  * written into `useRebuildStore` under `paneId`.
+ *
+ * Serialized against every other rebuild and against the legacy snapshot
+ * actions by the shared operation lock (spec §4.11).
  */
 export async function rebuildPane(
   hostId: string,
@@ -209,6 +237,23 @@ export async function rebuildPane(
   paneId: string,
   plan: RebuildPlan,
   deps: RebuildDeps = {},
+): Promise<RebuildReport> {
+  if (paneBusy(paneId)) {
+    return refusedReport(hostId, 'create', `a rebuild is already running for pane ${paneId}`)
+  }
+  return withOperationLock(
+    paneOwner(paneId),
+    () => runRebuild(hostId, tabId, paneId, plan, deps),
+    (holder) => refusedReport(hostId, 'create', `another operation is already running (${holder})`),
+  )
+}
+
+async function runRebuild(
+  hostId: string,
+  tabId: string,
+  paneId: string,
+  plan: RebuildPlan,
+  deps: RebuildDeps,
 ): Promise<RebuildReport> {
   const report: RebuildReport = {
     hostId,
@@ -296,16 +341,26 @@ export async function rebuildPane(
 async function resumeTail(paneId: string, withResume: boolean, deps: RebuildDeps): Promise<RebuildReport> {
   const op = useRebuildStore.getState().operations[paneId]
   if (!op || !op.createdSession) {
-    return {
-      hostId: op?.hostId ?? '',
-      steps: {
-        create: skipped(),
-        resume: { status: 'failed', error: `no completed rebuild is recorded for pane ${paneId}` },
-        repoint: skipped(),
-      },
-      repointed: false,
-    }
+    return refusedReport(op?.hostId ?? '', 'resume', `no completed rebuild is recorded for pane ${paneId}`)
   }
+  if (op.status === 'running') {
+    return refusedReport(op.hostId, 'resume', `a rebuild is already running for pane ${paneId}`)
+  }
+  return withOperationLock(
+    paneOwner(paneId),
+    () => runResumeTail(paneId, withResume, deps),
+    (holder) => refusedReport(op.hostId, 'resume', `another operation is already running (${holder})`),
+  )
+}
+
+async function runResumeTail(paneId: string, withResume: boolean, deps: RebuildDeps): Promise<RebuildReport> {
+  const op = useRebuildStore.getState().operations[paneId]
+  // Re-read under the lock; `resumeTail` already proved both of these hold.
+  if (!op || !op.createdSession) {
+    return refusedReport(op?.hostId ?? '', 'resume', `no completed rebuild is recorded for pane ${paneId}`)
+  }
+  // Back to `running` so the same-pane refusal above covers a retry too.
+  useRebuildStore.getState().patchOperation(paneId, { status: 'running' })
 
   // Carry the create result forward: the session it made is still the subject.
   const report: RebuildReport = { ...op.report, steps: { ...op.report.steps }, repointed: false }

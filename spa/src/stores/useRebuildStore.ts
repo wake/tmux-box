@@ -34,11 +34,26 @@ export interface RebuildOperation {
   finishedAt?: number
 }
 
+/**
+ * A grant from {@link RebuildState.acquireOperationLock}.
+ *
+ * `outermost` is the whole model: a nested acquire by the SAME owner hands
+ * back a re-entry token whose release is a no-op, so an inner call
+ * (`undoLastRestore` → `restoreAll`) can never unlock the world underneath the
+ * caller that is still relying on it. Only the outermost token releases.
+ */
+export interface OperationLockToken {
+  readonly owner: string
+  readonly outermost: boolean
+}
+
 interface RebuildState {
   operations: Record<string, RebuildOperation>
   /**
-   * The single global operation lock. Declared here now so the store shape is
-   * settled; the locking policy itself arrives with Task 14.
+   * The single global operation lock (spec §4.11). Everything that creates
+   * tmux sessions or rewrites the tab tree — the rebuild engine and all five
+   * legacy snapshot actions — passes through it, so a legacy restore can never
+   * replace the tab snapshot underneath an in-flight rebuild's re-point.
    */
   lockedBy: string | null
 
@@ -46,9 +61,14 @@ interface RebuildState {
   patchOperation: (paneId: string, patch: Partial<RebuildOperation>) => void
   finishOperation: (paneId: string, patch: Partial<RebuildOperation>) => void
   clearOperation: (paneId: string) => void
+
+  /** A token when granted, `null` when a DIFFERENT owner already holds it. */
+  acquireOperationLock: (owner: string) => OperationLockToken | null
+  /** No-op unless the token is the outermost grant of the current holder. */
+  releaseOperationLock: (token: OperationLockToken | null) => void
 }
 
-export const useRebuildStore = create<RebuildState>()((set) => ({
+export const useRebuildStore = create<RebuildState>()((set, get) => ({
   operations: {},
   lockedBy: null,
 
@@ -85,4 +105,44 @@ export const useRebuildStore = create<RebuildState>()((set) => ({
       const { [paneId]: _dropped, ...rest } = state.operations
       return { operations: rest }
     }),
+
+  acquireOperationLock: (owner) => {
+    const held = get().lockedBy
+    if (held === null) {
+      set({ lockedBy: owner })
+      return { owner, outermost: true }
+    }
+    // Same owner → re-entry. NOTE for the engine: `rebuild:<paneId>` is
+    // pane-specific, so re-entry alone would let two operations on one pane
+    // both proceed. The engine refuses that on `operations[paneId].status`
+    // BEFORE it ever gets here.
+    if (held === owner) return { owner, outermost: false }
+    return null
+  },
+
+  releaseOperationLock: (token) => {
+    if (!token || !token.outermost) return
+    // A token that is not the current holder's (forged, or left over from an
+    // earlier operation) must never unlock somebody else's work.
+    set((state) => (state.lockedBy === token.owner ? { lockedBy: null } : state))
+  },
 }))
+
+/**
+ * Run `body` while holding the operation lock for `owner`, releasing it however
+ * the body settles. When another owner holds it, `onRefused` is called with the
+ * holder's name and the body never runs.
+ */
+export async function withOperationLock<T>(
+  owner: string,
+  body: () => Promise<T>,
+  onRefused: (holder: string) => T,
+): Promise<T> {
+  const token = useRebuildStore.getState().acquireOperationLock(owner)
+  if (!token) return onRefused(useRebuildStore.getState().lockedBy ?? '')
+  try {
+    return await body()
+  } finally {
+    useRebuildStore.getState().releaseOperationLock(token)
+  }
+}

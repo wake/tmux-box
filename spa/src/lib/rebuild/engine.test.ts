@@ -285,3 +285,83 @@ describe('retryResume / attachAnyway', () => {
     expect(report.steps.resume.status).toBe('failed')
   })
 })
+
+// ---------------------------------------------------------------------------
+// The shared operation lock (spec §4.11). The owner is `rebuild:<paneId>`, so
+// re-entrancy alone would let two operations on ONE pane both proceed — the
+// engine therefore checks `operations[paneId].status` BEFORE it acquires.
+// ---------------------------------------------------------------------------
+describe('rebuildPane — operation lock', () => {
+  beforeEach(() => {
+    useRebuildStore.setState({ operations: {}, lockedBy: null })
+    useSessionStore.setState({ sessions: {}, activeHostId: null, activeCode: null })
+    seedHost('h1')
+    seedPane('h1', 't1', 'p1', { cwd: '/w', resumeCommand: 'claude --resume S1' })
+    vi.unstubAllGlobals()
+  })
+
+  it('holds the lock for the duration and releases it afterwards', async () => {
+    let heldDuringCreate: string | null = null
+    await rebuildPane('h1', 't1', 'p1', plan, {
+      createSession: vi.fn(async () => {
+        heldDuringCreate = useRebuildStore.getState().lockedBy
+        return session({ code: 'new1', name: 'dev', tmux_instance: '222:2000' })
+      }),
+      sendKeys: vi.fn(),
+    })
+    expect(heldDuringCreate).toBe('rebuild:p1')
+    expect(useRebuildStore.getState().lockedBy).toBeNull()
+  })
+
+  it('releases the lock even when the operation fails before it starts', async () => {
+    const report = await rebuildPane('gone', 't1', 'p1', plan, { createSession: vi.fn(), sendKeys: vi.fn() })
+    expect(report.steps.create.status).toBe('failed')
+    expect(useRebuildStore.getState().lockedBy).toBeNull()
+  })
+
+  it('refuses a second concurrent operation on the same pane', async () => {
+    const neverResolves = vi.fn(() => new Promise<Session>(() => {}))
+    const first = rebuildPane('h1', 't1', 'p1', plan, { createSession: neverResolves, sendKeys: vi.fn() })
+    const blocked = vi.fn()
+    const second = await rebuildPane('h1', 't1', 'p1', plan, { createSession: blocked, sendKeys: vi.fn() })
+    expect(second.steps.create.status).toBe('failed')
+    expect(blocked).not.toHaveBeenCalled()
+    // The refusal must neither unlock nor overwrite the running operation.
+    expect(useRebuildStore.getState().lockedBy).toBe('rebuild:p1')
+    expect(useRebuildStore.getState().operations['p1'].status).toBe('running')
+    void first
+  })
+
+  it('refuses to start while a legacy snapshot action holds the lock', async () => {
+    useRebuildStore.getState().acquireOperationLock('snapshot:restoreAll')
+    const create = vi.fn()
+    const report = await rebuildPane('h1', 't1', 'p1', plan, { createSession: create, sendKeys: vi.fn() })
+    expect(create).not.toHaveBeenCalled()
+    expect(report.steps.create.status).toBe('failed')
+    expect(report.steps.create.error).toContain('snapshot:restoreAll')
+    expect(useRebuildStore.getState().lockedBy).toBe('snapshot:restoreAll')
+  })
+
+  it('refuses retryResume while a legacy snapshot action holds the lock', async () => {
+    await rebuildPane('h1', 't1', 'p1', plan, {
+      createSession: vi.fn(async () => session({ code: 'new1', name: 'dev', tmux_instance: '222:2000' })),
+      sendKeys: vi.fn(async () => { throw new Error('boom') }),
+    })
+    useRebuildStore.getState().acquireOperationLock('snapshot:restoreAll')
+    const sendKeys = vi.fn()
+    const report = await retryResume('p1', { sendKeys })
+    expect(sendKeys).not.toHaveBeenCalled()
+    expect(report.steps.resume.status).toBe('failed')
+    expect(useRebuildStore.getState().lockedBy).toBe('snapshot:restoreAll')
+  })
+
+  it('attachAnyway takes and releases the lock', async () => {
+    await rebuildPane('h1', 't1', 'p1', plan, {
+      createSession: vi.fn(async () => session({ code: 'new1', name: 'dev', tmux_instance: '222:2000' })),
+      sendKeys: vi.fn(async () => { throw new Error('boom') }),
+    })
+    const report = await attachAnyway('p1', { sendKeys: vi.fn() })
+    expect(report.repointed).toBe(true)
+    expect(useRebuildStore.getState().lockedBy).toBeNull()
+  })
+})

@@ -9,6 +9,7 @@ import * as storageModule from '../../lib/snapshot/storage'
 import * as hostApiModule from '../../lib/host-api'
 import * as captureModule from '../../lib/snapshot/capture'
 import * as restoreModule from '../../lib/snapshot/restore'
+import { useRebuildStore } from '../../stores/useRebuildStore'
 
 // Partial mock: stub the storage read/write boundary but keep the REAL
 // setSessionMetaCwd so the cwd-edit → restorable-flip drives end-to-end.
@@ -89,6 +90,7 @@ const mockedUndo = vi.mocked(restoreModule.undoLastRestore)
 
 beforeEach(() => {
   vi.clearAllMocks()
+  useRebuildStore.setState({ operations: {}, lockedBy: null })
   mockedReadPrev.mockReturnValue(null)
   mockedListSessions.mockResolvedValue([])
   // Safe defaults so an unstubbed click never crashes on `await undefined`.
@@ -460,6 +462,51 @@ describe('SnapshotSettingsSection — action wiring (T9)', () => {
       expect(mockedRestoreAll).toHaveBeenCalledTimes(1)
     })
     release(EMPTY_REPORT)
+  })
+})
+
+describe('SnapshotSettingsSection — shared operation lock (§4.11)', () => {
+  it('a rebuild holding the lock disables every snapshot action', () => {
+    mockedReadSnapshot.mockReturnValue(snapWithData())
+    mockedReadPrev.mockReturnValue(snapWithData())
+    useRebuildStore.setState({ lockedBy: 'rebuild:p1' })
+
+    render(<SnapshotSettingsSection />)
+    for (const id of [
+      'snapshot-capture-btn',
+      'snapshot-restore-all-btn',
+      'snapshot-undo-btn',
+      'snapshot-rebuild-btn',
+      'snapshot-restore-tab-btn',
+    ]) {
+      expect(screen.getByTestId(id)).toBeDisabled()
+    }
+  })
+
+  it('every snapshot action is enabled again once the lock is free', () => {
+    mockedReadSnapshot.mockReturnValue(snapWithData())
+    mockedReadPrev.mockReturnValue(snapWithData())
+
+    render(<SnapshotSettingsSection />)
+    for (const id of [
+      'snapshot-capture-btn',
+      'snapshot-restore-all-btn',
+      'snapshot-undo-btn',
+      'snapshot-rebuild-btn',
+      'snapshot-restore-tab-btn',
+    ]) {
+      expect(screen.getByTestId(id)).toBeEnabled()
+    }
+  })
+
+  it('a held lock also blocks an inline cwd edit', () => {
+    mockedReadSnapshot.mockReturnValue(snapWithData())
+    useRebuildStore.setState({ lockedBy: 'rebuild:p1' })
+
+    render(<SnapshotSettingsSection />)
+    fireEvent.doubleClick(screen.getByText('/x'))
+    expect(screen.queryByDisplayValue('/x')).toBeNull()
+    expect(mockedWriteSnapshot).not.toHaveBeenCalled()
   })
 })
 
