@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowCounterClockwise,
   ArrowsClockwise,
@@ -22,6 +22,20 @@ import {
   SNAPSHOT_LOCK_OWNER,
 } from '../../lib/snapshot/restore'
 import { useRebuildStore } from '../../stores/useRebuildStore'
+import { useTabStore } from '../../stores/useTabStore'
+import {
+  BATCH_LOCK_OWNER,
+  collectRecordRows,
+  groupForBatch,
+  batchCandidates,
+  planForRecord,
+  recordsDisagree,
+  runBatchRebuild,
+  type BatchCandidate,
+  type BatchGroup,
+  type RecordRow,
+} from '../../lib/rebuild/batch'
+import { rebuildPane } from '../../lib/rebuild/engine'
 import { RestoreError } from '../../lib/snapshot/types'
 import type { RestoreReport, SessionMeta, WorkspaceSnapshot } from '../../lib/snapshot/types'
 import { listSessions } from '../../lib/host-api'
@@ -78,6 +92,24 @@ function computeHealth(meta: SessionMeta, live: HostLive): Health {
   return 'dead'
 }
 
+/**
+ * The same four states over a per-tab rebuild record (spec §4.11). Deliberately
+ * the same precedence as {@link computeHealth} — an unreachable host wins, then
+ * a live code+name match, then "we could not put it back where it was" — so the
+ * two tables in this section never disagree about what a colour means.
+ *
+ * ⚠️ here is a record with no cwd: Rebuild would open a shell in the wrong
+ * directory, which is exactly the "structure only" the snapshot table means.
+ */
+function computeRecordHealth(row: RecordRow, live: HostLive): Health {
+  if (live === 'loading') return 'loading'
+  if (live === 'offline') return 'offline'
+  const name = row.record?.sessionName || row.cachedName
+  if (live.some((s) => s.code === row.sessionCode && s.name === name)) return 'live'
+  if (!row.record?.cwd) return 'structure'
+  return 'dead'
+}
+
 const HEALTH_ICON: Record<Health, typeof CheckCircle> = {
   loading: CircleNotch,
   live: CheckCircle,
@@ -92,6 +124,33 @@ const HEALTH_COLOR: Record<Health, string> = {
   dead: 'text-red-500',
   structure: 'text-yellow-500',
   offline: 'text-text-muted',
+}
+
+/**
+ * The section's one health indicator, so the captured-snapshot table and the
+ * per-tab records table cannot drift apart in icon, colour or wording.
+ */
+function HealthBadge({
+  health,
+  testId,
+  t,
+}: {
+  health: Health
+  testId: string
+  t: ReturnType<typeof useI18nStore.getState>['t']
+}) {
+  const Icon = HEALTH_ICON[health]
+  return (
+    <span
+      data-testid={testId}
+      data-health={health}
+      title={t(`settings.snapshot.health.${health}`)}
+      className={`inline-flex items-center gap-1 ${HEALTH_COLOR[health]}`}
+    >
+      <Icon size={14} className={health === 'loading' ? 'animate-spin' : ''} />
+      {t(`settings.snapshot.health.${health}`)}
+    </span>
+  )
 }
 
 /** Human label for a leaf pane, used in the Tabs tree (block 2). */
@@ -155,9 +214,27 @@ export function SnapshotSettingsSection() {
   // current snapshot's hosts to 'loading' so a re-run drops stale per-host results;
   // every subsequent setState happens in an async callback guarded by `cancelled`,
   // so there is never a setState-after-unmount.
+  // The per-tab rebuild records (spec §4.11) — a view over the LIVE tab tree,
+  // not over the captured snapshot, so it renders whether or not a snapshot
+  // exists. `tabs` is the store's own object reference: it changes only when a
+  // tab does, which is exactly when the rows have to be recomputed.
+  const tabs = useTabStore((s) => s.tabs)
+  const recordRows = useMemo(() => collectRecordRows(tabs), [tabs])
+  const { groups: recordGroups, excluded: recordExcluded } = useMemo(
+    () => groupForBatch(batchCandidates(recordRows)),
+    [recordRows],
+  )
+  // A stable primitive so the reconciliation effect below re-runs when the SET
+  // of hosts changes, not on every unrelated tab edit.
+  const recordHostKey = useMemo(
+    () => Array.from(new Set(recordRows.map((r) => r.hostId))).sort().join(','),
+    [recordRows],
+  )
+
   useEffect(() => {
-    if (!snap) return
-    const hostIds = Object.keys(snap.sessionMeta)
+    const recordHosts = recordHostKey ? recordHostKey.split(',') : []
+    const hostIds = Array.from(new Set([...Object.keys(snap?.sessionMeta ?? {}), ...recordHosts]))
+    if (hostIds.length === 0) return
     setLiveByHost(Object.fromEntries(hostIds.map((h) => [h, 'loading' as HostLive])))
     let cancelled = false
     for (const hostId of hostIds) {
@@ -172,7 +249,7 @@ export function SnapshotSettingsSection() {
     return () => {
       cancelled = true
     }
-  }, [snap])
+  }, [snap, recordHostKey])
 
   // Re-read the persisted snapshot into state. Because storage returns a fresh
   // object, this bumps the `snap` reference → the reconciliation effect re-fires
@@ -318,6 +395,60 @@ export function SnapshotSettingsSection() {
     snap && runRestore(SNAPSHOT_LOCK_OWNER.restoreAll, () => restoreAll(snap))
   const handleUndo = () => runRestore(SNAPSHOT_LOCK_OWNER.undo, () => undoLastRestore())
 
+  /**
+   * The two entry points into the new engine. Both go through the SAME
+   * single-flight ref and the same lock as the legacy actions above — a batch
+   * and a legacy restore may never interleave (spec §4.11) — and neither
+   * touches the captured snapshot, so no `refresh()` is needed afterwards.
+   */
+  const runRebuildAction = async (owner: string, action: () => Promise<Status>) => {
+    if (busyRef.current) return
+    if (refuseWhileLocked(owner)) return
+    busyRef.current = true
+    setBusy(true)
+    setStatus({ tone: 'busy', message: t('rebuild.batch_running') })
+    try {
+      setStatus(await action())
+    } catch (e) {
+      setStatus({ tone: 'error', message: t('settings.snapshot.toast.restoreFailed', { reason: errMessage(e) }) })
+    } finally {
+      busyRef.current = false
+      setBusy(false)
+    }
+  }
+
+  const handleRebuildAll = () =>
+    runRebuildAction(BATCH_LOCK_OWNER, async () => {
+      const report = await runBatchRebuild()
+      if (report.status === 'blocked') {
+        return { tone: 'warn', message: t('settings.snapshot.toast.locked', { owner: report.blockedBy ?? '' }) }
+      }
+      const created = report.groups.filter((g) => g.report.created).length
+      // Every pane that ended up on a new session: the group's own source plus
+      // each member that still matched its binding.
+      const repointed = report.groups.reduce(
+        (n, g) => n + (g.report.repointed ? 1 : 0) + g.members.filter((m) => m.repointed).length,
+        0,
+      )
+      return {
+        tone: created === report.groups.length ? 'success' : 'warn',
+        message: t('rebuild.batch_report', { created, total: report.groups.length, repointed }),
+        attrs: { 'data-groups': report.groups.length, 'data-created': created, 'data-repointed': repointed },
+      }
+    })
+
+  const handleRebuildOne = (pane: BatchCandidate) =>
+    runRebuildAction(`rebuild:${pane.paneId}`, async () => {
+      const report = await rebuildPane(pane.hostId, pane.tabId, pane.paneId, planForRecord(pane.record))
+      if (report.steps.create.status === 'failed') {
+        return { tone: 'error', message: report.steps.create.error ?? t('settings.snapshot.toast.restoreError') }
+      }
+      return {
+        tone: report.repointed ? 'success' : 'warn',
+        message: t('rebuild.batch_report', { created: 1, total: 1, repointed: report.repointed ? 1 : 0 }),
+      }
+    })
+
   return (
     <div>
       <h2 className="text-lg text-text-primary">{t('settings.section.snapshot')}</h2>
@@ -343,12 +474,30 @@ export function SnapshotSettingsSection() {
         </button>
       </SettingItem>
 
+      <RebuildRecordsBlock
+        rows={recordRows}
+        groups={recordGroups}
+        excluded={recordExcluded}
+        liveByHost={liveByHost}
+        busy={busy || lockedOut(BATCH_LOCK_OWNER)}
+        lockedOut={lockedOut}
+        onRebuildAll={handleRebuildAll}
+        onRebuildOne={handleRebuildOne}
+        t={t}
+      />
+
       {!snap ? (
         <p data-testid="snapshot-empty" className="text-xs text-text-muted mt-4">
           {t('settings.snapshot.empty')}
         </p>
       ) : (
         <>
+          {/* Spec §4.11 capability table: none of the legacy actions below ever
+              runs an agent command — they recreate the session as a bare shell. */}
+          <p data-testid="snapshot-legacy-shell-only" className="mt-6 text-xs text-status-warning">
+            {t('rebuild.legacy_shell_only')}
+          </p>
+
           <SettingItem
             label={t('settings.snapshot.restore.label')}
             description={t('settings.snapshot.restore.description')}
@@ -437,6 +586,139 @@ function StatusLine({ status }: { status: Status }) {
   )
 }
 
+/**
+ * The per-tab rebuild records (spec §4.11): one row per terminal tmux pane,
+ * the four-state health indicator this section already uses, "Rebuild all"
+ * over the grouped dead ones, and — separately — the panes whose generation is
+ * unknown, which the batch deliberately refuses to group by code alone.
+ */
+function RebuildRecordsBlock({
+  rows,
+  groups,
+  excluded,
+  liveByHost,
+  busy,
+  lockedOut,
+  onRebuildAll,
+  onRebuildOne,
+  t,
+}: {
+  rows: RecordRow[]
+  groups: BatchGroup[]
+  excluded: BatchCandidate[]
+  liveByHost: Record<string, HostLive>
+  busy: boolean
+  lockedOut: (owner: string) => boolean
+  onRebuildAll: () => void
+  onRebuildOne: (pane: BatchCandidate) => void
+  t: ReturnType<typeof useI18nStore.getState>['t']
+}) {
+  // Only the groups whose members disagree need naming — saying "using p1"
+  // when there is nothing to choose between is noise.
+  const conflicts = groups.filter((group) => {
+    const members = group.paneIds
+      .map((paneId) => rows.find((r) => r.paneId === paneId)?.record)
+      .filter((record): record is NonNullable<typeof record> => !!record)
+    return members.some((record) => recordsDisagree(record, group.record))
+  })
+
+  return (
+    <div data-testid="rebuild-records-block" className="mt-6">
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-sm text-text-primary">{t('rebuild.batch_title')}</h3>
+        <button
+          type="button"
+          data-testid="record-rebuild-all-btn"
+          onClick={onRebuildAll}
+          disabled={busy || groups.length === 0}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-border-default text-text-secondary text-xs hover:text-text-primary hover:border-border-active disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <ArrowsClockwise size={14} />
+          {t('rebuild.batch_run')}
+        </button>
+      </div>
+
+      {rows.length === 0 ? (
+        <p data-testid="rebuild-records-none" className="text-xs text-text-muted">{t('rebuild.batch_none')}</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs text-text-secondary">
+            <thead>
+              <tr className="text-text-muted text-left">
+                <th className="py-1 pr-3 font-normal">{t('settings.snapshot.col.host')}</th>
+                <th className="py-1 pr-3 font-normal">{t('settings.snapshot.col.name')}</th>
+                <th className="py-1 pr-3 font-normal">{t('settings.snapshot.col.cwd')}</th>
+                <th className="py-1 pr-3 font-normal">{t('settings.snapshot.col.command')}</th>
+                <th className="py-1 font-normal">{t('settings.snapshot.col.health')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={row.paneId} className="border-t border-border-default">
+                  <td className="py-1 pr-3 text-text-primary">{row.hostId}</td>
+                  <td className="py-1 pr-3">{row.record?.sessionName || row.cachedName}</td>
+                  <td className="py-1 pr-3 font-mono">{row.record?.cwd || '—'}</td>
+                  <td className="py-1 pr-3 font-mono">{row.record?.resumeCommand || '—'}</td>
+                  <td className="py-1">
+                    <HealthBadge
+                      health={computeRecordHealth(row, liveByHost[row.hostId] ?? 'loading')}
+                      testId={`record-health-${row.paneId}`}
+                      t={t}
+                    />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {conflicts.map((group) => (
+        <p
+          key={group.sourcePaneId}
+          data-testid="batch-conflict-source"
+          className="mt-2 text-[11px] text-status-warning"
+        >
+          {t('rebuild.batch_conflict_source', {
+            name: group.record.sessionName,
+            pane: group.sourcePaneId,
+            cwd: group.record.cwd ?? '—',
+          })}
+        </p>
+      ))}
+
+      {excluded.length > 0 && (
+        <div className="mt-4">
+          <h4 className="text-xs text-text-primary">{t('rebuild.batch_needs_attention')}</h4>
+          <p className="text-[11px] text-text-muted">{t('rebuild.batch_needs_attention_hint')}</p>
+          <ul className="mt-1 flex flex-col gap-1">
+            {excluded.map((pane) => (
+              <li
+                key={pane.paneId}
+                data-testid={`record-attention-${pane.paneId}`}
+                className="flex items-center justify-between gap-2 text-xs"
+              >
+                <span className="truncate font-mono text-text-secondary">
+                  {pane.record.sessionName} · {pane.hostId}
+                </span>
+                <button
+                  type="button"
+                  data-testid={`record-attention-rebuild-${pane.paneId}`}
+                  onClick={() => onRebuildOne(pane)}
+                  disabled={busy || lockedOut(`rebuild:${pane.paneId}`)}
+                  className="shrink-0 rounded-md border border-border-default px-2.5 py-1 text-xs text-text-secondary hover:text-text-primary hover:border-border-active disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {t('rebuild.button')}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function TmuxBlock({
   snap,
   liveByHost,
@@ -490,7 +772,6 @@ function TmuxBlock({
             <tbody>
               {rows.map((meta) => {
                 const health = computeHealth(meta, liveByHost[meta.hostId] ?? 'loading')
-                const Icon = HEALTH_ICON[health]
                 return (
                   <tr key={`${meta.hostId}:${meta.sessionCode}`} className="border-t border-border-default">
                     <td className="py-1 pr-3 text-text-primary">{meta.hostId}</td>
@@ -504,15 +785,11 @@ function TmuxBlock({
                     </td>
                     <td className="py-1 pr-3 font-mono">{meta.currentCommand ?? '—'}</td>
                     <td className="py-1">
-                      <span
-                        data-testid={`snapshot-health-${meta.hostId}-${meta.sessionCode}`}
-                        data-health={health}
-                        title={t(`settings.snapshot.health.${health}`)}
-                        className={`inline-flex items-center gap-1 ${HEALTH_COLOR[health]}`}
-                      >
-                        <Icon size={14} className={health === 'loading' ? 'animate-spin' : ''} />
-                        {t(`settings.snapshot.health.${health}`)}
-                      </span>
+                      <HealthBadge
+                        health={health}
+                        testId={`snapshot-health-${meta.hostId}-${meta.sessionCode}`}
+                        t={t}
+                      />
                     </td>
                   </tr>
                 )

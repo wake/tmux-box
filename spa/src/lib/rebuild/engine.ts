@@ -13,7 +13,12 @@
 // There is no rollback: a created session is a real session, so every partial
 // failure keeps it named in the report.
 import { pinHost, type PinnedTransport } from './transport'
-import { useRebuildStore, withOperationLock, type RebuildBinding } from '../../stores/useRebuildStore'
+import {
+  useRebuildStore,
+  withOperationLock,
+  type OperationLockToken,
+  type RebuildBinding,
+} from '../../stores/useRebuildStore'
 import { useTabStore } from '../../stores/useTabStore'
 import { useSessionStore } from '../../stores/useSessionStore'
 import { findPane } from '../pane-tree'
@@ -44,6 +49,15 @@ export interface RebuildDeps {
   createSession?: (hostId: string, name: string, cwd: string, mode: string) => Promise<Session>
   sendKeys?: (hostId: string, code: string, command: string) => Promise<void>
   repoint?: (tabId: string, paneId: string, session: Session) => void
+  /**
+   * A lock the CALLER already holds (spec §4.11). "Rebuild all" takes the
+   * operation lock once as `rebuild:batch` and hands its token to every group
+   * it runs, because the lock is re-entrant per *owner* and `rebuild:<paneId>`
+   * is a different owner — each group acquiring its own would simply be
+   * refused. The token is verified against the current holder before it is
+   * honoured, so a stale one cannot smuggle an operation past the lock.
+   */
+  lockToken?: OperationLockToken
 }
 
 /** `name`, `name-2`, … `name-5`. Five attempts, then the operation gives up. */
@@ -153,6 +167,27 @@ function defaultRepoint(tabId: string, paneId: string, session: Session): void {
   syncSessionStore(content.hostId, session, content.sessionCode)
 }
 
+/**
+ * Re-point one further pane of a batch group onto the session the group's
+ * source pane already created (spec §4.11): one create and one resume per
+ * group, with EVERY pane in it re-pointed.
+ *
+ * Each member re-verifies its own binding first, against the baseline the
+ * batch planned from — a pane that moved while the create was in flight keeps
+ * whatever it moved to. Returns whether the pane was re-pointed.
+ */
+export function repointMember(
+  tabId: string,
+  paneId: string,
+  binding: RebuildBinding,
+  created: Session,
+  repoint: NonNullable<RebuildDeps['repoint']> = defaultRepoint,
+): boolean {
+  if (!bindingUnchanged(tabId, paneId, binding)) return false
+  repoint(tabId, paneId, created)
+  return true
+}
+
 /** Everything the resume and re-point steps need, however they were reached. */
 interface StepContext {
   hostId: string
@@ -240,6 +275,16 @@ export async function rebuildPane(
 ): Promise<RebuildReport> {
   if (paneBusy(paneId)) {
     return refusedReport(hostId, 'create', `a rebuild is already running for pane ${paneId}`)
+  }
+  const borrowed = deps.lockToken
+  if (borrowed) {
+    const holder = useRebuildStore.getState().lockedBy
+    if (holder !== borrowed.owner) {
+      return refusedReport(hostId, 'create', `the caller's operation lock (${borrowed.owner}) is no longer held`)
+    }
+    // Run inside the caller's lock — and never release it: the batch is not
+    // finished when one group is.
+    return runRebuild(hostId, tabId, paneId, plan, deps)
   }
   return withOperationLock(
     paneOwner(paneId),
