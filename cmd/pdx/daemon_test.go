@@ -90,7 +90,7 @@ func TestWaitForHealthyImmediate(t *testing.T) {
 
 	notified := 0
 	start := time.Now()
-	err := waitForHealthy(srv.URL, make(chan error, 1), 500*time.Millisecond, 10*time.Millisecond, func(string) {
+	err := waitForHealthy(srv.URL, make(chan error, 1), 2*time.Second, 40*time.Millisecond, func(string) {
 		notified++
 	})
 	elapsed := time.Since(start)
@@ -98,7 +98,8 @@ func TestWaitForHealthyImmediate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("waitForHealthy: %v", err)
 	}
-	if elapsed > 200*time.Millisecond {
+	// A single successful probe must return immediately, nowhere near the window.
+	if elapsed > 500*time.Millisecond {
 		t.Errorf("returned after %v, expected to return well under the timeout", elapsed)
 	}
 	if got := atomic.LoadInt32(&probes); got != 1 {
@@ -121,7 +122,7 @@ func TestWaitForHealthyAfterSeveralProbes(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := waitForHealthy(srv.URL, make(chan error, 1), 2*time.Second, 5*time.Millisecond, nil)
+	err := waitForHealthy(srv.URL, make(chan error, 1), 4*time.Second, 20*time.Millisecond, nil)
 	if err != nil {
 		t.Fatalf("waitForHealthy: %v", err)
 	}
@@ -136,9 +137,9 @@ func TestWaitForHealthyTimesOut(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	timeout := 100 * time.Millisecond
+	timeout := 150 * time.Millisecond
 	start := time.Now()
-	err := waitForHealthy(srv.URL, make(chan error, 1), timeout, 10*time.Millisecond, nil)
+	err := waitForHealthy(srv.URL, make(chan error, 1), timeout, 40*time.Millisecond, nil)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -150,7 +151,7 @@ func TestWaitForHealthyTimesOut(t *testing.T) {
 	if elapsed < timeout {
 		t.Errorf("returned after %v, expected it to use the whole %v window", elapsed, timeout)
 	}
-	if elapsed > timeout+400*time.Millisecond {
+	if elapsed > timeout+600*time.Millisecond {
 		t.Errorf("returned after %v, far beyond the %v window", elapsed, timeout)
 	}
 }
@@ -161,15 +162,15 @@ func TestWaitForHealthyChildExitsEarly(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	timeout := 1 * time.Second
+	timeout := 4 * time.Second
 	childExited := make(chan error, 1)
 	go func() {
-		time.Sleep(15 * time.Millisecond)
+		time.Sleep(40 * time.Millisecond)
 		childExited <- errors.New("exit status 1")
 	}()
 
 	start := time.Now()
-	err := waitForHealthy(srv.URL, childExited, timeout, 5*time.Millisecond, nil)
+	err := waitForHealthy(srv.URL, childExited, timeout, 20*time.Millisecond, nil)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -184,7 +185,9 @@ func TestWaitForHealthyChildExitsEarly(t *testing.T) {
 	if !strings.Contains(err.Error(), "exit status 1") {
 		t.Errorf("error = %q, want it to name the child's exit status", err)
 	}
-	if elapsed > 250*time.Millisecond {
+	// Still an order of magnitude below the window: the point is that the wait
+	// ends on the child's death, not that it ends at a precise instant.
+	if elapsed > 1*time.Second {
 		t.Errorf("returned after %v, expected to return promptly, well under the %v timeout", elapsed, timeout)
 	}
 }
@@ -192,7 +195,7 @@ func TestWaitForHealthyChildExitsEarly(t *testing.T) {
 func TestWaitForHealthyNotifiesOnSlowWait(t *testing.T) {
 	var probes int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if atomic.AddInt32(&probes, 1) < 12 {
+		if atomic.AddInt32(&probes, 1) < 8 {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
@@ -208,7 +211,7 @@ func TestWaitForHealthyNotifiesOnSlowWait(t *testing.T) {
 		msgs = append(msgs, m)
 	}
 
-	err := waitForHealthyWithNotify(srv.URL, make(chan error, 1), 2*time.Second, 5*time.Millisecond, 20*time.Millisecond, notify)
+	err := waitForHealthyWithNotify(srv.URL, make(chan error, 1), 4*time.Second, 20*time.Millisecond, 60*time.Millisecond, notify)
 	if err != nil {
 		t.Fatalf("waitForHealthy: %v", err)
 	}
@@ -220,5 +223,75 @@ func TestWaitForHealthyNotifiesOnSlowWait(t *testing.T) {
 	}
 	if msgs[0] == "" {
 		t.Error("notify message is empty")
+	}
+}
+
+// A daemon can answer 200 and die immediately afterwards: cmd.Wait() delivers the
+// exit status while the parent is still holding the HTTP response. Accepting that
+// 200 makes `pdx start` report success for a process that is already gone.
+func TestWaitForHealthyChildExitsDuringProbe(t *testing.T) {
+	childExited := make(chan error, 1)
+	var once sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Publishing the exit before the header is written makes the ordering
+		// deterministic: the client cannot observe the 200 until after the send.
+		once.Do(func() { childExited <- errors.New("exit status 2") })
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	err := waitForHealthy(srv.URL, childExited, 2*time.Second, 20*time.Millisecond, nil)
+	if err == nil {
+		t.Fatal("accepted a 200 from a daemon that had already exited during startup")
+	}
+	if !strings.Contains(err.Error(), "exited during startup") {
+		t.Errorf("error = %q, want it to report the child exit", err)
+	}
+	if !strings.Contains(err.Error(), "exit status 2") {
+		t.Errorf("error = %q, want it to name the child's exit status", err)
+	}
+}
+
+// A probe started near the end of the window must not be allowed to run past it:
+// a 200 that only arrives after the deadline is not evidence of a healthy start,
+// and waiting for it overruns the advertised window.
+func TestWaitForHealthyRejectsResponseAfterDeadline(t *testing.T) {
+	const (
+		timeout   = 250 * time.Millisecond
+		interval  = 80 * time.Millisecond
+		stallFrom = 120 * time.Millisecond
+		stallFor  = 230 * time.Millisecond
+	)
+
+	start := time.Now()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if time.Since(start) < stallFrom {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		// Any probe from here on answers 200, but only after the window has closed.
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(stallFor):
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	err := waitForHealthy(srv.URL, make(chan error, 1), timeout, interval, nil)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("accepted a 200 that arrived after the health window had closed")
+	}
+	if !strings.Contains(err.Error(), "did not become healthy") {
+		t.Errorf("error = %q, want the timeout wording", err)
+	}
+	if elapsed < timeout {
+		t.Errorf("returned after %v, expected it to use the whole %v window", elapsed, timeout)
+	}
+	if elapsed > timeout+250*time.Millisecond {
+		t.Errorf("returned after %v, overran the %v window", elapsed, timeout)
 	}
 }

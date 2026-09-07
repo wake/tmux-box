@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -38,14 +39,18 @@ func waitForHealthy(healthURL string, childExited <-chan error, timeout, interva
 // waitForHealthyWithNotify is waitForHealthy with an injectable notify threshold,
 // so tests do not have to wait out the production one.
 func waitForHealthyWithNotify(healthURL string, childExited <-chan error, timeout, interval, notifyAfter time.Duration, notify func(string)) error {
-	probeTimeout := 5 * interval
-	if probeTimeout > timeout {
-		probeTimeout = timeout
+	maxProbeTimeout := 5 * interval
+	if maxProbeTimeout > timeout {
+		maxProbeTimeout = timeout
 	}
-	client := &http.Client{Timeout: probeTimeout}
+	client := &http.Client{}
 
 	start := time.Now()
 	deadline := start.Add(timeout)
+	// The whole wait is bounded by one context, so no probe can outlive the window.
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+
 	notified := false
 
 	for {
@@ -55,17 +60,34 @@ func waitForHealthyWithNotify(healthURL string, childExited <-chan error, timeou
 		default:
 		}
 
-		resp, err := client.Get(healthURL)
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return nil
-			}
-		}
-
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return fmt.Errorf("daemon did not become healthy within %s", timeout)
+			return healthTimeoutError(timeout)
+		}
+
+		// Never let a single probe run past the deadline.
+		probeTimeout := maxProbeTimeout
+		if probeTimeout > remaining {
+			probeTimeout = remaining
+		}
+		healthy, err := probeHealth(ctx, client, healthURL, probeTimeout)
+		if err == nil && healthy {
+			// The 200 is only trustworthy if the daemon is still alive and the
+			// window has not closed while we were holding the response.
+			select {
+			case exitErr := <-childExited:
+				return childExitError(exitErr)
+			default:
+			}
+			if time.Until(deadline) <= 0 {
+				return healthTimeoutError(timeout)
+			}
+			return nil
+		}
+
+		remaining = time.Until(deadline)
+		if remaining <= 0 {
+			return healthTimeoutError(timeout)
 		}
 
 		if notify != nil && !notified && time.Since(start) >= notifyAfter {
@@ -86,6 +108,29 @@ func waitForHealthyWithNotify(healthURL string, childExited <-chan error, timeou
 		case <-timer.C:
 		}
 	}
+}
+
+// probeHealth issues one health request bounded by both probeTimeout and the
+// caller's overall window (parent ctx).
+func probeHealth(ctx context.Context, client *http.Client, healthURL string, probeTimeout time.Duration) (bool, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, healthURL, nil)
+	if err != nil {
+		return false, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK, nil
+}
+
+// healthTimeoutError describes a daemon that never answered inside the window.
+func healthTimeoutError(timeout time.Duration) error {
+	return fmt.Errorf("daemon did not become healthy within %s", timeout)
 }
 
 // childExitError describes a daemon that exited before it became healthy.
