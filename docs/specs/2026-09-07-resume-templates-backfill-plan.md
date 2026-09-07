@@ -74,9 +74,13 @@ hardcoded resume commands with templates, a per-pane override and a shell probe.
 - **`gofmt -l` is not clean at baseline** in `internal/agent/`
   (`cc/readiness_test.go`, `cc/statusline.go`,
   `codex/probe_intent_screen_change_test.go`, `opencode/events_test.go`,
-  `opencode/status.go` were already unformatted at `f37792e`). Format your own
+  `opencode/status.go`) nor in `internal/module/agent/` (`fakes_test.go`,
+  `frame_ops_test.go`, `handler_test.go`, `frame_ops_l2_test.go`,
+  `probe_intent_dispatcher.go`,
+  `probe_intent_dispatcher_observability_test.go`,
+  `probe_orchestrator_test.go`, `statusline_selftest.go`). Format your own
   files; do **not** add a repo-wide `gofmt` gate, and do not reformat those
-  five as a side effect of another task.
+  thirteen as a side effect of another task.
 - **The two identity columns never travel inside a `Frame` round-trip write.**
   Spec §5.2 has the per-method table; Task 1 implements it and Task 3 depends on
   it. Any task that adds a column to `UpsertIfUnchanged`, `UpdateHookPath`,
@@ -277,8 +281,15 @@ Placement matters:
   the proxy-attach fast path and `reconcileCreatedFrameAsProxy` both return
   early with a *parent's* frame. Writing the child's session id onto the
   parent's row would be a real mis-attribution.
-- `sql.ErrNoRows` is logged and swallowed; a frame deleted concurrently is not
-  an error for the caller.
+- **Every store error is logged and swallowed**, not only `sql.ErrNoRows`. The
+  identity write happens *after* the frame mutation has landed, so the event's
+  status semantics are already correct; failing the hook handler with a 500 over
+  an auxiliary column would turn a cosmetic loss into a regression. Use distinct
+  log keys for "frame gone" and "write failed" so the two are separable.
+- Two own-frame returns are **deliberately excluded**: `derive_invalid` (a
+  `/compact` `SessionStart` is rejected upstream and arrives here only as
+  `Valid: false`), and `session_end` (the row has just been `Delete`d — spec
+  §5.2 says the identity goes with the frame).
 - A provider that does not implement `SessionIdentifier` skips the call.
 
 **`applyFrameEvent` has several success returns and only the general one is
@@ -294,7 +305,7 @@ must be exhaustive about) and gives examples of the others.
 | `frame_ops.go:169-176` — `subagent_id_missing`: a `SubagentStart`/`Stop` whose payload has no `agent_id` returns the sender's existing frame as `skipped`. It is still a real own-frame event carrying `session_id`, and cc marks it `Valid` (`cc/status.go:107-110`) | |
 | `frame_ops.go:213-221` — native `SubagentStart`/`SubagentStop` membership change, after `mutateSubagentsWithRetry` | |
 | `frame_ops.go:348-357` — `native_subagent_detached_on_stop_failure` (**native**, not proxy — the reason string says so) | |
-| `frame_ops.go:880` onward — the general `created_frame` / `updated_frame` return | |
+| the general `created_frame` / `updated_frame` return (`frame_ops.go:911` as of `9e75ee2`; the surrounding `else` block holds `reconcileCreatedFrameAsProxy`, so find the return by its `decision`/`reason`, not by line) | |
 
 Returns that hand back **someone else's** frame must not write. These are
 examples, not an exhaustive list — apply the rule: the pre-Upsert proxy fast
@@ -361,6 +372,55 @@ of the ownership invariant for opencode.
 - [ ] **Step 4: Run — pass**
 - [ ] **Step 5:** `go test ./...`
 - [ ] **Step 6: Commit** — `feat(opencode): emit cwd on stop and prompt events`
+
+---
+
+### Task 4b: A subagent's prompt must not rename the pane's session
+
+**Files:**
+- Modify: `internal/agent/opencode/plugin_template.go` (the `chat.message`
+  handler, ~line 168)
+- Modify: `internal/agent/opencode/plugin_template_test.go` and
+  `plugin_template_bun_integration_test.go`
+
+**Why this exists — found while implementing Task 4, not in the original plan.**
+The plugin gates child (subagent) sessions out of `session.created`,
+`session.status`, `session.error` and `session.deleted` via the
+`subagentSessions` map, but **`chat.message` is not gated**. A subagent's prompt
+therefore emits `PdxUserPromptSubmit` carrying the *child's* `session_id`, and
+because parent and child share one pane and one sender PID, Task 3's identity
+write lands it on the parent's frame. The pane's recorded session id then flips
+to a subagent's for as long as that subagent is working, and a Rebuild during
+that window would send `opencode -s <subagent-session>` — resuming the wrong
+conversation.
+
+**The minimal fix, and why it is safe.** When `subagentSessions.has(input.sessionID)`,
+emit the event **without** `session_id` and `cwd`; keep the event itself and
+every other field. `ExtractSessionIdentity` writes only non-empty values, so the
+parent's identity survives untouched.
+
+Nothing downstream reads `session_id` off this event: `deriveOpenCodeStatus`
+puts it in `Detail` only on its `PdxSessionStart` branch
+(`opencode/status.go:15`), and no other consumer exists. So the running/idle
+semantics of a subagent prompt are unchanged — which is deliberate. Do **not**
+suppress the event outright; that would change the lights, which is out of scope.
+
+**Known limit, state it in the test's comment:** the gate is the in-memory
+`subagentSessions` map, so a plugin reload loses it and a child prompt arriving
+afterwards is indistinguishable from a parent's. That degrades to today's
+behaviour rather than to something worse, and `session.created` re-registers the
+child if it is created again.
+
+- [ ] **Step 1: Write the failing tests** — the rendered template gates
+  `session_id`/`cwd` on the child map; the Bun integration test drives a
+  `session.created` **with** a `parentID`, then a `chat.message` for that child,
+  and asserts the emitted `PdxUserPromptSubmit` carries **no** `session_id` and
+  **no** `cwd`; the same test drives a parent `chat.message` and asserts both
+  are present. Keep the existing assertion that a parent lifecycle event is
+  emitted exactly once.
+- [ ] **Step 2: Run — fail** · [ ] **Step 3: Implement** · [ ] **Step 4: Run — pass**
+- [ ] **Step 5:** `go test ./...`
+- [ ] **Step 6: Commit** — `fix(opencode): keep a subagent prompt from renaming the pane's session`
 
 ---
 
