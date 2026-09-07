@@ -333,7 +333,7 @@ async function runRebuild(
   const cwd = plan.applyCwd ? (record?.cwd ?? '') : ''
 
   useRebuildStore.getState().beginOperation({
-    paneId, tabId, hostId, plan, binding, resumeCommand, report,
+    paneId, tabId, hostId, plan, binding, host: pinned.identity, resumeCommand, report,
   })
 
   const createSession = deps.createSession
@@ -382,10 +382,45 @@ async function runRebuild(
   return report
 }
 
+/**
+ * Whether the code the operation created still belongs to the session it
+ * created, expressed as the reason it does not.
+ *
+ * A retry acts on a session created some time ago, and tmux hands out session
+ * codes again after a restart (spec §3.5, §4.5) — so the code alone is not an
+ * identity. The generation stamp that arrived with the create response is
+ * compared against the one on the session the SPA currently sees at that code.
+ *
+ * Unknown is not mismatched: no session at that code (the daemon will reject
+ * the send-keys, harmlessly), or an empty stamp on either side, means there is
+ * no evidence of a stranger — the same rule §4.6 applies to death detection.
+ */
+function targetIdentityMismatch(hostId: string, created: Session): string | null {
+  const createdInstance = created.tmux_instance ?? ''
+  if (!createdInstance) return null
+  const live = (useSessionStore.getState().sessions[hostId] ?? []).find((s) => s.code === created.code)
+  const liveInstance = live?.tmux_instance ?? ''
+  if (!liveInstance || liveInstance === createdInstance) return null
+  return `session ${created.code} on ${hostId} now belongs to tmux generation ${liveInstance}, not the ${createdInstance} this rebuild created`
+}
+
+/**
+ * Stop the tail before it sends or re-points: the target is not provably the
+ * one the operation created, so neither action is safe.
+ */
+function refuseTail(report: RebuildReport, withResume: boolean, reason: string): void {
+  const step: StepResult = { status: 'failed', error: reason }
+  report.steps.resume = withResume ? step : skipped('not requested')
+  report.steps.repoint = step
+  report.repointed = false
+}
+
 /** The shared tail of "Retry resume" and "Attach anyway". */
 async function resumeTail(paneId: string, withResume: boolean, deps: RebuildDeps): Promise<RebuildReport> {
   const op = useRebuildStore.getState().operations[paneId]
-  if (!op || !op.createdSession) {
+  // No created session and no pinned host both mean the same thing: nothing
+  // that a retry could act on. Only a refusal is stored without a host.
+  if (!op || !op.createdSession || !op.host) {
     return refusedReport(op?.hostId ?? '', 'resume', `no completed rebuild is recorded for pane ${paneId}`)
   }
   if (op.status === 'running') {
@@ -400,8 +435,8 @@ async function resumeTail(paneId: string, withResume: boolean, deps: RebuildDeps
 
 async function runResumeTail(paneId: string, withResume: boolean, deps: RebuildDeps): Promise<RebuildReport> {
   const op = useRebuildStore.getState().operations[paneId]
-  // Re-read under the lock; `resumeTail` already proved both of these hold.
-  if (!op || !op.createdSession) {
+  // Re-read under the lock; `resumeTail` already proved all of these hold.
+  if (!op || !op.createdSession || !op.host) {
     return refusedReport(op?.hostId ?? '', 'resume', `no completed rebuild is recorded for pane ${paneId}`)
   }
   // Back to `running` so the same-pane refusal above covers a retry too.
@@ -412,10 +447,18 @@ async function runResumeTail(paneId: string, withResume: boolean, deps: RebuildD
 
   let pinned: PinnedTransport
   try {
-    pinned = pinHost(op.hostId)
+    // Against the identity the operation pinned, NOT whatever the host id
+    // resolves to now: the resume belongs to the machine that created it.
+    pinned = pinHost(op.hostId, op.host)
   } catch (err) {
-    report.steps.resume = failed(err)
-    report.steps.repoint = skipped('resume failed')
+    refuseTail(report, withResume, err instanceof Error ? err.message : String(err))
+    publish(paneId, report, op.createdSession)
+    return report
+  }
+
+  const mismatch = targetIdentityMismatch(op.hostId, op.createdSession)
+  if (mismatch) {
+    refuseTail(report, withResume, mismatch)
     publish(paneId, report, op.createdSession)
     return report
   }

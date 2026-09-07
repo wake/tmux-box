@@ -10,6 +10,7 @@
 import { create } from 'zustand'
 import type { Session } from '../lib/host-api'
 import type { RebuildPlan, RebuildReport } from '../lib/rebuild/engine'
+import type { HostIdentity } from '../lib/rebuild/transport'
 
 /** The pane binding an operation started from — the re-point guard's baseline. */
 export interface RebuildBinding {
@@ -24,6 +25,16 @@ export interface RebuildOperation {
   hostId: string
   plan: RebuildPlan
   binding: RebuildBinding
+  /**
+   * The host configuration the operation pinned at its start. "Retry resume"
+   * re-pins against it instead of re-resolving the host id, so an address the
+   * user edited in between refuses the retry rather than sending the resume
+   * command to a different machine.
+   *
+   * Absent only on a refusal — an operation that never pinned a host, and that
+   * has no created session to retry against either.
+   */
+  host?: HostIdentity
   /** The command step 3 sends; kept so "Retry resume" needs no re-derivation. */
   resumeCommand: string
   /** Set once step 1 succeeds. Its presence is what makes a retry possible. */

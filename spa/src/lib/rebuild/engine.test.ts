@@ -365,3 +365,82 @@ describe('rebuildPane — operation lock', () => {
     expect(useRebuildStore.getState().lockedBy).toBeNull()
   })
 })
+
+// ---------------------------------------------------------------------------
+// A retry runs against a session that was created some time ago. Before it
+// sends anything it has to prove the target is still the same machine and
+// still the same session — the host's address may have been edited, and tmux
+// may have restarted and handed the code to somebody else.
+// ---------------------------------------------------------------------------
+describe('retryResume / attachAnyway — target identity', () => {
+  beforeEach(() => {
+    useRebuildStore.setState({ operations: {}, lockedBy: null })
+    useSessionStore.setState({ sessions: {}, activeHostId: null, activeCode: null })
+    seedHost('h1', { ip: '10.0.0.9' })
+    seedPane('h1', 't1', 'p1', { cwd: '/w', resumeCommand: 'claude --resume S1' })
+    vi.unstubAllGlobals()
+  })
+
+  async function failedResumeOperation() {
+    return rebuildPane('h1', 't1', 'p1', plan, {
+      createSession: vi.fn(async () => session({ code: 'new1', name: 'dev-2', tmux_instance: '222:2000' })),
+      sendKeys: vi.fn(async () => { throw new Error('boom') }),
+    })
+  }
+
+  /** What the SPA currently believes lives on the host. */
+  function seedSessions(...sessions: Session[]) {
+    useSessionStore.setState({ sessions: { h1: sessions } })
+  }
+
+  it('refuses the retry when the host address changed since the operation started', async () => {
+    await failedResumeOperation()
+    // The user edited the host: same id, different machine.
+    seedHost('h1', { ip: '10.0.0.77' })
+    const sendKeys = vi.fn()
+    const report = await retryResume('p1', { sendKeys })
+    expect(sendKeys).not.toHaveBeenCalled()
+    expect(report.steps.resume.status).toBe('failed')
+    expect(report.repointed).toBe(false)
+    expect(paneContent('t1', 'p1')).toMatchObject({ sessionCode: 'old111' })
+  })
+
+  it('refuses the retry when the code now belongs to a different tmux generation', async () => {
+    await failedResumeOperation()
+    // tmux restarted and handed `new1` to somebody else.
+    seedSessions(session({ code: 'new1', name: 'not-ours', tmux_instance: '333:3000' }))
+    const sendKeys = vi.fn()
+    const report = await retryResume('p1', { sendKeys })
+    expect(sendKeys).not.toHaveBeenCalled()
+    expect(report.steps.resume.status).toBe('failed')
+    expect(report.steps.resume.error).toMatch(/generation|instance/i)
+    expect(report.repointed).toBe(false)
+  })
+
+  it('refuses to attach anyway onto a code that changed generation', async () => {
+    await failedResumeOperation()
+    seedSessions(session({ code: 'new1', name: 'not-ours', tmux_instance: '333:3000' }))
+    const repoint = vi.fn()
+    const report = await attachAnyway('p1', { repoint })
+    expect(repoint).not.toHaveBeenCalled()
+    expect(report.repointed).toBe(false)
+    expect(paneContent('t1', 'p1')).toMatchObject({ sessionCode: 'old111' })
+  })
+
+  it('retries when the session store still shows the session it created', async () => {
+    await failedResumeOperation()
+    seedSessions(session({ code: 'new1', name: 'dev-2', tmux_instance: '222:2000' }))
+    const sendKeys = vi.fn()
+    const report = await retryResume('p1', { sendKeys })
+    expect(sendKeys).toHaveBeenCalledWith('h1', 'new1', 'claude --resume S1')
+    expect(report.repointed).toBe(true)
+  })
+
+  it('retries when the SPA has no session list to check against', async () => {
+    await failedResumeOperation()
+    const sendKeys = vi.fn()
+    const report = await retryResume('p1', { sendKeys })
+    expect(sendKeys).toHaveBeenCalledWith('h1', 'new1', 'claude --resume S1')
+    expect(report.repointed).toBe(true)
+  })
+})

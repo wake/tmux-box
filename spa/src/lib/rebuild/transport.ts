@@ -12,12 +12,26 @@ import { useHostStore } from '../../stores/useHostStore'
 import { HostApiError } from '../host-api'
 import type { Session } from '../host-api'
 
+/** The address an operation is pinned to — what "the same host" means here. */
+export interface HostIdentity {
+  ip: string
+  port: number
+  token: string | null
+}
+
 export interface PinnedTransport {
   hostId: string
+  /** The configuration this transport is pinned to, for a later operation to re-pin against. */
+  identity: HostIdentity
   /** Throws if the host's ip/port/token changed (or vanished) since the pin. */
   assertUnchanged(): void
   createSession(name: string, cwd: string, mode: string): Promise<Session>
   sendKeys(sessionCode: string, command: string): Promise<void>
+}
+
+/** Two host configurations are the same machine, credentials included. */
+function sameIdentity(a: HostIdentity, b: HostIdentity): boolean {
+  return a.ip === b.ip && a.port === b.port && a.token === b.token
 }
 
 /**
@@ -25,11 +39,19 @@ export interface PinnedTransport {
  *
  * Throws when the host does not exist — deliberately, because that is exactly
  * the case `getDaemonBase` would answer with the active host's address.
+ *
+ * `expected` is the identity an EARLIER stage of the same operation pinned.
+ * A retry re-pins from the host id, so without it the retry would happily
+ * resolve whatever address that id points at now and send a resume command
+ * recorded against the old machine to a new one.
  */
-export function pinHost(hostId: string): PinnedTransport {
+export function pinHost(hostId: string, expected?: HostIdentity): PinnedTransport {
   const host = useHostStore.getState().hosts[hostId]
   if (!host) throw new Error(`host ${hostId} is not configured`)
-  const pinned = { ip: host.ip, port: host.port, token: host.token ?? null }
+  const pinned: HostIdentity = { ip: host.ip, port: host.port, token: host.token ?? null }
+  if (expected && !sameIdentity(pinned, expected)) {
+    throw new Error(`host ${hostId} now points at ${pinned.ip}:${pinned.port}, not the ${expected.ip}:${expected.port} this rebuild ran against`)
+  }
   const base = `http://${pinned.ip}:${pinned.port}`
 
   function assertUnchanged() {
@@ -51,6 +73,7 @@ export function pinHost(hostId: string): PinnedTransport {
 
   return {
     hostId,
+    identity: pinned,
     assertUnchanged,
     async createSession(name, cwd, mode) {
       const res = await request('/api/sessions', { name, cwd, mode })
