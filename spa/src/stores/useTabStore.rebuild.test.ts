@@ -1,10 +1,12 @@
 // spa/src/stores/useTabStore.rebuild.test.ts — the per-pane rebuild record and
 // its writer ranking (spec §4.1 / §4.4 / §4.5).
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useTabStore } from './useTabStore'
 import { createTab } from '../types/tab'
 import type { PaneRebuildRecord, Tab } from '../types/tab'
-import { getPrimaryPane, findPane } from '../lib/pane-tree'
+import { getPrimaryPane, findPane, updatePaneInLayout } from '../lib/pane-tree'
+import { batchCandidates, collectRecordRows } from '../lib/rebuild/eligibility'
+import { groupForBatch } from '../lib/rebuild/batch'
 import { resolveResumeCommand } from '../lib/rebuild/composer'
 import { useResumeTemplateStore, type ResumeTemplateLookup } from './useResumeTemplateStore'
 
@@ -52,6 +54,22 @@ function paneContentOf(tabId: string, paneId: string) {
 
 const recordOfPane = (tabId: string, paneId: string) => paneContentOf(tabId, paneId)?.rebuild
 const cachedNameOfPane = (tabId: string, paneId: string) => paneContentOf(tabId, paneId)?.cachedName
+
+/** Kill ONE pane of a split, the way a session that only that pane held would. */
+function killPane(tabId: string, paneId: string) {
+  const tab = useTabStore.getState().tabs[tabId]
+  const content = paneContentOf(tabId, paneId)
+  if (!content) throw new Error('bad fixture')
+  useTabStore.setState((state) => ({
+    tabs: {
+      ...state.tabs,
+      [tabId]: {
+        ...tab,
+        layout: updatePaneInLayout(tab.layout, paneId, { ...content, terminated: 'session-closed' }),
+      },
+    },
+  }))
+}
 
 describe('setPaneRebuild', () => {
   beforeEach(() => useTabStore.setState({ tabs: {}, tabOrder: [], activeTabId: null }))
@@ -519,25 +537,87 @@ describe('setPaneRebuild — agent-backfill', () => {
   it('mode 3 (confirm): an agreeing answer clears unverified and changes nothing else', () => {
     // This is what makes the probe TERMINATE: without it a record the daemon
     // agrees with stays flagged, stays eligible, and re-asks every 30 s forever.
-    const tab = seed()
-    seedAgentGroup({
-      tmuxInstance: '111:1000', cwd: '/w/old', cwdSource: 'agent-session-start',
-      agent: { type: 'cc', sessionId: 'S1', tmuxPaneId: '%9', updatedAt: 1 },
-      capturedAt: 1,
-    })
-    const store = useTabStore.getState()
-    store.setPaneRebuild('h1', 'abc123', '111:1000', {
-      kind: 'field', field: 'resumeCommandOverride', value: 'cld-yolo -c',
-    })
-    store.setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'unverified', unverified: true })
+    //
+    // "Nothing else" INCLUDES `capturedAt`, so the whole record is compared
+    // rather than the handful of fields a reader happens to remember.
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(1_000)
+      const tab = seed()
+      seedAgentGroup({
+        tmuxInstance: '111:1000', cwd: '/w/old', cwdSource: 'agent-session-start',
+        agent: { type: 'cc', sessionId: 'S1', tmuxPaneId: '%9', updatedAt: 1 },
+        capturedAt: 1,
+      })
+      const store = useTabStore.getState()
+      store.setPaneRebuild('h1', 'abc123', '111:1000', {
+        kind: 'field', field: 'resumeCommandOverride', value: 'cld-yolo -c',
+      })
+      store.setPaneRebuild('h1', 'abc123', '111:1000', { kind: 'unverified', unverified: true })
+      const before = rec(tab.id)!
 
-    backfill({ tmuxInstance: '111:1000', agent: answer, cwd: '/w/answer' })
-    expect(rec(tab.id)?.unverified).toBeUndefined()
-    expect(rec(tab.id)?.agent).toEqual({ type: 'cc', sessionId: 'S1', tmuxPaneId: '%9', updatedAt: 1 })
-    expect(rec(tab.id)?.cwd).toBe('/w/old')
-    expect(rec(tab.id)?.cwdSource).toBe('agent-session-start')
-    // Confirm lands the SAME identity, so the user's edit is not stale.
-    expect(rec(tab.id)?.resumeCommandOverride).toBe('cld-yolo -c')
+      vi.setSystemTime(9_000)
+      backfill({ tmuxInstance: '111:1000', agent: answer, cwd: '/w/answer' })
+
+      expect(rec(tab.id)).toEqual({ ...before, unverified: undefined })
+      // Spelled out too, because the equality above would also pass if `before`
+      // were somehow the object being compared to itself.
+      expect(rec(tab.id)?.agent).toEqual({ type: 'cc', sessionId: 'S1', tmuxPaneId: '%9', updatedAt: 1 })
+      expect(rec(tab.id)?.cwd).toBe('/w/old')
+      expect(rec(tab.id)?.cwdSource).toBe('agent-session-start')
+      // Confirm lands the SAME identity, so the user's edit is not stale.
+      expect(rec(tab.id)?.resumeCommandOverride).toBe('cld-yolo -c')
+      expect(rec(tab.id)?.capturedAt).toBe(before.capturedAt)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('mode 3 (confirm): the batch still resolves to the record the user edited', () => {
+    // `capturedAt` is not a timestamp for display: `groupForBatch` reads it to
+    // pick WHICH pane's record a group rebuilds from. Re-stamping it on a
+    // confirm hands that election to whichever sibling happened to be alive
+    // when the daemon answered — and edits are pane-scoped, so that sibling is
+    // exactly the one that never saw what the user typed.
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(1_000)
+      const tab = seed()
+      useTabStore.setState({
+        tabs: { [tab.id]: splitTabWithSecondPane(tab, 'p2') },
+        tabOrder: [tab.id],
+        activeTabId: tab.id,
+      })
+      seedAgentGroup({
+        tmuxInstance: '111:1000', cwd: '/w/old', cwdSource: 'agent-session-start',
+        agent: { type: 'cc', sessionId: 'S1', updatedAt: 1 },
+        capturedAt: 1,
+      })
+      useTabStore.getState().setPaneRebuild('h1', 'abc123', '111:1000', {
+        kind: 'unverified', unverified: true,
+      })
+
+      // p1's session pane dies and the user types its resume command (§4.10).
+      vi.setSystemTime(3_000)
+      killPane(tab.id, 'p1')
+      useTabStore.getState().setPaneRebuildForPane(
+        tab.id, 'p1', { hostId: 'h1', sessionCode: 'abc123', tmuxInstance: '111:1000' },
+        { kind: 'field', field: 'resumeCommandOverride', value: 'cld-yolo -c' },
+      )
+
+      // The daemon's agreeing answer reaches the still-live sibling only.
+      vi.setSystemTime(4_000)
+      backfill({ tmuxInstance: '111:1000', agent: answer, cwd: '/w/answer' })
+      vi.setSystemTime(5_000)
+      killPane(tab.id, 'p2')
+
+      const { groups } = groupForBatch(batchCandidates(collectRecordRows(useTabStore.getState().tabs)))
+      expect(groups).toHaveLength(1)
+      expect(groups[0].sourcePaneId).toBe('p1')
+      expect(groups[0].record.resumeCommandOverride).toBe('cld-yolo -c')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('mode 4 (no-op): an agent present and verified is left alone, same identity', () => {

@@ -192,8 +192,10 @@ function identityInvalidates(
  *
  * Returns the same content object when the patch changes nothing (a probe
  * against a cwd that is already known, an edit that retypes the same value).
- * Every write that does land re-stamps `capturedAt`, which is what makes the
- * batch view's "latest edit wins" resolution meaningful.
+ * A write that lands NEW CONTENT re-stamps `capturedAt`, which is what makes
+ * the batch view's "latest edit wins" resolution meaningful. The one exception
+ * is the backfill's confirm mode, which learns nothing about the content and
+ * so must not re-open that election — see mode 3 below.
  */
 function applyRebuildPatch(c: TmuxSessionContent, patch: RebuildPatch): TmuxSessionContent {
   const prev: PaneRebuildRecord = c.rebuild ?? {
@@ -283,8 +285,15 @@ function applyRebuildPatch(c: TmuxSessionContent, patch: RebuildPatch): TmuxSess
       // record is right. This is what makes the probe terminate: without it an
       // agreeing answer would leave the pane eligible and re-asking forever,
       // since the projection's TopFrame can legitimately differ indefinitely.
+      //
+      // `capturedAt` is deliberately NOT re-stamped (spec §5.5): it carries
+      // product meaning — `groupForBatch` reads it to elect which pane's record
+      // a group rebuilds from. Refreshing it here would let a live sibling that
+      // never saw the user's pane-scoped edit outrank the pane they typed into,
+      // purely because the daemon happened to answer about it later. Confirm
+      // learns nothing new about the record's CONTENT; it only clears the flag.
       if (prev.unverified) {
-        next = { ...prev, unverified: undefined, capturedAt: now }
+        next = { ...prev, unverified: undefined }
         break
       }
 
