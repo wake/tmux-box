@@ -11,6 +11,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
 import { ResumeTemplateSettings } from './ResumeTemplateSettings'
 import componentSource from './ResumeTemplateSettings.tsx?raw'
+import { AGENT_NAMES } from '../../lib/agent-metadata'
 import { useHostStore } from '../../stores/useHostStore'
 import { useI18nStore } from '../../stores/useI18nStore'
 import { DEFAULT_RESUME_TEMPLATES, useResumeTemplateStore } from '../../stores/useResumeTemplateStore'
@@ -127,9 +128,15 @@ describe('ResumeTemplateSettings — rows', () => {
   })
 
   it('`busy` disables every input and every Test button', () => {
+    // Every row, not just the first: `busy` is a panel-level prop, and a row
+    // left editable under it would be overwritten by the action's result.
     render(<ResumeTemplateSettings busy />)
-    expect(input('cc', 'exact').disabled).toBe(true)
-    expect(testButton('cc', 'exact')).toBeDisabled()
+    for (const agent of Object.keys(AGENT_NAMES)) {
+      for (const field of ['exact', 'fallback'] as const) {
+        expect(input(agent, field).disabled, `input ${agent}/${field}`).toBe(true)
+        expect(testButton(agent, field), `test button ${agent}/${field}`).toBeDisabled()
+      }
+    }
   })
 
   it('Reset all drops every customisation and repaints the defaults', () => {
