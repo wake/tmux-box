@@ -474,7 +474,7 @@ func TestSessionIdentity_WriteBetweenProxyAttachReadAndUpsertSurvives(t *testing
 	// The attach helper's baseline, read before the interleaved write.
 	baseline := loadFrame(t, m, "%5", 100, "t100")
 
-	if err := m.frames.UpdateSessionIdentity(parent.FrameID, "sess-INTERLEAVED", "/w/interleaved"); err != nil {
+	if err := m.frames.UpdateSessionIdentity(parent.FrameID, "sess-INTERLEAVED", "/w/interleaved", 40); err != nil {
 		t.Fatalf("UpdateSessionIdentity: %v", err)
 	}
 
@@ -498,4 +498,75 @@ func TestSessionIdentity_WriteBetweenProxyAttachReadAndUpsertSurvives(t *testing
 	}
 	assertIdentity(t, stored, "sess-INTERLEAVED", "/w/interleaved")
 	assertIdentity(t, loadFrame(t, m, "%5", 100, "t100"), "sess-INTERLEAVED", "/w/interleaved")
+}
+
+// --- ordering ---
+
+// identityEvent is one hook payload from a `cc` sender, carrying the identity
+// it wants written.
+func identityEvent(sessionID, cwd string) EventRequest {
+	return EventRequest{
+		TmuxSession:     "work",
+		TmuxPaneID:      "%5",
+		PurdexName:      "PdxStop",
+		AgentType:       "cc",
+		SenderPID:       100,
+		SenderStartTime: "t100",
+		RawEvent:        identityPayload(sessionID, cwd),
+	}
+}
+
+// TestSessionIdentity_OlderEventDoesNotOverwriteNewer — two hooks from ONE
+// process can be in flight at the same time, and nothing makes them reach the
+// identity write in the order they were emitted. opencode switches session
+// inside a single process (spec §3.3), so the two events carry DIFFERENT
+// identities for the same frame: A is paused after its status write, B lands
+// and records session B, and A then resumes and writes session A back.
+//
+// The row is left describing neither event — last_seen_at from B, session_id
+// from A — and because a frame's identity is only written when a hook carries
+// one, that combination is what backfill then fixes in place.
+//
+// last_seen_at cannot be the version that settles this. A proxy attach moves
+// last_seen_at without touching the identity at all, so ordering identity
+// writes by it would make an unrelated write reorder them.
+func TestSessionIdentity_OlderEventDoesNotOverwriteNewer(t *testing.T) {
+	m := newIdentityTestModule(t)
+	frame := seedFrame(t, m, "%5", "cc", 100, "t100", 10)
+
+	// B is the newer event and lands first.
+	m.recordSessionIdentity(identityEvent("sess-B", "/w/b"), frame.FrameID, 300)
+	// A was emitted earlier and arrives late.
+	m.recordSessionIdentity(identityEvent("sess-A", "/w/a"), frame.FrameID, 200)
+
+	assertIdentity(t, loadFrame(t, m, "%5", 100, "t100"), "sess-B", "/w/b")
+}
+
+// The guard must not become "the first write wins": an event that really is
+// newer still replaces what is stored.
+func TestSessionIdentity_NewerEventStillWins(t *testing.T) {
+	m := newIdentityTestModule(t)
+	frame := seedFrame(t, m, "%5", "cc", 100, "t100", 10)
+
+	m.recordSessionIdentity(identityEvent("sess-A", "/w/a"), frame.FrameID, 200)
+	m.recordSessionIdentity(identityEvent("sess-B", "/w/b"), frame.FrameID, 300)
+
+	assertIdentity(t, loadFrame(t, m, "%5", 100, "t100"), "sess-B", "/w/b")
+}
+
+// The version is the EVENT's, not the row's clock: a proxy attach bumps
+// last_seen_at between two identity writes and changes nothing about which of
+// them is newer.
+func TestSessionIdentity_LastSeenAtIsNotTheVersion(t *testing.T) {
+	m := newIdentityTestModule(t)
+	frame := seedFrame(t, m, "%5", "cc", 100, "t100", 10)
+
+	m.recordSessionIdentity(identityEvent("sess-A", "/w/a"), frame.FrameID, 200)
+	if err := m.frames.UpdateStatusAndLastSeen(frame.FrameID, agentpkg.StatusRunning, 9999); err != nil {
+		t.Fatalf("UpdateStatusAndLastSeen: %v", err)
+	}
+	// Still older than A by event order, however far last_seen_at has moved.
+	m.recordSessionIdentity(identityEvent("sess-STALE", "/w/stale"), frame.FrameID, 150)
+
+	assertIdentity(t, loadFrame(t, m, "%5", 100, "t100"), "sess-A", "/w/a")
 }

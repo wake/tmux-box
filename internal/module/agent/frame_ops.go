@@ -95,12 +95,22 @@ type FrameTraceMeta struct {
 // a pre-deploy session's frame only ever sees ordinary events. Only non-empty
 // values are written, so an event carrying neither field clears nothing.
 //
+// eventSeq versions the write. It is the request's broadcast timestamp — one
+// value taken once at the top of the hook handler, before any of this — so it
+// orders identity writes by when the DAEMON received the event rather than by
+// which goroutine reached the UPDATE first. Two hooks from one process can be
+// in flight at once (opencode switches session inside a single process without
+// a SessionStart, spec §3.3), and the older one arriving last must not write
+// its identity over the newer one's. The store refuses that write; see
+// FramesStore.UpdateSessionIdentity for why last_seen_at cannot be the version.
+//
 // Best-effort by design. A provider that does not implement SessionIdentifier
 // contributes nothing, and a write failure — sql.ErrNoRows from a frame a
-// concurrent sweep or SessionEnd already deleted, or any other store error —
-// is logged and swallowed rather than failing the hook: the event's status
-// meaning has already been persisted by the mutation this follows.
-func (m *Module) recordSessionIdentity(req EventRequest, frameID string) {
+// concurrent sweep or SessionEnd already deleted, ErrIdentityOutOfOrder from a
+// newer event having already landed, or any other store error — is logged and
+// swallowed rather than failing the hook: the event's status meaning has
+// already been persisted by the mutation this follows.
+func (m *Module) recordSessionIdentity(req EventRequest, frameID string, eventSeq int64) {
 	if m == nil || m.frames == nil || m.registry == nil || frameID == "" {
 		return
 	}
@@ -116,9 +126,15 @@ func (m *Module) recordSessionIdentity(req EventRequest, frameID string) {
 	if sessionID == "" && cwd == "" {
 		return
 	}
-	if err := m.frames.UpdateSessionIdentity(frameID, sessionID, cwd); err != nil {
+	if err := m.frames.UpdateSessionIdentity(frameID, sessionID, cwd, eventSeq); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			log.Printf("[agent] session_identity_frame_gone: frame=%s pane=%s", frameID, req.TmuxPaneID)
+			return
+		}
+		if errors.Is(err, store.ErrIdentityOutOfOrder) {
+			// Not a failure: a newer event for the same frame already landed
+			// while this one was in flight, and its identity is the right one.
+			log.Printf("[agent] session_identity_stale_event: frame=%s pane=%s seq=%d", frameID, req.TmuxPaneID, eventSeq)
 			return
 		}
 		log.Printf("[agent] session_identity_write_failed: frame=%s pane=%s err=%v", frameID, req.TmuxPaneID, err)
@@ -214,7 +230,7 @@ func (m *Module) applyFrameEvent(req EventRequest, result agentpkg.DeriveResult,
 			// Own-frame return: the membership change is skipped, but the
 			// event still came from this frame's process and still carries
 			// its session id (cc marks it Valid — cc/status.go:107-110).
-			m.recordSessionIdentity(req, frame.FrameID)
+			m.recordSessionIdentity(req, frame.FrameID, broadcastTs)
 			projection, err := m.projectPane(req.TmuxPaneID)
 			return projection, FrameTraceMeta{
 				FrameID:       frame.FrameID,
@@ -261,7 +277,7 @@ func (m *Module) applyFrameEvent(req EventRequest, result agentpkg.DeriveResult,
 			}, perr
 		}
 		// Own-frame return: stored is the sender's own frame.
-		m.recordSessionIdentity(req, stored.FrameID)
+		m.recordSessionIdentity(req, stored.FrameID, broadcastTs)
 		projection, err := m.projectPane(req.TmuxPaneID)
 		return projection, FrameTraceMeta{
 			FrameID:       stored.FrameID,
@@ -401,7 +417,7 @@ func (m *Module) applyFrameEvent(req EventRequest, result agentpkg.DeriveResult,
 				// Own-frame return: this is the NATIVE detach (the
 				// reason string says so) — stored is the sender's own
 				// frame, not a proxy parent's.
-				m.recordSessionIdentity(req, stored.FrameID)
+				m.recordSessionIdentity(req, stored.FrameID, broadcastTs)
 				projection, perr := m.projectPane(req.TmuxPaneID)
 				return projection, FrameTraceMeta{
 					FrameID:       stored.FrameID,
@@ -943,7 +959,7 @@ func (m *Module) applyFrameEvent(req EventRequest, result agentpkg.DeriveResult,
 	// This is also the ordinary-event path, and therefore the one that
 	// matters most: a pre-deploy session's frame only ever sees ordinary
 	// events, and they take UpdateHookPath, never Upsert.
-	m.recordSessionIdentity(req, stored.FrameID)
+	m.recordSessionIdentity(req, stored.FrameID, broadcastTs)
 	projection, err := m.projectPane(req.TmuxPaneID)
 	// Phase 3 — three-state reason (plan §1.4):
 	//   parent_frame_found       → legacy lookup hit (line 220-228)

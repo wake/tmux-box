@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -53,6 +54,7 @@ func migrateFramesDB(db *sql.DB) error {
 			verified            INTEGER NOT NULL DEFAULT 1,
 			session_id          TEXT NOT NULL DEFAULT '',
 			cwd                 TEXT NOT NULL DEFAULT '',
+			identity_seq        INTEGER NOT NULL DEFAULT 0,
 			FOREIGN KEY (parent_frame_id) REFERENCES agent_frames(frame_id) ON DELETE SET NULL
 		)
 	`)
@@ -74,10 +76,11 @@ func migrateFramesDB(db *sql.DB) error {
 	return clearStaleSubagentsJSON(db)
 }
 
-// addFrameIdentityColumns brings a table created before the session_id / cwd
-// columns existed up to the current schema. Purely additive: existing rows get
-// the empty string, which is exactly right — that frame has not told us its
-// identity yet.
+// addFrameIdentityColumns brings a table created before the session_id / cwd /
+// identity_seq columns existed up to the current schema. Purely additive:
+// existing rows get the empty string, which is exactly right — that frame has
+// not told us its identity yet — and identity_seq 0, which is older than any
+// event, so the first identity write after the migration applies.
 // Guarded by a column-existence check so re-running the migration (every
 // daemon start) is a no-op rather than a duplicate-column error.
 func addFrameIdentityColumns(db *sql.DB) error {
@@ -85,12 +88,17 @@ func addFrameIdentityColumns(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	for _, column := range []string{"session_id", "cwd"} {
-		if existing[column] {
+	columns := []struct{ name, decl string }{
+		{"session_id", `TEXT NOT NULL DEFAULT ''`},
+		{"cwd", `TEXT NOT NULL DEFAULT ''`},
+		{"identity_seq", `INTEGER NOT NULL DEFAULT 0`},
+	}
+	for _, column := range columns {
+		if existing[column.name] {
 			continue
 		}
-		if _, err := db.Exec(`ALTER TABLE agent_frames ADD COLUMN ` + column + ` TEXT NOT NULL DEFAULT ''`); err != nil {
-			return fmt.Errorf("add agent_frames.%s: %w", column, err)
+		if _, err := db.Exec(`ALTER TABLE agent_frames ADD COLUMN ` + column.name + ` ` + column.decl); err != nil {
+			return fmt.Errorf("add agent_frames.%s: %w", column.name, err)
 		}
 	}
 	return nil
@@ -357,6 +365,11 @@ func (s *FramesStore) UpdateStatusAndLastSeen(frameID string, status agentpkg.St
 	return nil
 }
 
+// ErrIdentityOutOfOrder reports that an identity write was refused because the
+// row already carries a NEWER event's identity. It is not a failure: the write
+// that has already landed is the one that should be there.
+var ErrIdentityOutOfOrder = errors.New("identity event is older than the stored one")
+
 // UpdateSessionIdentity is the only post-insert writer of session_id / cwd.
 // A dedicated narrow UPDATE keyed by frame_id, so the identity never rides a
 // read-modify-write and no CAS retry loop has to re-apply it.
@@ -365,14 +378,29 @@ func (s *FramesStore) UpdateStatusAndLastSeen(frameID string, status agentpkg.St
 // carries a session_id but no cwd must not blank the cwd an earlier event
 // recorded. Two empty arguments run no SQL at all and return nil.
 //
+// `seq` versions the write and orders it against the ones around it. Two hooks
+// from ONE process can be in flight at the same time, and nothing makes them
+// reach this UPDATE in the order the events were emitted: the older one
+// arriving last would otherwise write its identity over the newer one's, and
+// leave a row describing neither event — last_seen_at from one, session_id
+// from the other. `identity_seq` is a column of its own, and deliberately not
+// last_seen_at: an unrelated writer (a proxy attach, a probe status
+// transition) moves last_seen_at without touching the identity, and ordering
+// identity writes by it would let those reorder them.
+//
+// Equal versions still apply, so retrying one event is idempotent. The stored
+// default is 0, which is older than any event, so the first write on a
+// migrated row lands.
+//
 // Returns sql.ErrNoRows if the frame does not exist — a frame deleted between
-// the mutation and this call is normal, and callers may swallow it.
-func (s *FramesStore) UpdateSessionIdentity(frameID, sessionID, cwd string) error {
+// the mutation and this call is normal, and callers may swallow it — and
+// ErrIdentityOutOfOrder if the row already holds a newer event's identity.
+func (s *FramesStore) UpdateSessionIdentity(frameID, sessionID, cwd string, seq int64) error {
 	if sessionID == "" && cwd == "" {
 		return nil
 	}
-	setClauses := make([]string, 0, 2)
-	args := make([]any, 0, 3)
+	setClauses := make([]string, 0, 3)
+	args := make([]any, 0, 5)
 	if sessionID != "" {
 		setClauses = append(setClauses, "session_id = ?")
 		args = append(args, sessionID)
@@ -381,9 +409,12 @@ func (s *FramesStore) UpdateSessionIdentity(frameID, sessionID, cwd string) erro
 		setClauses = append(setClauses, "cwd = ?")
 		args = append(args, cwd)
 	}
-	args = append(args, frameID)
+	setClauses = append(setClauses, "identity_seq = ?")
+	args = append(args, seq, frameID, seq)
 
-	res, err := s.db.Exec(`UPDATE agent_frames SET `+strings.Join(setClauses, ", ")+` WHERE frame_id = ?`, args...)
+	res, err := s.db.Exec(
+		`UPDATE agent_frames SET `+strings.Join(setClauses, ", ")+
+			` WHERE frame_id = ? AND identity_seq <= ?`, args...)
 	if err != nil {
 		return err
 	}
@@ -392,9 +423,25 @@ func (s *FramesStore) UpdateSessionIdentity(frameID, sessionID, cwd string) erro
 		return err
 	}
 	if affected == 0 {
-		return sql.ErrNoRows
+		// Zero rows means one of two different things, and callers log them
+		// differently: the frame is gone, or the guard refused a stale write.
+		return s.classifyIdentityMiss(frameID)
 	}
 	return nil
+}
+
+// classifyIdentityMiss tells "the frame is gone" apart from "the write was
+// stale" after a guarded UPDATE matched nothing.
+func (s *FramesStore) classifyIdentityMiss(frameID string) error {
+	var stored int64
+	err := s.db.QueryRow(`SELECT identity_seq FROM agent_frames WHERE frame_id = ?`, frameID).Scan(&stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return sql.ErrNoRows
+	}
+	if err != nil {
+		return err
+	}
+	return ErrIdentityOutOfOrder
 }
 
 // UpdateHookPath updates the columns that a general-hook status transition

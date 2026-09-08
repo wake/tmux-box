@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -812,7 +813,7 @@ func TestFrames_UpdateSessionIdentity_SetsBoth(t *testing.T) {
 	s := openTestFramesStore(t)
 	frame := seedIdentityFrame(t, s, "", "")
 
-	if err := s.UpdateSessionIdentity(frame.FrameID, "sess-2", "/srv/app"); err != nil {
+	if err := s.UpdateSessionIdentity(frame.FrameID, "sess-2", "/srv/app", 100); err != nil {
 		t.Fatalf("UpdateSessionIdentity: %v", err)
 	}
 	assertStoredIdentity(t, s, frame.FrameID, "sess-2", "/srv/app")
@@ -822,12 +823,12 @@ func TestFrames_UpdateSessionIdentity_WritesOnlyNonEmpty(t *testing.T) {
 	s := openTestFramesStore(t)
 	frame := seedIdentityFrame(t, s, "sess-1", "/tmp/work")
 
-	if err := s.UpdateSessionIdentity(frame.FrameID, "sess-2", ""); err != nil {
+	if err := s.UpdateSessionIdentity(frame.FrameID, "sess-2", "", 100); err != nil {
 		t.Fatalf("UpdateSessionIdentity session-only: %v", err)
 	}
 	assertStoredIdentity(t, s, frame.FrameID, "sess-2", "/tmp/work")
 
-	if err := s.UpdateSessionIdentity(frame.FrameID, "", "/srv/app"); err != nil {
+	if err := s.UpdateSessionIdentity(frame.FrameID, "", "/srv/app", 200); err != nil {
 		t.Fatalf("UpdateSessionIdentity cwd-only: %v", err)
 	}
 	assertStoredIdentity(t, s, frame.FrameID, "sess-2", "/srv/app")
@@ -837,14 +838,14 @@ func TestFrames_UpdateSessionIdentity_NoOpForTwoEmptyArgs(t *testing.T) {
 	s := openTestFramesStore(t)
 	frame := seedIdentityFrame(t, s, "sess-1", "/tmp/work")
 
-	if err := s.UpdateSessionIdentity(frame.FrameID, "", ""); err != nil {
+	if err := s.UpdateSessionIdentity(frame.FrameID, "", "", 100); err != nil {
 		t.Fatalf("UpdateSessionIdentity empty: %v", err)
 	}
 	assertStoredIdentity(t, s, frame.FrameID, "sess-1", "/tmp/work")
 
 	// No SQL runs at all, so even an unknown frame id is not an error here —
 	// the call is a pure no-op.
-	if err := s.UpdateSessionIdentity("no-such-frame", "", ""); err != nil {
+	if err := s.UpdateSessionIdentity("no-such-frame", "", "", 100); err != nil {
 		t.Fatalf("UpdateSessionIdentity empty on unknown frame = %v, want nil (no SQL runs)", err)
 	}
 }
@@ -853,10 +854,66 @@ func TestFrames_UpdateSessionIdentity_UnknownFrame(t *testing.T) {
 	s := openTestFramesStore(t)
 	seedIdentityFrame(t, s, "sess-1", "/tmp/work")
 
-	err := s.UpdateSessionIdentity("no-such-frame", "sess-2", "/srv/app")
+	err := s.UpdateSessionIdentity("no-such-frame", "sess-2", "/srv/app", 100)
 	if err != sql.ErrNoRows {
 		t.Fatalf("UpdateSessionIdentity unknown frame = %v, want sql.ErrNoRows", err)
 	}
+}
+
+// The event version is what orders identity writes, so a write carrying an
+// older one is refused outright rather than applied last-writer-wins.
+func TestFrames_UpdateSessionIdentity_OlderVersionIsRefused(t *testing.T) {
+	s := openTestFramesStore(t)
+	frame := seedIdentityFrame(t, s, "", "")
+
+	if err := s.UpdateSessionIdentity(frame.FrameID, "sess-new", "/srv/new", 300); err != nil {
+		t.Fatalf("UpdateSessionIdentity newer: %v", err)
+	}
+	err := s.UpdateSessionIdentity(frame.FrameID, "sess-old", "/srv/old", 200)
+	if !errors.Is(err, ErrIdentityOutOfOrder) {
+		t.Fatalf("UpdateSessionIdentity older = %v, want ErrIdentityOutOfOrder", err)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-new", "/srv/new")
+
+	// A refusal is NOT the frame going missing: those two are answered
+	// differently because callers log them differently.
+	if errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("a stale write reported the frame as gone")
+	}
+}
+
+// Equal versions still apply, so a retry of the same event is idempotent
+// rather than a refusal.
+func TestFrames_UpdateSessionIdentity_SameVersionStillApplies(t *testing.T) {
+	s := openTestFramesStore(t)
+	frame := seedIdentityFrame(t, s, "", "")
+
+	if err := s.UpdateSessionIdentity(frame.FrameID, "sess-1", "/srv/one", 300); err != nil {
+		t.Fatalf("UpdateSessionIdentity first: %v", err)
+	}
+	if err := s.UpdateSessionIdentity(frame.FrameID, "sess-1", "/srv/two", 300); err != nil {
+		t.Fatalf("UpdateSessionIdentity retry: %v", err)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-1", "/srv/two")
+}
+
+// The version is carried by a column of its own. Ordering identity writes by
+// last_seen_at would let an unrelated writer — a proxy attach, a probe status
+// transition — reorder them.
+func TestFrames_UpdateSessionIdentity_VersionIsIndependentOfLastSeenAt(t *testing.T) {
+	s := openTestFramesStore(t)
+	frame := seedIdentityFrame(t, s, "", "")
+
+	if err := s.UpdateSessionIdentity(frame.FrameID, "sess-new", "/srv/new", 300); err != nil {
+		t.Fatalf("UpdateSessionIdentity newer: %v", err)
+	}
+	if err := s.UpdateStatusAndLastSeen(frame.FrameID, agentpkg.StatusRunning, 9999); err != nil {
+		t.Fatalf("UpdateStatusAndLastSeen: %v", err)
+	}
+	if err := s.UpdateSessionIdentity(frame.FrameID, "sess-old", "/srv/old", 200); !errors.Is(err, ErrIdentityOutOfOrder) {
+		t.Fatalf("UpdateSessionIdentity older = %v, want ErrIdentityOutOfOrder", err)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-new", "/srv/new")
 }
 
 func TestFrames_UpsertIfUnchanged_LeavesSessionIdentity(t *testing.T) {
@@ -1017,4 +1074,33 @@ func TestMigrateFramesDB_AddsIdentityColumnsToOldSchema(t *testing.T) {
 	if all[0].SessionID != "" || all[0].Cwd != "" {
 		t.Fatalf("migrated identity = (%q, %q), want two empty strings", all[0].SessionID, all[0].Cwd)
 	}
+	// identity_seq arrives on the same ALTER path and defaults to 0, which is
+	// older than any event — so the first identity write on a migrated row
+	// lands rather than being refused as stale.
+	if err := frames.UpdateSessionIdentity("old-frame", "sess-1", "/w/old", 100); err != nil {
+		t.Fatalf("UpdateSessionIdentity on a migrated row: %v", err)
+	}
+	assertStoredIdentity(t, frames, "old-frame", "sess-1", "/w/old")
+}
+
+// The real upgrade path for an install that already has the identity columns:
+// only identity_seq is missing, and the per-column guard has to add that one
+// without tripping over the two that are already there.
+func TestMigrateFramesDB_AddsOnlyTheMissingIdentityColumn(t *testing.T) {
+	events := openTestAgentEventStore(t)
+	seedPreIdentitySchema(t, events.db)
+	for _, column := range []string{"session_id", "cwd"} {
+		if _, err := events.db.Exec(`ALTER TABLE agent_frames ADD COLUMN ` + column + ` TEXT NOT NULL DEFAULT ''`); err != nil {
+			t.Fatalf("pre-add %s: %v", column, err)
+		}
+	}
+
+	frames, err := events.Frames()
+	if err != nil {
+		t.Fatalf("Frames (migrate): %v", err)
+	}
+	if err := frames.UpdateSessionIdentity("old-frame", "sess-1", "/w/old", 100); err != nil {
+		t.Fatalf("UpdateSessionIdentity after partial migration: %v", err)
+	}
+	assertStoredIdentity(t, frames, "old-frame", "sess-1", "/w/old")
 }
