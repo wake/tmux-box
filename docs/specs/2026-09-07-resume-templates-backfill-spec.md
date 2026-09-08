@@ -393,8 +393,58 @@ exec.CommandContext(ctx, shell, "-l", "-i", "-c", script, "_", token)
 **Process hygiene** — `exec.CommandContext` kills only the direct child, and an
 rc file can leave descendants holding the output pipe open:
 
-- `SysProcAttr{Setpgid: true}`, and on cancellation `syscall.Kill(-pgid, SIGKILL)`
-  through `Cmd.Cancel`.
+- `SysProcAttr{Setsid: true}`, and on cancellation `syscall.Kill(-sid, SIGKILL)`
+  through `Cmd.Cancel`. `setsid` makes the shell a session leader *and* a
+  process-group leader of the same id, so the group kill is spelled the same
+  way `Setpgid` spelled it; the two flags cannot be combined, because
+  `setpgid(0, 0)` on a session leader is `EPERM`.
+
+  > **Superseded (PR review round 3).** This contract originally read
+  > `SysProcAttr{Setpgid: true}`, with the group kill as the whole of the
+  > cleanup. A process group is not the container the shell's children stay
+  > in. Measured on this machine (bash 3.2.57, macOS, interactive login, stdin
+  > `/dev/null`, stdout and stderr both pipes, no controlling terminal): a bash
+  > that is **already a process-group leader when it execs** — which is exactly
+  > what `Setpgid` and `Setsid` both make it — reports `$-` = `himBHc`, i.e.
+  > **job control is on by default**, with no `set -m` anywhere and no "no job
+  > control in this shell" warning. (Without either flag the same bash reports
+  > `hiBHc` and prints the warning. Measured and *not* decisive: stderr a pipe
+  > vs inherited, `--noprofile --norc` vs the user's real rc, the parent's
+  > SIGTTIN/SIGTTOU disposition.)
+  >
+  > Job control being on is not by itself the leak, and the difference matters:
+  > a job started while bash is still sourcing its startup files joins the
+  > **shell's** group anyway, `m` or no `m`, so the plain `sleep &` an rc is
+  > most likely to contain *is* reached by `kill(-pgid)`. What escapes is a job
+  > started after an explicit `set -m` — job control's whole purpose is to give
+  > each job a group of its own, and after that `set -m` it does: one stray per
+  > probe, orphaned by the shell's exit and left running for as long as the
+  > daemon lives, with the group kill never reaching it. (zsh 5.9 measured the
+  > other way again — `monitor` off, the job left in the shell's own group —
+  > which is why this cannot be settled by testing one shell.)
+
+- **After `Wait`, the session is swept.** The group is killed first (one
+  syscall, and where most strays are), then `ps -A -o pid=` lists the process
+  table and everything still reporting the probe's sid is killed individually.
+  A session is the one container job control does not split: a process leaves
+  it only by calling `setsid()` itself. Membership is re-checked with `Getsid`
+  immediately before each kill.
+
+  **Cost:** one extra `ps -A` fork per probe, itself bounded by the read grace
+  — measured against a probe that has just started a full interactive login
+  shell, so it is not the expensive part of the request.
+
+  **What this does not clean up**, stated rather than papered over:
+  - a descendant that calls `setsid()` itself is in a session of its own and
+    survives. That is what daemonising *means*; no group- or session-based
+    cleanup can reach it.
+  - anything forked between the `ps` listing and the kills survives — the
+    listing is a snapshot.
+  - a `ps` that fails outright leaves only the group kill.
+  - the `Getsid` re-check **narrows** the PID-reuse window, it does not close
+    it: a pid can be recycled into our session's id space between the check
+    and the `Kill`. The window is two syscalls wide and nothing here claims to
+    have eliminated it.
 - `Cmd.WaitDelay = 1 * time.Second`, so a descendant holding the pipe cannot
   make `Wait` hang after the kill.
 - stdin is `/dev/null`. Stdout and stderr are each **drained to EOF on their own

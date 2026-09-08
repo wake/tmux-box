@@ -1321,10 +1321,25 @@ script  = `command -v "$1"`             // anything else
 exec.CommandContext(ctx, shell, "-l", "-i", "-c", script, "_", token)
 ```
 
-Process hygiene, all four required: `SysProcAttr{Setpgid: true}` with
-`Cmd.Cancel` killing `-pgid`; `Cmd.WaitDelay = time.Second`; stdin `/dev/null`;
-stdout/stderr through an `io.LimitReader` capped at 8 KiB *before* the 512-byte
-display truncation. 5 s deadline.
+Process hygiene, all five required: `SysProcAttr{Setsid: true}` with
+`Cmd.Cancel` killing `-sid` (setsid makes the shell both session and
+process-group leader, so the group kill is unchanged; `Setpgid` cannot be set
+alongside it — `setpgid(0, 0)` on a session leader is `EPERM`); **a session
+sweep after `Wait`** — `ps -A -o pid=`, kill everything still reporting our
+sid, `Getsid`-rechecked at kill time; `Cmd.WaitDelay = time.Second`; stdin
+`/dev/null`; stdout/stderr each drained to EOF, keeping the **last** 8 KiB of
+stdout only, *before* the 512-byte display truncation. 5 s deadline.
+
+> **Superseded (PR review rounds 1 and 3).** This step first read
+> `Setpgid: true` with the group kill as the whole cleanup, and "an
+> `io.LimitReader` capped at 8 KiB". Both are wrong and both were replaced —
+> see the two "Superseded" notes under spec §4.4 *Process hygiene* for the
+> measurements (a bash that execs as a process-group leader has job control
+> **on**, and a job started after an rc's `set -m` then gets a group of its own
+> and escapes `kill(-pgid)`), the cost (one extra `ps -A` fork per probe), and the limits
+> the sweep does not clear (a descendant that calls `setsid()` itself, anything
+> forked after the snapshot, a failed `ps`, and a PID-reuse window that the
+> `Getsid` re-check narrows but does not close).
 
 Rejected before exec: a token over 256 bytes, or containing any of
 `` | & ; < > ( ) $ ` \ " ' `` or a newline, or starting with `-`.
