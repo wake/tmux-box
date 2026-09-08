@@ -195,6 +195,44 @@ describe('ResumeTemplateSettings — the probe', () => {
     expect(lastFetchBody()).toEqual({ command: 'cld-yolo' })
   })
 
+  it('skips the leading variable assignments a template may carry', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse({ resolved: true, detail: '/opt/homebrew/bin/opencode' }))
+    render(<ResumeTemplateSettings />)
+    const el = input('opencode', 'exact')
+    fireEvent.change(el, { target: { value: 'OPENCODE_YOLO=true opencode -s {id}' } })
+    fireEvent.keyDown(el, { key: 'Enter' })
+
+    await act(async () => { fireEvent.click(testButton('opencode', 'exact')) })
+
+    expect(lastFetchBody()).toEqual({ command: 'opencode' })
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('skips several assignments, and one whose value itself contains =', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ resolved: true, detail: 'x' }))
+    render(<ResumeTemplateSettings />)
+    fireEvent.change(input('opencode', 'exact'), {
+      target: { value: 'A=1 B=k=v opencode -s {id}' },
+    })
+    await act(async () => { fireEvent.click(testButton('opencode', 'exact')) })
+    expect(lastFetchBody()).toEqual({ command: 'opencode' })
+  })
+
+  it('does not mistake a flag or a path for an assignment', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ resolved: true, detail: 'x' }))
+    render(<ResumeTemplateSettings />)
+    fireEvent.change(input('cc', 'exact'), { target: { value: '/usr/local/bin/cld --resume {id}' } })
+    await act(async () => { fireEvent.click(testButton('cc', 'exact')) })
+    expect(lastFetchBody()).toEqual({ command: '/usr/local/bin/cld' })
+  })
+
+  it('disables Test when a template is nothing but assignments', () => {
+    render(<ResumeTemplateSettings />)
+    fireEvent.change(input('cc', 'exact'), { target: { value: 'FOO=1 BAR=2' } })
+    expect(testButton('cc', 'exact')).toBeDisabled()
+  })
+
   it('probes the uncommitted draft word too, so Test judges what is on screen', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ resolved: true, detail: 'x' }))
     render(<ResumeTemplateSettings />)
