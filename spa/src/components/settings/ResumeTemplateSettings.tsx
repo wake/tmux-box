@@ -83,8 +83,27 @@ function rowKey(agentType: string, field: Field): string {
  * The first whitespace-separated token, `{id}` untouched. This is the only
  * thing that is ever sent to a shell.
  */
+/**
+ * A POSIX simple command may be preceded by variable assignments —
+ * `OPENCODE_YOLO=true opencode -s <id>` is one command, not two — and the shell
+ * grammar's "command word" is what follows them. Probing the first token
+ * instead would ask the daemon to resolve `OPENCODE_YOLO=true`, which is not a
+ * command and never resolves, so a working template would report itself broken.
+ *
+ * `NAME=` is the whole test: the value may contain anything, `=` included. A
+ * flag or a path can never match, because neither starts with an identifier
+ * followed by `=`.
+ *
+ * Returns '' for a template that is nothing but assignments, which leaves the
+ * Test button disabled rather than probing something meaningless.
+ */
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
+
 function commandWordOf(template: string): string {
-  return template.trim().split(/\s+/)[0] ?? ''
+  for (const token of template.trim().split(/\s+/)) {
+    if (token && !ASSIGNMENT.test(token)) return token
+  }
+  return ''
 }
 
 export function ResumeTemplateSettings({ busy = false }: { busy?: boolean }) {
