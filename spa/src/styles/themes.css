@@ -49,7 +49,12 @@
   --terminal-cursor: #e0e0e0;
   --status-error: #e06c75;
   --status-warning: #c8b560;
-  --status-success: #2a4a3a;
+  /* Foreground tier, like its two siblings above. It was #2a4a3a — a fill
+     shade, which reads at 1.63:1 on --surface-elevated and is simply not
+     legible as text. Every consumer of this token is a text colour
+     (`text-status-success`), so the fill value had no user. 7.95:1 here,
+     against 7.81:1 for warning and 5.01:1 for error. */
+  --status-success: #7ec699;
 }
 
 /* === Light === */
