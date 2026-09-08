@@ -553,16 +553,19 @@ func writeBashHome(t *testing.T, extra string) string {
 // with job control ON does not put its background jobs in its own process
 // group. It puts each one in a process group of its OWN, which is the entire
 // point of job control, and `kill(-pgid)` then reaches the shell's group and
-// nothing else.
+// nothing else. The job is then orphaned by the shell's exit, reparented to
+// init, and left running: one per probe, accumulating for as long as the
+// daemon lives.
 //
-// Any rc may turn job control on (`set -m` here, explicitly, so the test does
-// not depend on what a given bash build decides for itself), and the job it
-// then starts is orphaned by the shell's exit, reparented to init, and left
-// running. One per probe, accumulating for as long as the daemon lives.
+// The rc says `set -m` because that — and not job control being on, which
+// under this probe's configuration it already is — is what actually moves the
+// job out of the shell's group. TestShellResolve_Integration_BashJobControlFacts
+// records the measurements behind that sentence.
 //
 // zsh is not a substitute for bash here: this is about a shell's job-control
 // behaviour, so it has to be tested on the shell whose behaviour is in
-// question.
+// question. (Measured: zsh 5.9 goes the other way — `monitor` off, the job left
+// in the shell's own group, where the group kill reaches it.)
 func TestShellResolve_Integration_BashJobControlDescendantIsCleanedUp(t *testing.T) {
 	bash := requireBash(t)
 	pidFile := filepath.Join(t.TempDir(), "descendant.pid")
@@ -587,6 +590,83 @@ func TestShellResolve_Integration_BashJobControlDescendantIsCleanedUp(t *testing
 		t.Logf("the job-control descendant %d leads its own process group", pid)
 	}
 	requirePidGone(t, pid, "the bash job-control descendant")
+}
+
+// TestShellResolve_Integration_BashJobControlFacts pins the three measured
+// facts the session sweep and its comments rest on. They are counter-intuitive
+// and two of them have already been recorded backwards once.
+//
+// FACT 1 — job control is ON, by default, in this probe's configuration.
+// The intuition says otherwise: no controlling terminal, stdin `/dev/null`,
+// both output fds pipes. What actually decides it is whether bash is ALREADY a
+// process-group leader when it execs, which is exactly what
+// SysProcAttr.Setsid makes it (and what the Setpgid it replaced made it too).
+// Measured, macOS bash 3.2.57, against this probe's own fds:
+//
+//	Setsid (or Setpgid)  ->  $- = himBHc, silent
+//	neither              ->  $- = hiBHc, "bash: no job control in this shell"
+//
+// Not decisive — measured, and each made no difference: stderr a pipe vs
+// inherited, `--noprofile --norc` vs the user's real rc, the parent's
+// SIGTTIN/SIGTTOU disposition.
+//
+// FACT 2 — job control being on is NOT by itself enough to move a job out of
+// the shell's process group. A background job started while bash is still
+// sourcing its startup files joins the SHELL's group, `m` or no `m`, and
+// `kill(-pgid)` reaches it. A plain `&` in a plain rc is therefore not the leak.
+//
+// FACT 3 — an explicit `set -m` in the rc IS the leak: after it, a background
+// job leads a process group of its own and the group kill misses it entirely.
+// That is what TestShellResolve_Integration_BashJobControlDescendantIsCleanedUp
+// covers, and that test is the one that goes red without killSessionStragglers.
+//
+// This test asserts facts 1 and 2 only. It is green with or without the sweep
+// on purpose: it exists so that the claims in shell_resolve.go's comments are
+// falsifiable on this machine rather than merely remembered.
+func TestShellResolve_Integration_BashJobControlFacts(t *testing.T) {
+	bash := requireBash(t)
+	pidFile := filepath.Join(t.TempDir(), "facts")
+	t.Setenv("PDX_TEST_PIDFILE", pidFile)
+	// No `set -m`: the point is what bash does when nothing asks it to. The
+	// job's group is read from inside the rc, because by the time the probe
+	// returns the process is gone and there is nothing left to ask.
+	t.Setenv("HOME", writeBashHome(t,
+		"sleep 300 &\necho $- $$ $! $(ps -o pgid= -p $!) > $PDX_TEST_PIDFILE\n"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), shellProbeTimeout)
+	defer cancel()
+
+	out := runShellProbe(ctx, bash, "cd")
+	assert.False(t, out.TimedOut, "outcome = %+v", out)
+	assert.Equal(t, 0, out.ExitCode, "outcome = %+v", out)
+
+	raw, err := os.ReadFile(pidFile)
+	require.NoError(t, err, "the rc did not record anything")
+	fields := strings.Fields(string(raw))
+	require.Len(t, fields, 4, "rc line = %q", string(raw))
+	dash := fields[0]
+	shellPID, jobPID, jobPGID := mustPid(t, fields[1]), mustPid(t, fields[2]), mustPid(t, fields[3])
+
+	// Fact 1.
+	require.Contains(t, dash, "m",
+		"$- = %q: bash did NOT enable job control, so this probe's configuration is "+
+			"no longer the one shell_resolve.go's comments were measured against", dash)
+	// Fact 2.
+	require.Equal(t, shellPID, jobPGID,
+		"an rc-time job with $- = %q led its own group (%d): the sweep's comments say "+
+			"that only happens after an explicit `set -m`", dash, jobPGID)
+
+	requirePidGone(t, jobPID, "the descendant of a bash rc that never said `set -m`")
+}
+
+// mustPid parses one pid an rc recorded, failing the test if it is not one.
+func mustPid(t *testing.T, field string) int {
+	t.Helper()
+	var pid int
+	_, err := fmt.Sscanf(field, "%d", &pid)
+	require.NoError(t, err, "field %q", field)
+	require.Greater(t, pid, 1)
+	return pid
 }
 
 // An rc that prints far more than the output bound must not turn a perfectly

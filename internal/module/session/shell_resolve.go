@@ -215,6 +215,16 @@ func runShellProbe(ctx context.Context, shell, token string) shellProbeOutcome {
 	// `kill(-pid)` still works), and the session is the only container job
 	// control does not split — see killSessionStragglers. Setting both would
 	// fail the exec: setpgid(0, 0) on a session leader is EPERM.
+	//
+	// This flag also decides whether the shell has job control at all, which
+	// is not obvious and is worth stating where it is set. A bash that execs
+	// as a process-group leader — which is what Setsid, and the Setpgid it
+	// replaced, both make it — turns job control ON even here, with no
+	// controlling terminal and no `set -m`: measured, macOS bash 3.2.57, this
+	// probe's own fds, `$-` = himBHc. Without the flag the same bash reports
+	// hiBHc and prints "no job control in this shell". Neither the pipes nor
+	// the rc has any say in it; see
+	// TestShellResolve_Integration_BashJobControlFacts, which pins both halves.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
@@ -306,9 +316,30 @@ func runShellProbe(ctx context.Context, shell, token string) shellProbeOutcome {
 // group of its own, which is the whole point of job control — so `kill(-pgid)`
 // reaches the shell's group and nothing else, and the job is then orphaned by
 // the shell's exit and left running. One per probe, accumulating for as long as
-// the daemon lives. An rc turns job control on with a bare `set -m`, and shells
-// differ on when they turn it on by themselves, so this is not a corner a
-// probe of the user's own login shell can decline to handle.
+// the daemon lives.
+//
+// Measured on this machine (macOS bash 3.2.57, under this probe's exact fds),
+// because the shape of the leak is narrower than "job control is on" and was
+// written down wrongly once in each direction:
+//
+//   - job control IS on by default here. `$-` = himBHc, silently, with no
+//     `set -m` anywhere — see the note at the Setsid call site for why. An
+//     earlier comment claimed the opposite (hiBHc, "no job control in this
+//     shell"); that is what this bash reports when it does NOT exec as a
+//     process-group leader, which is not how the probe starts it.
+//   - but a job started while bash is still sourcing its startup files joins
+//     the SHELL's group anyway, `m` or no `m`. So the plain `sleep &` an rc is
+//     most likely to contain is reached by the group kill, and is not why this
+//     function exists.
+//   - an explicit `set -m` in an rc IS why it exists: after it, the next
+//     background job leads a group of its own and the group kill misses it
+//     entirely. TestShellResolve_...JobControlDescendantIsCleanedUp covers
+//     that case and goes red without this sweep.
+//
+// zsh 5.9, measured the same way, keeps `monitor` off and leaves the job in the
+// shell's own group — so this cannot be settled by testing one shell, and a
+// probe of whatever login shell the user happens to have cannot decline to
+// handle the bash shape.
 //
 // The session is what job control does not split: setsid gave the probe a
 // session of its own, and a process only ever leaves a session by calling
