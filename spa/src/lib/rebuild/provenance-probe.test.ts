@@ -531,13 +531,25 @@ describe('the defer-never-drop scheduler (§5.4.1)', () => {
   })
 
   it('issues no deferred request for a binding the daemon disowned', async () => {
+    // The second trigger has to land while the FIRST REQUEST IS STILL OUT:
+    // that is the only path that arms a deferred run for a binding which is
+    // about to be disowned. Triggering after the answer landed returns at
+    // `probeSessionProvenance`'s own `disowned` guard, no timer is ever armed,
+    // and the deferred run this test exists to pin never happens at all.
     seed()
-    vi.mocked(fetchSessionProvenance).mockResolvedValue(answer({ tmuxInstance: '333:3000' }))
+    const d = deferred()
+    vi.mocked(fetchSessionProvenance).mockReturnValueOnce(d.promise)
+    vi.mocked(fetchSessionProvenance).mockResolvedValue(answer())
     trigger()
-    await settle()
-    await advance(5_000)
-    trigger()
-    await advance(60_000)
+    trigger()                       // in flight: the binding is owed a run
+    expect(calls()).toBe(1)
+
+    d.resolve(answer({ tmuxInstance: '333:3000' }))
+    await settle()                  // disowned, and a timer armed for t = 30 s
+
+    await advance(30_000)           // the deferred callback must decline
+    expect(calls()).toBe(1)
+    await advance(60_000)           // and nothing re-arms behind it
     expect(calls()).toBe(1)
   })
 
