@@ -1,9 +1,11 @@
 package tmux
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 )
 
 // --- Fake Executor (test double) ---
@@ -67,6 +69,7 @@ type FakeExecutor struct {
 	// ShowGlobalOption can really read, and hide the bug.
 	globalOptions         map[string]string
 	globalOptionErrs      map[string]error
+	globalOptionDelays    map[string]time.Duration
 	showGlobalOptionCalls []string
 	paneIDs               []string // global pane id list for HasPane
 	hasPaneErr            error    // simulated transient tmux error for HasPane
@@ -97,6 +100,7 @@ func NewFakeExecutor() *FakeExecutor {
 		windowOptions:        make(map[string]string),
 		globalOptions:        make(map[string]string),
 		globalOptionErrs:     make(map[string]error),
+		globalOptionDelays:   make(map[string]time.Duration),
 		alive:                true,
 	}
 }
@@ -671,14 +675,37 @@ func (f *FakeExecutor) SetGlobalOptionError(option string, err error) {
 	f.globalOptionErrs[option] = err
 }
 
-func (f *FakeExecutor) ShowGlobalOption(option string) (string, error) {
+// SetGlobalOptionDelay makes ShowGlobalOption take `d` to answer — a tmux
+// server that has stopped responding. The wait is abandoned as soon as the
+// caller's context is done, so what the delay actually measures is whether the
+// caller passed a context with a deadline on it at all.
+func (f *FakeExecutor) SetGlobalOptionDelay(option string, d time.Duration) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.globalOptionDelays[option] = d
+}
+
+func (f *FakeExecutor) ShowGlobalOption(ctx context.Context, option string) (string, error) {
+	f.mu.Lock()
 	f.showGlobalOptionCalls = append(f.showGlobalOptionCalls, option)
-	if err := f.globalOptionErrs[option]; err != nil {
+	err := f.globalOptionErrs[option]
+	value := f.globalOptions[option]
+	delay := f.globalOptionDelays[option]
+	f.mu.Unlock()
+
+	if delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	if err != nil {
 		return "", err
 	}
-	return f.globalOptions[option], nil
+	return value, nil
 }
 
 // ShowGlobalOptionCalls returns the options asked for, in order.

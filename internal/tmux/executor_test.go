@@ -2,6 +2,7 @@
 package tmux_test
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -281,7 +282,7 @@ printf '/bin/zsh\n'
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	value, err := (&tmux.RealExecutor{}).ShowGlobalOption("default-shell")
+	value, err := (&tmux.RealExecutor{}).ShowGlobalOption(context.Background(), "default-shell")
 	if err != nil {
 		t.Fatalf("ShowGlobalOption returned error: %v", err)
 	}
@@ -295,7 +296,7 @@ printf '/bin/zsh\n'
 func TestFakeExecutor_ShowGlobalOption(t *testing.T) {
 	f := tmux.NewFakeExecutor()
 
-	value, err := f.ShowGlobalOption("default-shell")
+	value, err := f.ShowGlobalOption(context.Background(), "default-shell")
 	if err != nil {
 		t.Fatalf("ShowGlobalOption on an unset option returned error: %v", err)
 	}
@@ -304,7 +305,7 @@ func TestFakeExecutor_ShowGlobalOption(t *testing.T) {
 	}
 
 	f.SetGlobalOptionValue("default-shell", "/bin/zsh")
-	value, err = f.ShowGlobalOption("default-shell")
+	value, err = f.ShowGlobalOption(context.Background(), "default-shell")
 	if err != nil {
 		t.Fatalf("ShowGlobalOption returned error: %v", err)
 	}
@@ -319,7 +320,7 @@ func TestFakeExecutor_ShowGlobalOption(t *testing.T) {
 	}
 
 	f.SetGlobalOptionError("default-shell", fmt.Errorf("no server running"))
-	if _, err := f.ShowGlobalOption("default-shell"); err == nil {
+	if _, err := f.ShowGlobalOption(context.Background(), "default-shell"); err == nil {
 		t.Fatal("expected the seeded error")
 	}
 }

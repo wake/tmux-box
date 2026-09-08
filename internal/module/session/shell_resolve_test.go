@@ -262,7 +262,7 @@ func TestShellResolve_FallsBackToEnvShellWhenTmuxAnswersEmpty(t *testing.T) {
 func TestShellResolve_FallsBackToPasswdShell(t *testing.T) {
 	srv, spy, mod := newShellResolveServer(t)
 	t.Setenv("SHELL", "")
-	mod.passwdShell = func() string { return "/passwd/fish" }
+	mod.passwdShell = func(context.Context) string { return "/passwd/fish" }
 
 	resolveCommand(t, srv, "claude")
 	assert.Equal(t, []string{"/passwd/fish"}, spy.shells)
@@ -271,10 +271,55 @@ func TestShellResolve_FallsBackToPasswdShell(t *testing.T) {
 func TestShellResolve_FallsBackToBinSh(t *testing.T) {
 	srv, spy, mod := newShellResolveServer(t)
 	t.Setenv("SHELL", "")
-	mod.passwdShell = func() string { return "" }
+	mod.passwdShell = func(context.Context) string { return "" }
 
 	resolveCommand(t, srv, "claude")
 	assert.Equal(t, []string{"/bin/sh"}, spy.shells)
+}
+
+// withShellProbeTimeout shortens the pipeline deadline for one test.
+func withShellProbeTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	orig := shellProbeTimeout
+	shellProbeTimeout = d
+	t.Cleanup(func() { shellProbeTimeout = orig })
+}
+
+// The deadline has to cover CHOOSING the shell, not just running it. Asking
+// tmux which shell to start is a subprocess of its own, and a tmux server that
+// has stopped answering holds the handler open for as long as it likes —
+// requests pile up behind a step that no deadline is watching.
+func TestShellResolve_ShellSelectionIsUnderTheDeadline(t *testing.T) {
+	srv, spy, mod := newShellResolveServer(t)
+	withShellProbeTimeout(t, 100*time.Millisecond)
+	mod.tmux.(interface {
+		SetGlobalOptionDelay(option string, d time.Duration)
+	}).SetGlobalOptionDelay("default-shell", 3*time.Second)
+
+	start := time.Now()
+	v := resolveCommand(t, srv, "claude")
+	elapsed := time.Since(start)
+
+	assert.Less(t, elapsed, time.Second, "the shell-selection step outlived the deadline")
+	assert.False(t, v.Resolved)
+	assert.Equal(t, "timeout", v.Reason, "an exhausted deadline is a timeout verdict")
+	assert.Zero(t, spy.calls, "a request that has run out of time must not start a shell")
+}
+
+// The passwd rung shells out too (`dscl` on darwin), so it is handed the same
+// deadline rather than being trusted to finish.
+func TestShellResolve_PasswdRungIsGivenTheDeadline(t *testing.T) {
+	srv, spy, mod := newShellResolveServer(t)
+	t.Setenv("SHELL", "")
+	var deadlineSeen bool
+	mod.passwdShell = func(ctx context.Context) string {
+		_, deadlineSeen = ctx.Deadline()
+		return "/passwd/fish"
+	}
+
+	resolveCommand(t, srv, "claude")
+	assert.True(t, deadlineSeen, "passwdShell was called with a context that has no deadline")
+	assert.Equal(t, []string{"/passwd/fish"}, spy.shells)
 }
 
 func TestPasswdShellFromEntries(t *testing.T) {

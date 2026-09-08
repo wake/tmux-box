@@ -34,10 +34,14 @@ import (
 	"time"
 )
 
+// shellProbeTimeout bounds the WHOLE pipeline — choosing a shell as well as
+// running it. The probe is an approximation, not a guarantee; it must never
+// become a way to run something long or large.
+//
+// A var only so tests can shorten it; production never changes it.
+var shellProbeTimeout = 5 * time.Second
+
 const (
-	// The probe is an approximation, not a guarantee; it must never become a
-	// way to run something long or large.
-	shellProbeTimeout = 5 * time.Second
 	// Bounded BEFORE the display truncation: an rc that prints a megabyte
 	// must not be buffered in full just to have 512 bytes taken off it.
 	shellProbeMaxOutput = 8 << 10
@@ -114,7 +118,21 @@ func (m *SessionModule) resolveCommandWord(ctx context.Context, token string) sh
 	probeCtx, cancel := context.WithTimeout(ctx, shellProbeTimeout)
 	defer cancel()
 
-	out := m.shellProbe(probeCtx, m.probeShell(), token)
+	// Choosing the shell is itself two possible subprocesses — `tmux
+	// show-options` and, on darwin, `dscl` — so it runs under the same
+	// deadline as the probe. A tmux server that has stopped answering would
+	// otherwise hold the handler open indefinitely and let concurrent requests
+	// pile up behind a step nothing was watching.
+	shell := m.probeShell(probeCtx)
+	// And the deadline is honoured between the two halves: a request with no
+	// time left must not start a shell it cannot wait for. An expired context
+	// would make exec fail with a context error, which reads as `shell_failed`
+	// — a claim about the user's shell that is not true.
+	if probeCtx.Err() != nil {
+		return shellResolveResponse{Resolved: false, Reason: "timeout"}
+	}
+
+	out := m.shellProbe(probeCtx, shell, token)
 	switch {
 	case out.TimedOut:
 		return shellResolveResponse{Resolved: false, Reason: "timeout"}
@@ -157,8 +175,8 @@ func displayDetail(stdout string) string {
 // probeShell picks the shell tmux would actually start, and falls back only
 // when it cannot be asked. An empty answer counts as no answer — tmux prints
 // nothing for an option it does not know, and "" is not a program.
-func (m *SessionModule) probeShell() string {
-	if shell, err := m.tmux.ShowGlobalOption("default-shell"); err == nil {
+func (m *SessionModule) probeShell(ctx context.Context) string {
+	if shell, err := m.tmux.ShowGlobalOption(ctx, "default-shell"); err == nil {
 		if shell = strings.TrimSpace(shell); shell != "" {
 			return shell
 		}
@@ -167,7 +185,7 @@ func (m *SessionModule) probeShell() string {
 		return shell
 	}
 	if m.passwdShell != nil {
-		if shell := strings.TrimSpace(m.passwdShell()); shell != "" {
+		if shell := strings.TrimSpace(m.passwdShell(ctx)); shell != "" {
 			return shell
 		}
 	}
@@ -364,14 +382,17 @@ func (p *cappedPipe) close() {
 // passwdShellForCurrentUser is the third rung of the ladder — reached only
 // when tmux cannot be asked AND $SHELL is unset, which is what a daemon
 // started by launchd looks like.
-func passwdShellForCurrentUser() string {
+func passwdShellForCurrentUser(ctx context.Context) string {
 	u, err := user.Current()
 	if err != nil {
 		return ""
 	}
 	if runtime.GOOS == "darwin" {
 		// Normal macOS accounts are in directory services, not /etc/passwd.
-		out, err := exec.Command("dscl", ".", "-read", "/Users/"+u.Username, "UserShell").Output()
+		// Under the caller's deadline like every other subprocess on this
+		// path: directory services can be slow or wedged, and this rung is
+		// reached exactly when the machine is already in an odd state.
+		out, err := exec.CommandContext(ctx, "dscl", ".", "-read", "/Users/"+u.Username, "UserShell").Output()
 		if err == nil {
 			if shell := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "UserShell:")); shell != "" {
 				return shell

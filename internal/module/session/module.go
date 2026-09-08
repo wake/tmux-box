@@ -28,8 +28,10 @@ type SessionModule struct {
 	// package global, so a test can prove a rejected token never reached a
 	// shell without mutating shared state.
 	shellProbe shellProbeFunc
-	// passwdShell is the third rung of the probe's shell ladder.
-	passwdShell func() string
+	// passwdShell is the third rung of the probe's shell ladder. It takes a
+	// context because on darwin it shells out to `dscl`, and that read is on
+	// the resolve-command deadline like everything else on the path.
+	passwdShell func(ctx context.Context) string
 	cancelWatch context.CancelFunc
 	wstate      watcherState
 	waitForGate chan bool

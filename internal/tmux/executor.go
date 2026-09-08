@@ -86,7 +86,12 @@ type Executor interface {
 	// ShowWindowOption passes `-w` and can only see window options, so it
 	// returns "" for a server option such as `default-shell` — which reads as
 	// "unset" and is indistinguishable from a real absence.
-	ShowGlobalOption(option string) (string, error)
+	//
+	// It takes a context because it is on a request path with a deadline
+	// (POST /api/shell/resolve-command) and a tmux server that has stopped
+	// answering must not hold that request open past it. A caller with
+	// nothing to bound it passes context.Background().
+	ShowGlobalOption(ctx context.Context, option string) (string, error)
 	SetHookGlobal(event, command string) error
 	RemoveHookGlobal(event string) error
 	ShowHooksGlobal() (string, error)
@@ -460,8 +465,8 @@ func (r *RealExecutor) ShowWindowOption(option string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func (r *RealExecutor) ShowGlobalOption(option string) (string, error) {
-	out, err := exec.Command("tmux", "show-options", "-g", "-q", "-v", option).Output()
+func (r *RealExecutor) ShowGlobalOption(ctx context.Context, option string) (string, error) {
+	out, err := exec.CommandContext(ctx, "tmux", "show-options", "-g", "-q", "-v", option).Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			stderr := string(exitErr.Stderr)
