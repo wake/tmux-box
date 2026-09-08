@@ -454,6 +454,82 @@ func TestShellResolve_Integration_LongLivedDescendantDoesNotHang(t *testing.T) {
 	}
 }
 
+// requirePidGone waits for a pid to leave the process table, failing the test
+// (and cleaning the process up) if it outlives the wait.
+func requirePidGone(t *testing.T, pid int, what string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if err := syscall.Kill(pid, 0); err == syscall.ESRCH {
+			return
+		}
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatalf("%s (pid %d) survived the probe", what, pid)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// readPidLine reads the pids an rc recorded, once the file has appeared.
+func readPidLine(t *testing.T, path string, n int) []int {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err, "the rc did not record its pids")
+	fields := strings.Fields(string(raw))
+	require.Len(t, fields, n, "pid file = %q", string(raw))
+	pids := make([]int, 0, n)
+	for _, f := range fields {
+		var pid int
+		_, err := fmt.Sscanf(f, "%d", &pid)
+		require.NoError(t, err)
+		require.Greater(t, pid, 1)
+		pids = append(pids, pid)
+	}
+	return pids
+}
+
+// TestShellResolve_Integration_BlockedRcIsCancelledAtTheDeadline is the test
+// for the CANCELLATION path itself, rather than for the verdict mapping a
+// TimedOut outcome produces.
+//
+// Everything above this line either stubs the outcome (`TimedOut: true` handed
+// straight to the handler) or exercises a shell that exits on its own. Neither
+// can tell whether the deadline actually reaches the subprocess, or whether
+// what it kills is the process or the whole group: an rc that never returns is
+// the only shape that makes the shell itself outlive the deadline, so it is the
+// only shape under which cmd.Cancel has to do anything at all.
+//
+// Three things are asserted, and each of them fails for a different broken
+// implementation: the call returns before the rc would have (the deadline
+// reached exec), the outcome is TimedOut (it was recognised as the deadline and
+// not as a shell that failed), and BOTH the shell and the background job it
+// left behind are gone (the kill took the group, not just the direct child).
+func TestShellResolve_Integration_BlockedRcIsCancelledAtTheDeadline(t *testing.T) {
+	zsh := requireZsh(t)
+	pidFile := filepath.Join(t.TempDir(), "pids")
+	t.Setenv("PDX_TEST_PIDFILE", pidFile)
+	// The rc records the shell's own pid and a background job's, then blocks
+	// forever — so the probe's command word is never reached and the only way
+	// out is the deadline.
+	t.Setenv("ZDOTDIR", writeZshrc(t, "sleep 300 &\nprint $$ $! >! $PDX_TEST_PIDFILE\nsleep 300\n"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	out := runShellProbe(ctx, zsh, "cd")
+	elapsed := time.Since(start)
+
+	assert.True(t, out.TimedOut, "outcome = %+v, want TimedOut — the deadline never reached the subprocess", out)
+	assert.Less(t, elapsed, 3*time.Second, "the probe outlived its deadline")
+	assert.GreaterOrEqual(t, elapsed, 700*time.Millisecond, "it returned before the deadline: the rc did not actually block")
+
+	pids := readPidLine(t, pidFile, 2)
+	requirePidGone(t, pids[0], "the shell")
+	requirePidGone(t, pids[1], "the shell's background job")
+}
+
 // An rc that prints far more than the output bound must not turn a perfectly
 // good answer into a timeout, and must not become the answer either.
 //
