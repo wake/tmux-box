@@ -48,7 +48,7 @@ export interface PaneRebuildRecord {
   tmuxInstance: string
   /** cwd the agent was launched in — the cwd its resume is scoped to. */
   cwd?: string
-  cwdSource?: 'agent-session-start' | 'pane-probe'
+  cwdSource?: 'agent-session-start' | 'agent-backfill' | 'pane-probe' | 'user'
   agent?: {
     /** 'cc' | 'codex' | 'opencode' — open string, mirrors AGENT_NAMES. */
     type: string
@@ -57,7 +57,21 @@ export interface PaneRebuildRecord {
     tmuxPaneId?: string
     updatedAt: number
   }
-  resumeCommand?: string
+  /**
+   * User override for this pane only. Absent means "compose from the agent's
+   * templates" (spec §4.2), which is the normal case: the record stores the
+   * agent IDENTITY and `resolveResumeCommand` composes the command from it, so
+   * a user who retypes a template in Settings changes what every pane resumes
+   * with. Only a hand edit ever writes this, and it is cleared when the agent
+   * identity it was written against changes (spec §4.3).
+   *
+   * It replaces the old auto-composed `resumeCommand`, which is gone rather
+   * than renamed: repurposing it would have promoted every already-persisted
+   * composed string into an override and pinned every existing record to the
+   * old shape. Per the alpha convention no migration is written — a stale
+   * `resumeCommand` key in persisted state is inert, because nothing reads it.
+   */
+  resumeCommandOverride?: string
   /**
    * The record's agent disagrees with what the daemon currently reports for
    * the session (spec §9.1): still shown, but unchecked by default and skipped
@@ -93,17 +107,31 @@ export type TmuxSessionContent = Extract<PaneContent, { kind: 'tmux-session' }>
  * ranking of spec §4.1, and that ranking is the whole concurrency policy:
  *
  * - `agent-group` — a qualifying SessionStart. Replaces `agent`, `cwd`,
- *   `cwdSource`, `resumeCommand` and `capturedAt` **as one unit**; a payload
- *   without `cwd` clears `cwd` rather than leaving the previous agent's
- *   directory attached to a new session id.
+ *   `cwdSource` and `capturedAt` **as one unit**; a payload without `cwd`
+ *   clears `cwd` rather than leaving the previous agent's directory attached
+ *   to a new session id. `resumeCommandOverride` is NOT part of the unit: it
+ *   is a user edit, and survives unless the identity it was written against
+ *   changed (spec §4.3).
  * - `field` — a user edit. Touches only the field named.
  * - `probe-cwd` — the pane cwd probe. Fills `cwd` only when it is unset;
  *   never promoted to agent provenance.
  * - `unverified` — the reconnect projection disagrees with `agent.type`.
+ * - `agent-backfill` — the daemon's answer to "who owns this pane" (spec §5.5).
+ *   Ranks BELOW `agent-group`, which is a first-hand SessionStart: this one is
+ *   inferred from a process tree, so it fills a gap, corrects a record already
+ *   flagged `unverified`, or confirms one — and otherwise does nothing.
  */
 export type RebuildPatch =
   | { kind: 'agent-group'; record: Omit<PaneRebuildRecord, 'sessionName'> }
-  | { kind: 'field'; field: 'cwd' | 'resumeCommand' | 'sessionName'; value: string }
+  | {
+      kind: 'agent-backfill'
+      record: {
+        tmuxInstance: string
+        agent: NonNullable<PaneRebuildRecord['agent']>
+        cwd?: string
+      }
+    }
+  | { kind: 'field'; field: 'cwd' | 'resumeCommandOverride' | 'sessionName'; value: string }
   | { kind: 'probe-cwd'; cwd: string }
   | { kind: 'unverified'; unverified: boolean }
 

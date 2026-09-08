@@ -1018,7 +1018,7 @@ closed; the partial ones are folded into §8.1 above.
 
 ## 9. Deferred / risks
 
-### 9.1 Daemon-side backfill (cut from v1)
+### 9.1 Daemon-side backfill (cut from v1 — **superseded**, see the note at the end of this section)
 
 Records are only written while the SPA is running, and v2's claim that a missed
 capture "degrades to the cwd-scoped fallback" was wrong (review R2 finding 9):
@@ -1045,6 +1045,25 @@ generation's id survive under a fresh instance stamp; and orphan cleanup does
 not fire for a reused id (`meta.go:178,193`, `service.go:75`). Doing it right
 needs a provenance-specific atomic upsert with whole-group replace-or-clear
 semantics and both stamps required non-empty. That is its own spec.
+
+> **Superseded 2026-09-07 by `2026-09-07-resume-templates-backfill-spec.md`
+> (see its §5.4–§5.6).** The `session_meta` design sketched in the paragraph
+> above is **cancelled, not postponed**: none of its four objections apply to
+> the design that replaced it. The daemon no longer writes provenance anywhere
+> — it answers a **read-only query over the frames table**
+> (`GET /api/sessions/{code}/provenance`), so there is no row to upsert, no
+> `SetMeta` writer to teach, no nil-means-no-change ambiguity and no orphan
+> cleanup to fire.
+>
+> The SPA asks that question for any pane that is agent-less **or**
+> `unverified`, and applies the answer through the `agent-backfill` patch's
+> four ordered modes (fill / replace / confirm / no-op). So the second bullet
+> above — "captured, then the SPA was away while the session changed agents" —
+> now has a repair path rather than only a warning: `unverified` is what makes
+> a pane ASK, and an answer from the daemon either confirms the record,
+> replaces it, or fills it in. The bullet's description of how the flag is
+> RAISED (the reconnect replay's agent-type comparison) is unchanged and still
+> current.
 
 ### 9.2 Launch-flag reconstruction
 

@@ -40,6 +40,14 @@ func (p *Provider) DeriveStatus(eventName string, rawEvent json.RawMessage) agen
 	return deriveCodexStatus(eventName, rawEvent)
 }
 
+// IdentifyEvent implements agent.SessionIdentifier. codex puts session_id and
+// cwd at the top level of every hook payload (spec §3.1) — alongside turn_id,
+// which this feature does not use — so the shared extractor covers every event
+// and purdexName is not consulted.
+func (p *Provider) IdentifyEvent(purdexName string, rawEvent json.RawMessage) (string, string) {
+	return agent.ExtractSessionIdentity(rawEvent)
+}
+
 // SupportedStatuses declares the Status values codex.Provider's DeriveStatus
 // may emit, derived from Events().EmitsStatus. Events() is the SSoT after the
 // issue #613 installer expansion; this shim keeps the StatusSupporter

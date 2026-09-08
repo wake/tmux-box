@@ -40,6 +40,14 @@ func (p *Provider) DeriveStatus(eventName string, rawEvent json.RawMessage) agen
 	return deriveOpenCodeStatus(eventName, rawEvent)
 }
 
+// IdentifyEvent implements agent.SessionIdentifier. opencode puts session_id
+// at the top level of every emit; cwd is currently sent only by SessionStart
+// (spec §3.3), which is fine — the extractor simply returns "" for it and the
+// store leaves whatever cwd it already holds alone.
+func (p *Provider) IdentifyEvent(purdexName string, rawEvent json.RawMessage) (string, string) {
+	return agent.ExtractSessionIdentity(rawEvent)
+}
+
 // SupportedStatuses declares the Status values opencode.Provider's
 // DeriveStatus may emit, derived from Events().EmitsStatus. Events() is the
 // SSoT; this shim keeps the StatusSupporter contract (Phase 1) working.

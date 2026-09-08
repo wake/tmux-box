@@ -2,8 +2,11 @@ package store
 
 import (
 	"database/sql"
+	"errors"
+	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	agentpkg "github.com/wake/purdex/internal/agent"
@@ -699,5 +702,514 @@ func TestMigrateFramesDB_PreservesNewSubagentsJSON(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("agent_frames count = %d after migrate, want 1 (new-format row should survive)", count)
+	}
+}
+
+// --- Task 1: the frame's own session identity -----------------------------
+
+func seedIdentityFrame(t *testing.T, s *FramesStore, sessionID, cwd string) Frame {
+	t.Helper()
+	frame, err := s.Upsert(Frame{
+		PaneID:           "%9",
+		AgentType:        "cc",
+		PID:              900,
+		PPID:             800,
+		ProcessStartTime: "S",
+		SessionID:        sessionID,
+		Cwd:              cwd,
+		Status:           agentpkg.StatusIdle,
+		StartedAt:        10,
+		LastSeenAt:       10,
+		Verified:         true,
+	})
+	if err != nil {
+		t.Fatalf("seed Upsert: %v", err)
+	}
+	return frame
+}
+
+func assertStoredIdentity(t *testing.T, s *FramesStore, frameID, wantSession, wantCwd string) {
+	t.Helper()
+	var gotSession, gotCwd string
+	if err := s.db.QueryRow(`SELECT session_id, cwd FROM agent_frames WHERE frame_id = ?`, frameID).
+		Scan(&gotSession, &gotCwd); err != nil {
+		t.Fatalf("read identity columns: %v", err)
+	}
+	if gotSession != wantSession || gotCwd != wantCwd {
+		t.Fatalf("stored identity = (%q, %q), want (%q, %q)", gotSession, gotCwd, wantSession, wantCwd)
+	}
+}
+
+func TestFrames_UpsertPersistsSessionIdentity(t *testing.T) {
+	s := openTestFramesStore(t)
+
+	frame := seedIdentityFrame(t, s, "sess-1", "/tmp/work")
+	if frame.SessionID != "sess-1" || frame.Cwd != "/tmp/work" {
+		t.Fatalf("returned frame identity = (%q, %q), want (sess-1, /tmp/work)", frame.SessionID, frame.Cwd)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-1", "/tmp/work")
+
+	got, err := s.GetByIdentity("%9", 900, "S")
+	if err != nil {
+		t.Fatalf("GetByIdentity: %v", err)
+	}
+	if got == nil {
+		t.Fatal("frame not found")
+	}
+	if got.SessionID != "sess-1" || got.Cwd != "/tmp/work" {
+		t.Fatalf("read identity = (%q, %q), want (sess-1, /tmp/work)", got.SessionID, got.Cwd)
+	}
+}
+
+func TestFrames_UpsertWithEmptyIdentityKeepsStored(t *testing.T) {
+	s := openTestFramesStore(t)
+	seedIdentityFrame(t, s, "sess-1", "/tmp/work")
+
+	again, err := s.Upsert(Frame{
+		PaneID:           "%9",
+		AgentType:        "cc",
+		PID:              900,
+		PPID:             800,
+		ProcessStartTime: "S",
+		Status:           agentpkg.StatusRunning,
+		LastSeenAt:       20,
+		Verified:         true,
+	})
+	if err != nil {
+		t.Fatalf("second Upsert: %v", err)
+	}
+	if again.SessionID != "sess-1" || again.Cwd != "/tmp/work" {
+		t.Fatalf("returned frame identity = (%q, %q), want (sess-1, /tmp/work)", again.SessionID, again.Cwd)
+	}
+	assertStoredIdentity(t, s, again.FrameID, "sess-1", "/tmp/work")
+}
+
+func TestFrames_UpsertWithNonEmptyIdentityDoesNotOverwrite(t *testing.T) {
+	s := openTestFramesStore(t)
+	seedIdentityFrame(t, s, "sess-1", "/tmp/work")
+
+	again, err := s.Upsert(Frame{
+		PaneID:           "%9",
+		AgentType:        "cc",
+		PID:              900,
+		PPID:             800,
+		ProcessStartTime: "S",
+		SessionID:        "sess-STALE",
+		Cwd:              "/tmp/STALE",
+		Status:           agentpkg.StatusRunning,
+		LastSeenAt:       20,
+		Verified:         true,
+	})
+	if err != nil {
+		t.Fatalf("second Upsert: %v", err)
+	}
+	// The DO UPDATE SET list omits both columns, and the method returns the
+	// re-selected row — so the caller sees the *stored* values, not its own.
+	if again.SessionID != "sess-1" || again.Cwd != "/tmp/work" {
+		t.Fatalf("returned frame identity = (%q, %q), want stored (sess-1, /tmp/work)", again.SessionID, again.Cwd)
+	}
+	assertStoredIdentity(t, s, again.FrameID, "sess-1", "/tmp/work")
+}
+
+func TestFrames_UpdateSessionIdentity_SetsBoth(t *testing.T) {
+	s := openTestFramesStore(t)
+	frame := seedIdentityFrame(t, s, "", "")
+
+	if err := s.UpdateSessionIdentity(frame.FrameID, "sess-2", "/srv/app", 100); err != nil {
+		t.Fatalf("UpdateSessionIdentity: %v", err)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-2", "/srv/app")
+}
+
+func TestFrames_UpdateSessionIdentity_WritesOnlyNonEmpty(t *testing.T) {
+	s := openTestFramesStore(t)
+	frame := seedIdentityFrame(t, s, "sess-1", "/tmp/work")
+
+	if err := s.UpdateSessionIdentity(frame.FrameID, "sess-2", "", 100); err != nil {
+		t.Fatalf("UpdateSessionIdentity session-only: %v", err)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-2", "/tmp/work")
+
+	if err := s.UpdateSessionIdentity(frame.FrameID, "", "/srv/app", 200); err != nil {
+		t.Fatalf("UpdateSessionIdentity cwd-only: %v", err)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-2", "/srv/app")
+}
+
+func TestFrames_UpdateSessionIdentity_NoOpForTwoEmptyArgs(t *testing.T) {
+	s := openTestFramesStore(t)
+	frame := seedIdentityFrame(t, s, "sess-1", "/tmp/work")
+
+	if err := s.UpdateSessionIdentity(frame.FrameID, "", "", 100); err != nil {
+		t.Fatalf("UpdateSessionIdentity empty: %v", err)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-1", "/tmp/work")
+
+	// No SQL runs at all, so even an unknown frame id is not an error here —
+	// the call is a pure no-op.
+	if err := s.UpdateSessionIdentity("no-such-frame", "", "", 100); err != nil {
+		t.Fatalf("UpdateSessionIdentity empty on unknown frame = %v, want nil (no SQL runs)", err)
+	}
+}
+
+func TestFrames_UpdateSessionIdentity_UnknownFrame(t *testing.T) {
+	s := openTestFramesStore(t)
+	seedIdentityFrame(t, s, "sess-1", "/tmp/work")
+
+	err := s.UpdateSessionIdentity("no-such-frame", "sess-2", "/srv/app", 100)
+	if err != sql.ErrNoRows {
+		t.Fatalf("UpdateSessionIdentity unknown frame = %v, want sql.ErrNoRows", err)
+	}
+}
+
+// The event version is what orders identity writes, so a write carrying an
+// older one is refused outright rather than applied last-writer-wins.
+func TestFrames_UpdateSessionIdentity_OlderVersionIsRefused(t *testing.T) {
+	s := openTestFramesStore(t)
+	frame := seedIdentityFrame(t, s, "", "")
+
+	if err := s.UpdateSessionIdentity(frame.FrameID, "sess-new", "/srv/new", 300); err != nil {
+		t.Fatalf("UpdateSessionIdentity newer: %v", err)
+	}
+	err := s.UpdateSessionIdentity(frame.FrameID, "sess-old", "/srv/old", 200)
+	if !errors.Is(err, ErrIdentityOutOfOrder) {
+		t.Fatalf("UpdateSessionIdentity older = %v, want ErrIdentityOutOfOrder", err)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-new", "/srv/new")
+
+	// A refusal is NOT the frame going missing: those two are answered
+	// differently because callers log them differently.
+	if errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("a stale write reported the frame as gone")
+	}
+}
+
+// Equal versions still apply, so a retry of the same event is idempotent
+// rather than a refusal.
+func TestFrames_UpdateSessionIdentity_SameVersionStillApplies(t *testing.T) {
+	s := openTestFramesStore(t)
+	frame := seedIdentityFrame(t, s, "", "")
+
+	if err := s.UpdateSessionIdentity(frame.FrameID, "sess-1", "/srv/one", 300); err != nil {
+		t.Fatalf("UpdateSessionIdentity first: %v", err)
+	}
+	if err := s.UpdateSessionIdentity(frame.FrameID, "sess-1", "/srv/two", 300); err != nil {
+		t.Fatalf("UpdateSessionIdentity retry: %v", err)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-1", "/srv/two")
+}
+
+// The version is carried by a column of its own. Ordering identity writes by
+// last_seen_at would let an unrelated writer — a proxy attach, a probe status
+// transition — reorder them.
+func TestFrames_UpdateSessionIdentity_VersionIsIndependentOfLastSeenAt(t *testing.T) {
+	s := openTestFramesStore(t)
+	frame := seedIdentityFrame(t, s, "", "")
+
+	if err := s.UpdateSessionIdentity(frame.FrameID, "sess-new", "/srv/new", 300); err != nil {
+		t.Fatalf("UpdateSessionIdentity newer: %v", err)
+	}
+	if err := s.UpdateStatusAndLastSeen(frame.FrameID, agentpkg.StatusRunning, 9999); err != nil {
+		t.Fatalf("UpdateStatusAndLastSeen: %v", err)
+	}
+	if err := s.UpdateSessionIdentity(frame.FrameID, "sess-old", "/srv/old", 200); !errors.Is(err, ErrIdentityOutOfOrder) {
+		t.Fatalf("UpdateSessionIdentity older = %v, want ErrIdentityOutOfOrder", err)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-new", "/srv/new")
+}
+
+func TestFrames_UpsertIfUnchanged_LeavesSessionIdentity(t *testing.T) {
+	s := openTestFramesStore(t)
+	frame := seedIdentityFrame(t, s, "sess-1", "/tmp/work")
+
+	frame.SessionID = "sess-STALE"
+	frame.Cwd = "/tmp/STALE"
+	frame.Status = agentpkg.StatusRunning
+	frame.LastSeenAt = 20
+	ok, stored, err := s.UpsertIfUnchanged(frame, 10)
+	if err != nil {
+		t.Fatalf("UpsertIfUnchanged: %v", err)
+	}
+	if !ok {
+		t.Fatal("UpsertIfUnchanged reported a stale baseline, want applied")
+	}
+	if stored.SessionID != "sess-1" || stored.Cwd != "/tmp/work" {
+		t.Fatalf("returned identity = (%q, %q), want stored (sess-1, /tmp/work)", stored.SessionID, stored.Cwd)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-1", "/tmp/work")
+}
+
+func TestFrames_UpdateHookPath_LeavesSessionIdentity(t *testing.T) {
+	s := openTestFramesStore(t)
+	frame := seedIdentityFrame(t, s, "sess-1", "/tmp/work")
+
+	frame.SessionID = "sess-STALE"
+	frame.Cwd = "/tmp/STALE"
+	frame.Status = agentpkg.StatusRunning
+	frame.LastSeenAt = 20
+	if err := s.UpdateHookPath(frame); err != nil {
+		t.Fatalf("UpdateHookPath: %v", err)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-1", "/tmp/work")
+}
+
+func TestFrames_UpdateHookPathAndResetSubagents_LeavesSessionIdentity(t *testing.T) {
+	s := openTestFramesStore(t)
+	frame := seedIdentityFrame(t, s, "sess-1", "/tmp/work")
+
+	frame.SessionID = "sess-STALE"
+	frame.Cwd = "/tmp/STALE"
+	frame.Status = agentpkg.StatusRunning
+	frame.LastSeenAt = 20
+	if err := s.UpdateHookPathAndResetSubagents(frame); err != nil {
+		t.Fatalf("UpdateHookPathAndResetSubagents: %v", err)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-1", "/tmp/work")
+}
+
+func TestFrames_UpdateStatusAndLastSeen_LeavesSessionIdentity(t *testing.T) {
+	s := openTestFramesStore(t)
+	frame := seedIdentityFrame(t, s, "sess-1", "/tmp/work")
+
+	if err := s.UpdateStatusAndLastSeen(frame.FrameID, agentpkg.StatusRunning, 20); err != nil {
+		t.Fatalf("UpdateStatusAndLastSeen: %v", err)
+	}
+	assertStoredIdentity(t, s, frame.FrameID, "sess-1", "/tmp/work")
+}
+
+func TestFrames_AllReadersReturnSessionIdentity(t *testing.T) {
+	s := openTestFramesStore(t)
+	frame := seedIdentityFrame(t, s, "sess-1", "/tmp/work")
+
+	byIdentity, err := s.GetByIdentity("%9", 900, "S")
+	if err != nil || byIdentity == nil {
+		t.Fatalf("GetByIdentity: %v (frame=%v)", err, byIdentity)
+	}
+	if byIdentity.SessionID != "sess-1" || byIdentity.Cwd != "/tmp/work" {
+		t.Fatalf("GetByIdentity identity = (%q, %q), want (sess-1, /tmp/work)", byIdentity.SessionID, byIdentity.Cwd)
+	}
+
+	byPanePID, err := s.FindByPanePID("%9", 900)
+	if err != nil || byPanePID == nil {
+		t.Fatalf("FindByPanePID: %v (frame=%v)", err, byPanePID)
+	}
+	if byPanePID.SessionID != "sess-1" || byPanePID.Cwd != "/tmp/work" {
+		t.Fatalf("FindByPanePID identity = (%q, %q), want (sess-1, /tmp/work)", byPanePID.SessionID, byPanePID.Cwd)
+	}
+
+	byPane, err := s.ListByPane("%9")
+	if err != nil {
+		t.Fatalf("ListByPane: %v", err)
+	}
+	if len(byPane) != 1 || byPane[0].SessionID != "sess-1" || byPane[0].Cwd != "/tmp/work" {
+		t.Fatalf("ListByPane = %+v, want one frame with (sess-1, /tmp/work)", byPane)
+	}
+
+	all, err := s.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	if len(all) != 1 || all[0].SessionID != "sess-1" || all[0].Cwd != "/tmp/work" {
+		t.Fatalf("ListAll = %+v, want one frame with (sess-1, /tmp/work)", all)
+	}
+	if all[0].FrameID != frame.FrameID {
+		t.Fatalf("ListAll frame_id = %q, want %q", all[0].FrameID, frame.FrameID)
+	}
+}
+
+// seedPreIdentitySchema creates agent_frames exactly as it looked before the
+// session_id / cwd columns existed, plus one row, so migrateFramesDB has to
+// take the additive ALTER path.
+func seedPreIdentitySchema(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.Exec(`
+		CREATE TABLE agent_frames (
+			frame_id            TEXT PRIMARY KEY,
+			pane_id             TEXT NOT NULL,
+			agent_type          TEXT NOT NULL,
+			pid                 INTEGER NOT NULL,
+			ppid                INTEGER NOT NULL,
+			process_start_time  TEXT NOT NULL,
+			parent_frame_id     TEXT,
+			subagents_json      TEXT NOT NULL DEFAULT '[]',
+			status              TEXT NOT NULL,
+			started_at          INTEGER NOT NULL,
+			last_seen_at        INTEGER NOT NULL,
+			verified            INTEGER NOT NULL DEFAULT 1,
+			FOREIGN KEY (parent_frame_id) REFERENCES agent_frames(frame_id) ON DELETE SET NULL
+		)
+	`); err != nil {
+		t.Fatalf("create pre-identity schema: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO agent_frames (
+		frame_id, pane_id, agent_type, pid, ppid, process_start_time,
+		parent_frame_id, subagents_json, status, started_at, last_seen_at, verified
+	) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
+		"old-frame", "%9", "cc", 900, 800, "S", `[]`, "idle", 10, 10, 1); err != nil {
+		t.Fatalf("seed pre-identity row: %v", err)
+	}
+}
+
+func TestMigrateFramesDB_AddsIdentityColumnsToOldSchema(t *testing.T) {
+	events := openTestAgentEventStore(t)
+	seedPreIdentitySchema(t, events.db)
+
+	frames, err := events.Frames()
+	if err != nil {
+		t.Fatalf("Frames (migrate): %v", err)
+	}
+	// Idempotent: a second migration must not fail on already-added columns.
+	if err := migrateFramesDB(events.db); err != nil {
+		t.Fatalf("migrateFramesDB second run: %v", err)
+	}
+
+	all, err := frames.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("ListAll returned %d frames, want the pre-existing row preserved", len(all))
+	}
+	if all[0].FrameID != "old-frame" {
+		t.Fatalf("frame_id = %q, want old-frame", all[0].FrameID)
+	}
+	if all[0].SessionID != "" || all[0].Cwd != "" {
+		t.Fatalf("migrated identity = (%q, %q), want two empty strings", all[0].SessionID, all[0].Cwd)
+	}
+	// identity_seq arrives on the same ALTER path and defaults to 0, which is
+	// older than any event — so the first identity write on a migrated row
+	// lands rather than being refused as stale.
+	if err := frames.UpdateSessionIdentity("old-frame", "sess-1", "/w/old", 100); err != nil {
+		t.Fatalf("UpdateSessionIdentity on a migrated row: %v", err)
+	}
+	assertStoredIdentity(t, frames, "old-frame", "sess-1", "/w/old")
+}
+
+// The real upgrade path for an install that already has the identity columns:
+// only identity_seq is missing, and the per-column guard has to add that one
+// without tripping over the two that are already there.
+func TestMigrateFramesDB_AddsOnlyTheMissingIdentityColumn(t *testing.T) {
+	events := openTestAgentEventStore(t)
+	seedPreIdentitySchema(t, events.db)
+	for _, column := range []string{"session_id", "cwd"} {
+		if _, err := events.db.Exec(`ALTER TABLE agent_frames ADD COLUMN ` + column + ` TEXT NOT NULL DEFAULT ''`); err != nil {
+			t.Fatalf("pre-add %s: %v", column, err)
+		}
+	}
+
+	frames, err := events.Frames()
+	if err != nil {
+		t.Fatalf("Frames (migrate): %v", err)
+	}
+	if err := frames.UpdateSessionIdentity("old-frame", "sess-1", "/w/old", 100); err != nil {
+		t.Fatalf("UpdateSessionIdentity after partial migration: %v", err)
+	}
+	assertStoredIdentity(t, frames, "old-frame", "sess-1", "/w/old")
+}
+
+// --- where the version comes from -------------------------------------------
+
+// storedIdentitySeq reads the version column directly, which nothing else in
+// these tests does: every other assertion is about the identity the version
+// let through, and this one is about the version itself.
+func storedIdentitySeq(t *testing.T, s *FramesStore, frameID string) int64 {
+	t.Helper()
+	var seq int64
+	if err := s.db.QueryRow(`SELECT identity_seq FROM agent_frames WHERE frame_id = ?`, frameID).Scan(&seq); err != nil {
+		t.Fatalf("read identity_seq: %v", err)
+	}
+	return seq
+}
+
+// TestFrames_NextIdentitySeq_ResumesFromThePersistedMaximum — the counter has
+// to survive a restart, and the reason is not tidiness.
+//
+// A counter that starts from zero on every boot hands the first event after a
+// restart a version BELOW every version already stored, and
+// UpdateSessionIdentity refuses those: the daemon would come back up unable to
+// record an identity for any frame that outlived it, silently, until the
+// counter climbed back past the old high-water mark. That is the objection
+// that made an earlier round reach for the wall clock instead — and it is an
+// objection to a counter that forgets, not to counters.
+func TestFrames_NextIdentitySeq_ResumesFromThePersistedMaximum(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.db")
+
+	events, err := OpenAgentEvent(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	s, err := events.Frames()
+	if err != nil {
+		t.Fatalf("frames: %v", err)
+	}
+	frame := seedIdentityFrame(t, s, "", "")
+	if err := s.UpdateSessionIdentity(frame.FrameID, "sess-before", "/before", 5000); err != nil {
+		t.Fatalf("UpdateSessionIdentity: %v", err)
+	}
+	events.Close()
+
+	reopened, err := OpenAgentEvent(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { reopened.Close() })
+	s2, err := reopened.Frames()
+	if err != nil {
+		t.Fatalf("frames after restart: %v", err)
+	}
+
+	next := s2.NextIdentitySeq()
+	if next <= 5000 {
+		t.Fatalf("NextIdentitySeq() = %d after a restart, want > 5000 — the daemon came back unable to write an identity", next)
+	}
+	if err := s2.UpdateSessionIdentity(frame.FrameID, "sess-after", "/after", next); err != nil {
+		t.Fatalf("the first write after a restart was refused: %v", err)
+	}
+	assertStoredIdentity(t, s2, frame.FrameID, "sess-after", "/after")
+}
+
+// TestFrames_NextIdentitySeq_IsMonotonicAndNotTheClock — the version is a
+// counter, and that is the whole point: a wall clock can go backwards, and one
+// that does hands a NEWER event a SMALLER version, so the newer event's write
+// is refused (or, worse, an older event holding a version allocated before the
+// step still overwrites it afterwards). Nothing about the ordering guard in
+// UpdateSessionIdentity can detect that; it can only compare the numbers it is
+// given.
+//
+// Two properties, and both are needed: consecutive allocations differ by
+// exactly one — so the value cannot be a timestamp, whatever the clock does —
+// and concurrent allocations are all distinct, since the events being ordered
+// are by definition in flight at the same time.
+func TestFrames_NextIdentitySeq_IsMonotonicAndNotTheClock(t *testing.T) {
+	s := openTestFramesStore(t)
+
+	first, second := s.NextIdentitySeq(), s.NextIdentitySeq()
+	if second != first+1 {
+		t.Fatalf("consecutive allocations = %d, %d: want a counter stepping by one, not a clock reading", first, second)
+	}
+
+	const goroutines = 64
+	seen := make(chan int64, goroutines)
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			seen <- s.NextIdentitySeq()
+		}()
+	}
+	wg.Wait()
+	close(seen)
+
+	unique := make(map[int64]bool, goroutines)
+	for v := range seen {
+		if unique[v] {
+			t.Fatalf("NextIdentitySeq handed %d out twice: two in-flight events cannot be ordered against each other", v)
+		}
+		unique[v] = true
+		if v <= second {
+			t.Fatalf("NextIdentitySeq went backwards: %d after %d", v, second)
+		}
 	}
 }

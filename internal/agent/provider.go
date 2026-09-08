@@ -234,6 +234,23 @@ type StatuslineState struct {
 	SettingsPath string `json:"settingsPath"`
 }
 
+// SessionIdentifier is an optional capability, discovered by type assertion.
+// It answers "which agent session sent this event, and from where" for the
+// *sender's own* frame — no ownership decision is involved, it is that
+// agent's own session id whoever owns the pane.
+//
+// Every own-frame event contributes, not just SessionStart: opencode switches
+// back to an existing session inside one process without emitting a
+// SessionStart (spec §3.3), so a lifecycle gate would freeze the record on the
+// old conversation.
+//
+// Returns ("", "") when the event carries neither field; only non-empty values
+// are ever written, so a payload that carries neither clears nothing. A
+// provider that does not implement this interface never contributes.
+type SessionIdentifier interface {
+	IdentifyEvent(purdexName string, rawEvent json.RawMessage) (sessionID, cwd string)
+}
+
 // HistoryProvider can retrieve conversation history for a session.
 type HistoryProvider interface {
 	GetHistory(cwd string, sessionID string) ([]map[string]any, error)

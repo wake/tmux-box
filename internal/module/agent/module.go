@@ -279,6 +279,9 @@ func (m *Module) RegisterRoutes(mux *http.ServeMux) {
 	// History (delegates to provider)
 	mux.HandleFunc("GET /api/sessions/{code}/history", m.handleHistory)
 
+	// Ownership query: which agent owns this tmux session (spec §5.3)
+	mux.HandleFunc("GET /api/sessions/{code}/provenance", m.handleSessionProvenance)
+
 	// Upload (unchanged)
 	mux.HandleFunc("POST /api/agent/upload", m.handleUpload)
 	mux.HandleFunc("GET /api/upload/stats", m.handleUploadStats)

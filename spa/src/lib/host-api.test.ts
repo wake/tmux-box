@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { useHostStore } from '../stores/useHostStore'
 import {
   listSessions, createSession, deleteSession, switchMode,
-  handoff, fetchHistory, fetchSessionCwd, fetchSessionHome, getConfig, updateConfig, agentUpload,
+  handoff, fetchHistory, fetchSessionCwd, fetchSessionProvenance, fetchSessionHome, getConfig, updateConfig, agentUpload,
   fetchAgentMonitorChains, fetchAgentMonitorChain, fetchAgentMonitorProjection,
   fetchMonitorSnapshot, fetchMonitorConfig, updateMonitorConfig,
   type MonitorSnapshot, type Session,
@@ -237,6 +237,41 @@ describe('fetchSessionCwd', () => {
       new Response('nope', { status: 500 }),
     )
     await expect(fetchSessionCwd(HOST_ID, 'abc123')).rejects.toThrow('500')
+  })
+})
+
+describe('fetchSessionProvenance', () => {
+  it('returns the owning agent and the generation it was sampled in', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({
+        found: true, agent_type: 'cc', session_id: 'fa657572',
+        cwd: '/home/user/proj', tmux_pane_id: '%12',
+        tmux_instance: '222:2000', last_seen_at: 1788800000000,
+      }), { status: 200 }),
+    )
+    expect(await fetchSessionProvenance(HOST_ID, 'abc123')).toEqual({
+      found: true, agentType: 'cc', sessionId: 'fa657572',
+      cwd: '/home/user/proj', tmuxPaneId: '%12',
+      tmuxInstance: '222:2000', lastSeenAt: 1788800000000,
+    })
+    expectAuthFetch(`${BASE}/api/sessions/abc123/provenance`)
+  })
+
+  it('fills the omitted fields of a not-found answer', async () => {
+    // The daemon omits every `omitempty` field when it found no owner, and an
+    // absent generation must read as '' — never as a match.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ found: false }), { status: 200 }),
+    )
+    expect(await fetchSessionProvenance(HOST_ID, 'abc123')).toEqual({
+      found: false, agentType: '', sessionId: '', cwd: '', tmuxPaneId: '',
+      tmuxInstance: '', lastSeenAt: 0,
+    })
+  })
+
+  it('throws on non-ok response', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('nope', { status: 500 }))
+    await expect(fetchSessionProvenance(HOST_ID, 'abc123')).rejects.toThrow('500')
   })
 })
 

@@ -1,9 +1,11 @@
 package tmux
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 )
 
 // --- Fake Executor (test double) ---
@@ -53,6 +55,7 @@ type FakeExecutor struct {
 	panePIDs             map[string]string   // target → pane pid
 	activePanePIDs       map[string]string   // target → active pane pid
 	paneSessions         map[string]string   // target → session name
+	paneSessionIDs       map[string]string   // target → session id ("$N")
 	paneCwds             map[string]string   // target → pane_current_path
 	paneSizes            map[string][2]int   // target → [cols, rows]
 	rawKeysCalls         []RawKeysCall
@@ -61,13 +64,20 @@ type FakeExecutor struct {
 	autoResizeCalls      []string              // targets passed to ResizeWindowAuto
 	setWindowOptionCalls []SetWindowOptionCall // calls to SetWindowOption
 	windowOptions        map[string]string
-	paneIDs              []string // global pane id list for HasPane
-	hasPaneErr           error    // simulated transient tmux error for HasPane
-	listCallCount        int      // how many times ListSessions was called
-	alive                bool     // whether tmux server is "alive"
-	HooksOutput          string   // returned by ShowHooksGlobal
-	FailSendKeys         bool     // if true, SendKeysRaw returns an error
-	FailPasteText        bool     // if true, PasteText returns an error
+	// Server/global options live in their own map. Sharing windowOptions
+	// would let a caller that reaches for ShowWindowOption find a value only
+	// ShowGlobalOption can really read, and hide the bug.
+	globalOptions         map[string]string
+	globalOptionErrs      map[string]error
+	globalOptionDelays    map[string]time.Duration
+	showGlobalOptionCalls []string
+	paneIDs               []string // global pane id list for HasPane
+	hasPaneErr            error    // simulated transient tmux error for HasPane
+	listCallCount         int      // how many times ListSessions was called
+	alive                 bool     // whether tmux server is "alive"
+	HooksOutput           string   // returned by ShowHooksGlobal
+	FailSendKeys          bool     // if true, SendKeysRaw returns an error
+	FailPasteText         bool     // if true, PasteText returns an error
 }
 
 func NewFakeExecutor() *FakeExecutor {
@@ -84,9 +94,13 @@ func NewFakeExecutor() *FakeExecutor {
 		panePIDs:             make(map[string]string),
 		activePanePIDs:       make(map[string]string),
 		paneSessions:         make(map[string]string),
+		paneSessionIDs:       make(map[string]string),
 		paneCwds:             make(map[string]string),
 		paneSizes:            make(map[string][2]int),
 		windowOptions:        make(map[string]string),
+		globalOptions:        make(map[string]string),
+		globalOptionErrs:     make(map[string]error),
+		globalOptionDelays:   make(map[string]time.Duration),
 		alive:                true,
 	}
 }
@@ -403,6 +417,39 @@ func (f *FakeExecutor) PaneSessionName(target string) (string, error) {
 	return "", fmt.Errorf("pane session not configured for %s", target)
 }
 
+// SetPaneSessionID is a seam of its own, not a side effect of
+// SetPaneSessionName: the id and the name are separate facts about a pane, a
+// session keeps its id across a rename, and RenameSession (which preserves ids)
+// touches neither map. A test can therefore make the two disagree, which is
+// what a rename swap looks like from a pane's point of view.
+func (f *FakeExecutor) SetPaneSessionID(target, sessionID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.paneSessionIDs[target] = sessionID
+}
+
+// ForgetPaneSessionID makes PaneSessionID start failing for a pane it was
+// previously told about — the shape of a pane that has gone away, or of a tmux
+// round trip that could not be completed, in the middle of a request that
+// already read it once.
+func (f *FakeExecutor) ForgetPaneSessionID(target string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.paneSessionIDs, target)
+}
+
+func (f *FakeExecutor) PaneSessionID(ctx context.Context, target string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if id, ok := f.paneSessionIDs[target]; ok {
+		return id, nil
+	}
+	return "", fmt.Errorf("pane session id not configured for %s", target)
+}
+
 func (f *FakeExecutor) PanePID(target string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -614,6 +661,61 @@ func (f *FakeExecutor) ShowWindowOption(option string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.windowOptions[option], nil
+}
+
+// SetGlobalOptionValue seeds what ShowGlobalOption will answer.
+func (f *FakeExecutor) SetGlobalOptionValue(option, value string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.globalOptions[option] = value
+}
+
+// SetGlobalOptionError makes ShowGlobalOption fail for one option — the shape
+// of "no tmux server running", which the shell probe has to fall back from.
+func (f *FakeExecutor) SetGlobalOptionError(option string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.globalOptionErrs[option] = err
+}
+
+// SetGlobalOptionDelay makes ShowGlobalOption take `d` to answer — a tmux
+// server that has stopped responding. The wait is abandoned as soon as the
+// caller's context is done, so what the delay actually measures is whether the
+// caller passed a context with a deadline on it at all.
+func (f *FakeExecutor) SetGlobalOptionDelay(option string, d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.globalOptionDelays[option] = d
+}
+
+func (f *FakeExecutor) ShowGlobalOption(ctx context.Context, option string) (string, error) {
+	f.mu.Lock()
+	f.showGlobalOptionCalls = append(f.showGlobalOptionCalls, option)
+	err := f.globalOptionErrs[option]
+	value := f.globalOptions[option]
+	delay := f.globalOptionDelays[option]
+	f.mu.Unlock()
+
+	if delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	if err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+// ShowGlobalOptionCalls returns the options asked for, in order.
+func (f *FakeExecutor) ShowGlobalOptionCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.showGlobalOptionCalls...)
 }
 
 func (f *FakeExecutor) SetWindowOptionCalls() []SetWindowOptionCall {

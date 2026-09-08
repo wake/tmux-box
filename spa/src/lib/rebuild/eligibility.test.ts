@@ -104,7 +104,7 @@ function content(hostId: string, over: Partial<TmuxSessionContent> = {}): TmuxSe
   return {
     kind: 'tmux-session', hostId, sessionCode: 'old111', mode: 'terminal',
     cachedName: 'dev', tmuxInstance: '111:1000', terminated: 'tmux-restarted',
-    rebuild: record({ resumeCommand: 'claude --resume S1' }),
+    rebuild: record({ agent: { type: 'cc', sessionId: 'S1', updatedAt: 1 } }),
     ...over,
   }
 }

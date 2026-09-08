@@ -1,7 +1,9 @@
 import { useState, useRef, useEffect, useLayoutEffect, useMemo } from 'react'
 import { useClickOutside } from '../hooks/useClickOutside'
 import { useI18nStore } from '../stores/useI18nStore'
+import { useResumeTemplateLookup } from '../stores/useResumeTemplateStore'
 import { isValidSessionName } from '../lib/session-name'
+import { resolveResumeCommand } from '../lib/rebuild/composer'
 import { EditableValue, type RebuildEditableField } from './RebuildActionSet'
 import { collectRenameTargets, type RenameTargetPane } from '../features/workspace/hooks'
 import type { Tab } from '../types/tab'
@@ -69,6 +71,9 @@ function PaneDetailBlock({
   onClearError?: () => void
 }) {
   const t = useI18nStore((s) => s.t)
+  // Subscribed: the row shows the resolved command, so editing a template
+  // repaints it here too (spec §4.2).
+  const templates = useResumeTemplateLookup()
   const live = !target.terminated
   const currentName = live
     ? (target.cachedName || target.sessionCode)
@@ -146,11 +151,11 @@ function PaneDetailBlock({
         </DetailRow>
         <DetailRow label={t('rebuild.run_resume')}>
           <EditableValue
-            value={target.record.resumeCommand}
+            value={resolveResumeCommand(target.record, templates)}
             placeholder="—"
             disabled={false}
             testId={`rename-pane-resume-${target.paneId}`}
-            onCommit={(value) => onEditRebuildField?.(target, 'resumeCommand', value)}
+            onCommit={(value) => onEditRebuildField?.(target, 'resumeCommandOverride', value)}
           />
         </DetailRow>
       </div>

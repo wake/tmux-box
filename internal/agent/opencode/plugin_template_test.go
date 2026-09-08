@@ -357,3 +357,93 @@ func TestRenderManagedPlugin_MagicMarkerUnchanged(t *testing.T) {
 		t.Fatalf("rendered body missing magic marker `pdx-managed:opencode-hooks:v1`")
 	}
 }
+
+// TestRenderManagedPlugin_StopAndPromptEmitCwd pins the two emits that spec
+// 2026-09-07 §3.3 measured sending session_id alone. opencode switches back
+// into an existing session inside one process without a session.created, so a
+// frame that only ever sees Stop / UserPromptSubmit would otherwise carry a
+// session id it has no directory to resume from.
+//
+// PdxUserPromptSubmit's cwd is gated rather than unconditional: a subagent's
+// prompt reaches this hook under the CHILD's session id, and the parent shares
+// its pane and sender PID, so the identity fields are dropped for a child (see
+// TestRenderManagedPlugin_GatesChildPromptIdentity). The parent branch still
+// calls pdxCwd(), which is what this test pins.
+func TestRenderManagedPlugin_StopAndPromptEmitCwd(t *testing.T) {
+	body := renderManagedPlugin("/fake/pdx")
+
+	for _, tc := range []struct{ event, call, wantCwd string }{
+		{"PdxStop", "emit(PURDEX_EVENT.PdxStop, {", "cwd: pdxCwd()"},
+		{"PdxUserPromptSubmit", "emit(PURDEX_EVENT.PdxUserPromptSubmit, {", "cwd: childPrompt ? undefined : pdxCwd()"},
+	} {
+		start := strings.Index(body, tc.call)
+		if start < 0 {
+			t.Fatalf("rendered body missing %s emit (%q)", tc.event, tc.call)
+		}
+		end := strings.Index(body[start:], "})")
+		if end < 0 {
+			t.Fatalf("rendered body has no closing brace for the %s emit", tc.event)
+		}
+		if call := body[start : start+end]; !strings.Contains(call, tc.wantCwd) {
+			t.Errorf("%s emit missing %q; got %q", tc.event, tc.wantCwd, call)
+		}
+	}
+}
+
+// TestRenderManagedPlugin_GatesChildPromptIdentity statically pins the Task 4b
+// gate so a Bun-less CI still catches its removal.
+//
+// chat.message is the one hook a child (subagent) session still reaches — it
+// is deliberately NOT gated wholesale, because it is the event that reports the
+// now-current session id when opencode switches sessions in-process (spec
+// §3.3), and suppressing it would change the lights. But parent and child share
+// one tmux pane and one sender PID, and the daemon writes session_id/cwd onto
+// the frame it matched by (pane, senderPID) — the parent's. So a child's prompt
+// would flip the pane's recorded session id to the subagent's for as long as
+// that subagent works, and a Rebuild in that window would resume the wrong
+// conversation. Dropping just those two fields is enough: the daemon's
+// ExtractSessionIdentity writes only non-empty values, so the parent's identity
+// survives untouched.
+func TestRenderManagedPlugin_GatesChildPromptIdentity(t *testing.T) {
+	body := renderManagedPlugin("/fake/pdx")
+
+	const gate = "const childPrompt = !!input.sessionID && subagentSessions.has(input.sessionID)"
+	gateIdx := strings.Index(body, gate)
+	if gateIdx < 0 {
+		t.Fatalf("rendered body missing the child-prompt gate %q", gate)
+	}
+
+	const call = "emit(PURDEX_EVENT.PdxUserPromptSubmit, {"
+	start := strings.Index(body, call)
+	if start < 0 {
+		t.Fatalf("rendered body missing PdxUserPromptSubmit emit (%q)", call)
+	}
+	if gateIdx > start {
+		t.Fatalf("child-prompt gate (idx %d) must be computed before the emit (idx %d)", gateIdx, start)
+	}
+	end := strings.Index(body[start:], "})")
+	if end < 0 {
+		t.Fatal("rendered body has no closing brace for the PdxUserPromptSubmit emit")
+	}
+	emitCall := body[start : start+end]
+	for _, want := range []string{
+		"session_id: childPrompt ? undefined : input.sessionID",
+		"cwd: childPrompt ? undefined : pdxCwd()",
+	} {
+		if !strings.Contains(emitCall, want) {
+			t.Errorf("PdxUserPromptSubmit emit missing gated field %q; got %q", want, emitCall)
+		}
+	}
+	// Everything else about the event is preserved — the fix drops two
+	// fields, it does not suppress the event or narrow it further.
+	for _, want := range []string{
+		"message_id:",
+		"agent:",
+		"modelName,",
+		"source: 'chat.message',",
+	} {
+		if !strings.Contains(emitCall, want) {
+			t.Errorf("PdxUserPromptSubmit emit lost field %q; got %q", want, emitCall)
+		}
+	}
+}

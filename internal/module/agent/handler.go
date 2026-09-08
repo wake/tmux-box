@@ -100,6 +100,13 @@ type EventRequest struct {
 	SenderPID       int             `json:"sender_pid"`
 	SenderStartTime string          `json:"sender_start_time"`
 	SenderUncertain bool            `json:"sender_uncertain"`
+
+	// identitySeq versions this event's identity write against the other
+	// events in flight for the same frame. Unexported on purpose: it is not
+	// part of the wire shape and no sender may supply it — handleEvent stamps
+	// it on arrival, and that arrival order is the whole meaning of the
+	// number. See FramesStore.NextIdentitySeq.
+	identitySeq int64
 }
 
 // classifyLifecycle resolves an EventRequest to its LifecycleEventKind via
@@ -168,6 +175,25 @@ func (m *Module) handleEvent(w http.ResponseWriter, r *http.Request) {
 	if req.SenderStartTime == "" && !req.SenderUncertain {
 		http.Error(w, `{"error":"schema_invalid"}`, http.StatusBadRequest)
 		return
+	}
+
+	// The identity version is allocated HERE — before verification, which is
+	// the first thing on this path that waits. Verification reads the sender's
+	// process with `ps` and asks tmux about the pane, and nothing makes two
+	// hooks from one process clear it in the order they arrived (opencode
+	// switches session inside a single process without a SessionStart, spec
+	// §3.3). A version taken after verification would therefore order identity
+	// writes by which goroutine finished waiting first, and an event that
+	// arrived EARLIER but verified SLOWER would carry the higher version and
+	// overwrite the identity of the event that came after it —
+	// UpdateSessionIdentity's guard cannot see that, it can only compare the
+	// numbers it is handed.
+	//
+	// It is deliberately not broadcastTs, and not any other clock reading: see
+	// FramesStore.NextIdentitySeq. A rejected event simply burns its number,
+	// which costs nothing — the counter only has to increase.
+	if m.frames != nil {
+		req.identitySeq = m.frames.NextIdentitySeq()
 	}
 
 	trace := beginHookTrace(m.traceSink, req)

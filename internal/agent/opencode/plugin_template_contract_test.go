@@ -228,15 +228,27 @@ func (s *pluginSimState) simulateChatMessage(input, output map[string]any) mappe
 		modelID := strMapVal(model, "modelID")
 		modelName = provID + "/" + modelID
 	}
+	payload := map[string]any{
+		"message_id": messageID,
+		"agent":      agentName,
+		"modelName":  modelName,
+		"source":     "chat.message",
+	}
+	// Mirror of the JS template's child-prompt gate: parent and child share
+	// one tmux pane and one sender PID, so a child's session_id would be
+	// written onto the parent's frame. The event itself still goes out
+	// unchanged in every other field — only session_id is dropped, exactly
+	// as the JS sends `session_id: undefined` (which JSON omits).
+	//
+	// `cwd` is not modelled by this simulator at all and stays unmodelled;
+	// that is a pre-existing approximation, not part of this gate.
+	_, isChild := s.subagentSessions[sessionID]
+	if !(sessionID != "" && isChild) {
+		payload["session_id"] = sessionID
+	}
 	return mappedHookEvent{
-		Name: "PdxUserPromptSubmit",
-		Payload: map[string]any{
-			"session_id": sessionID,
-			"message_id": messageID,
-			"agent":      agentName,
-			"modelName":  modelName,
-			"source":     "chat.message",
-		},
+		Name:    "PdxUserPromptSubmit",
+		Payload: payload,
 	}
 }
 
@@ -1120,4 +1132,94 @@ func TestPluginTemplate_SessionCreated_EmitsCwd(t *testing.T) {
 	if !strings.Contains(body, "function pdxCwd()") {
 		t.Fatalf("pdxCwd helper missing")
 	}
+}
+
+// TestOpenCodePluginTemplate_ChildChatMessageOmitsSessionID keeps the Go
+// mirror honest about the child-prompt gate the JS template grew in
+// plan 2026-09-07 Task 4b.
+//
+// simulateChatMessage is a hand-written mirror of the JS `chat.message`
+// handler, and the contract test drives it as if it were the plugin. Before
+// this test the mirror still returned session_id for a known child session,
+// so the contract suite would have stayed green with the JS gate deleted —
+// a mirror that is knowingly wrong about a correctness-critical gate is
+// worse than no mirror. The Bun runtime test remains the real authority.
+//
+// `cwd` is deliberately NOT modelled here: it never was, and that
+// pre-existing approximation is not something this test starts fixing.
+func TestOpenCodePluginTemplate_ChildChatMessageOmitsSessionID(t *testing.T) {
+	t.Run("child_prompt_omits_session_id", func(t *testing.T) {
+		s := newPluginSimState()
+		s.simulateBusEvent("session.created", childCreatedProps("child1", "parent1"))
+
+		got, ok := s.simulateStrongHook("chat.message",
+			map[string]any{"sessionID": "child1", "messageID": "msg_c"},
+			map[string]any{"message": map[string]any{"id": "msg_c", "agent": "build"}},
+		)
+		if !ok || got.Name != "PdxUserPromptSubmit" {
+			t.Fatalf("child chat.message must still emit PdxUserPromptSubmit; ok=%v name=%q", ok, got.Name)
+		}
+		if _, exists := got.Payload["session_id"]; exists {
+			t.Fatalf("child chat.message must omit session_id entirely; payload=%v", got.Payload)
+		}
+		// Everything else stays: suppressing the event, or blanking other
+		// fields, would change the lights and is out of scope.
+		if mid := strMapVal(got.Payload, "message_id"); mid != "msg_c" {
+			t.Fatalf("message_id = %q, want %q", mid, "msg_c")
+		}
+		if agent := strMapVal(got.Payload, "agent"); agent != "build" {
+			t.Fatalf("agent = %q, want %q", agent, "build")
+		}
+		if src := strMapVal(got.Payload, "source"); src != "chat.message" {
+			t.Fatalf("source = %q, want %q", src, "chat.message")
+		}
+	})
+
+	t.Run("parent_prompt_keeps_session_id", func(t *testing.T) {
+		s := newPluginSimState()
+		s.simulateBusEvent("session.created", childCreatedProps("child1", "parent1"))
+
+		got, ok := s.simulateStrongHook("chat.message",
+			map[string]any{"sessionID": "parent1", "messageID": "msg_p"},
+			map[string]any{"message": map[string]any{"id": "msg_p", "agent": "build"}},
+		)
+		if !ok || got.Name != "PdxUserPromptSubmit" {
+			t.Fatalf("parent chat.message must emit PdxUserPromptSubmit; ok=%v name=%q", ok, got.Name)
+		}
+		if sid := strMapVal(got.Payload, "session_id"); sid != "parent1" {
+			t.Fatalf("session_id = %q, want %q", sid, "parent1")
+		}
+	})
+
+	t.Run("unknown_session_keeps_session_id_reload_window", func(t *testing.T) {
+		// Documented limit of the JS gate, mirrored: subagentSessions is
+		// in-memory, so after a plugin reload an unseen child's prompt is
+		// indistinguishable from a parent's and still carries session_id.
+		s := newPluginSimState()
+		got, ok := s.simulateStrongHook("chat.message",
+			map[string]any{"sessionID": "childOrphan", "messageID": "msg_o"},
+			map[string]any{"message": map[string]any{"id": "msg_o"}},
+		)
+		if !ok {
+			t.Fatal("unseen session chat.message must emit")
+		}
+		if sid := strMapVal(got.Payload, "session_id"); sid != "childOrphan" {
+			t.Fatalf("session_id = %q, want %q (documented reload-window limit)", sid, "childOrphan")
+		}
+	})
+
+	t.Run("stale_error_suppression_is_still_cleared_for_a_child", func(t *testing.T) {
+		// The gate drops a field from the payload; it must not skip the
+		// handler's own bookkeeping.
+		s := newPluginSimState()
+		s.simulateBusEvent("session.created", childCreatedProps("child1", "parent1"))
+		s.suppressIdleForSession["child1"] = true
+		s.simulateChatMessage(
+			map[string]any{"sessionID": "child1", "messageID": "msg_c"},
+			map[string]any{"message": map[string]any{"id": "msg_c"}},
+		)
+		if s.suppressIdleForSession["child1"] {
+			t.Fatal("child chat.message must still clear stale suppressIdleForSession")
+		}
+	})
 }

@@ -13,6 +13,7 @@ export const STORAGE_KEYS = {
   HOST_SETTINGS: 'purdex-host-settings',
   WORKSPACE_SETTINGS: 'purdex-workspace-settings',
   NOTIFICATION_SETTINGS: 'purdex-notification-settings',
+  RESUME_TEMPLATES: 'purdex-resume-templates',
   BROWSER_HISTORY: 'purdex-browser-history',
   LAYOUT: 'purdex-layout',
   NEW_TAB_LAYOUT: 'purdex-newtab-layout',

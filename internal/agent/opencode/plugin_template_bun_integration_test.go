@@ -374,3 +374,150 @@ func TestRenderManagedPlugin_BunRuntimeEmitsCwd(t *testing.T) {
 		}
 	})
 }
+
+// TestRenderManagedPlugin_BunRuntimeStopAndPromptCarryCwd proves at runtime
+// that the two emits spec 2026-09-07 §3.3 measured as cwd-less now carry one.
+// It drives a parent session that has a child, so the same run also re-pins
+// the parentID child-session filter: spec v1 §9.3 makes that filter a
+// precondition of the opencode ownership invariant, and a child event
+// leaking through here would attach the wrong session's cwd to the parent's
+// frame — exactly the mis-attribution the daemon-side wiring avoids.
+func TestRenderManagedPlugin_BunRuntimeStopAndPromptCarryCwd(t *testing.T) {
+	bunPath := requireBun(t)
+
+	const projectDir = "/tmp/pdx-project-dir"
+	const tail = `
+;(async () => {
+  const hooks = await PurdexOpenCodeHooks({ directory: '/tmp/pdx-project-dir' })
+  const fire = (ev) => hooks.event({ event: ev })
+  await fire({ type: 'session.created', properties: { sessionID: 'parent1', info: { id: 'parent1' } } })
+  await fire({ type: 'session.created', properties: { sessionID: 'child1', info: { id: 'child1', parentID: 'parent1' } } })
+  await hooks['chat.message']({ sessionID: 'parent1', messageID: 'msg1' }, { message: { id: 'msg1' } })
+  await hooks['chat.message']({ sessionID: 'child1', messageID: 'msg2' }, { message: { id: 'msg2' } })
+  await fire({ type: 'session.status', properties: { sessionID: 'child1', status: { type: 'idle' } } })
+  await fire({ type: 'session.status', properties: { sessionID: 'parent1', status: { type: 'idle' } } })
+})()
+`
+	emits := runRenderedPluginUnderBun(t, bunPath, tail, t.TempDir())
+
+	want := []string{"PdxSessionStart", "PdxUserPromptSubmit", "PdxUserPromptSubmit", "PdxStop"}
+	var names []string
+	for _, e := range emits {
+		names = append(names, e.Name)
+	}
+	// chat.message is not gated by parentID — it is the event that carries
+	// the now-current session id when opencode switches sessions in-process
+	// (spec §3.3) — so the child's prompt reaches the daemon under the
+	// child's own session id. The lifecycle emits (created / idle) stay
+	// gated: exactly one PdxSessionStart and one PdxStop, both for parent1.
+	if len(names) != len(want) {
+		t.Fatalf("captured events = %v, want %v", names, want)
+	}
+	for i, n := range names {
+		if n != want[i] {
+			t.Fatalf("captured events = %v, want %v", names, want)
+		}
+	}
+
+	// Index 2 is the CHILD's prompt, whose identity fields are dropped by the
+	// Task 4b gate — TestRenderManagedPlugin_BunRuntimeChildPromptOmitsIdentity
+	// owns that case. Every other emit belongs to parent1 and carries the cwd.
+	const childPromptIdx = 2
+	for i, e := range emits {
+		if i == childPromptIdx {
+			continue
+		}
+		got, _ := e.Payload["cwd"].(string)
+		if got != projectDir {
+			t.Errorf("%s cwd = %q, want %q (payload=%+v)", e.Name, got, projectDir, e.Payload)
+		}
+	}
+	for _, e := range emits {
+		if e.Name == "PdxUserPromptSubmit" {
+			continue
+		}
+		if sid, _ := e.Payload["session_id"].(string); sid != "parent1" {
+			t.Errorf("%s session_id = %q, want parent1 (the parentID filter must gate child lifecycle)", e.Name, sid)
+		}
+	}
+}
+
+// TestRenderManagedPlugin_BunRuntimeChildPromptOmitsIdentity proves at runtime
+// that a subagent's prompt cannot rename the pane's session.
+//
+// chat.message is the only hook a child session still reaches, and that is
+// deliberate: it is the event that reports the now-current session id when
+// opencode switches sessions in-process (spec §3.3), and suppressing it
+// outright would change the lights. But parent and child share one tmux pane
+// and one sender PID, so the daemon's identity write (which matches a frame by
+// (pane, senderPID)) would land the CHILD's session id on the PARENT's frame.
+// The pane's recorded session would then flip to the subagent's for as long as
+// it works, and a Rebuild in that window would send `opencode -s
+// <subagent-session>` — resuming the wrong conversation. So a child's prompt
+// carries neither session_id nor cwd; the daemon writes only non-empty values,
+// so the parent's identity survives untouched.
+//
+// Known limit: the gate is the in-memory subagentSessions map, so a plugin
+// reload loses it and a child prompt arriving afterwards is indistinguishable
+// from a parent's. That degrades to the pre-fix behaviour rather than to
+// something worse, and session.created re-registers the child if it is created
+// again — which the "reload" sub-case below pins.
+func TestRenderManagedPlugin_BunRuntimeChildPromptOmitsIdentity(t *testing.T) {
+	bunPath := requireBun(t)
+
+	const projectDir = "/tmp/pdx-project-dir"
+	const tail = `
+;(async () => {
+  const hooks = await PurdexOpenCodeHooks({ directory: '/tmp/pdx-project-dir' })
+  const fire = (ev) => hooks.event({ event: ev })
+  await fire({ type: 'session.created', properties: { sessionID: 'parent1', info: { id: 'parent1' } } })
+  await fire({ type: 'session.created', properties: { sessionID: 'child1', info: { id: 'child1', parentID: 'parent1' } } })
+  await hooks['chat.message']({ sessionID: 'child1', messageID: 'msg2', agent: 'explorer' }, { message: { id: 'msg2' } })
+  await hooks['chat.message']({ sessionID: 'parent1', messageID: 'msg1' }, { message: { id: 'msg1' } })
+})()
+`
+	emits := runRenderedPluginUnderBun(t, bunPath, tail, t.TempDir())
+
+	// The event is still emitted — exactly one PdxSessionStart for the parent,
+	// then one prompt per chat.message, child included.
+	want := []string{"PdxSessionStart", "PdxUserPromptSubmit", "PdxUserPromptSubmit"}
+	var names []string
+	for _, e := range emits {
+		names = append(names, e.Name)
+	}
+	if len(names) != len(want) {
+		t.Fatalf("captured events = %v, want %v", names, want)
+	}
+	for i, n := range names {
+		if n != want[i] {
+			t.Fatalf("captured events = %v, want %v", names, want)
+		}
+	}
+
+	childPrompt := emits[1]
+	if _, ok := childPrompt.Payload["session_id"]; ok {
+		t.Errorf("child prompt must carry no session_id; payload=%+v", childPrompt.Payload)
+	}
+	if _, ok := childPrompt.Payload["cwd"]; ok {
+		t.Errorf("child prompt must carry no cwd; payload=%+v", childPrompt.Payload)
+	}
+	// Only those two fields go. The event itself, and every other field on
+	// it, is untouched.
+	for field, want := range map[string]string{
+		"message_id": "msg2",
+		"agent":      "explorer",
+		"source":     "chat.message",
+	} {
+		if got, _ := childPrompt.Payload[field].(string); got != want {
+			t.Errorf("child prompt %s = %q, want %q (payload=%+v)", field, got, want, childPrompt.Payload)
+		}
+	}
+
+	parentPrompt := emits[2]
+	if got, _ := parentPrompt.Payload["session_id"].(string); got != "parent1" {
+		t.Errorf("parent prompt session_id = %q, want parent1 (payload=%+v)", got, parentPrompt.Payload)
+	}
+	if got, _ := parentPrompt.Payload["cwd"].(string); got != projectDir {
+		t.Errorf("parent prompt cwd = %q, want %q (payload=%+v)", got, projectDir, parentPrompt.Payload)
+	}
+}

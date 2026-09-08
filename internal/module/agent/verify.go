@@ -78,8 +78,24 @@ func (m *Module) verifyEvent(req EventRequest) verifyDecision {
 	return verifyDecision{Accepted: true}
 }
 
+// resolvePanePID returns the PID of the pane's own current process.
+//
+// ActivePanePID, never PanePID. PanePID runs `tmux list-panes -t <target>` and
+// takes the first row; tmux resolves a pane id target such as `%5` to the
+// WINDOW that contains it, so for any pane that is not its window's first the
+// answer is a sibling's PID. ActivePanePID runs `tmux display-message -p -t
+// <target> '#{pane_pid}'`, which honours a pane id target exactly.
+//
+// Every caller here passes a pane id (`req.TmuxPaneID`, `paneID`), so the
+// distinction is not academic: with PanePID a hook from the second pane of a
+// split window is checked against the first pane's process, fails the ancestor
+// test, and is rejected as pid_not_in_pane_tree. probe/liveness.go:36-42 fixed
+// the same bug on its own path in PR #638; this one was missed.
+//
+// PanePID itself is left alone — its other callers pass session/window targets,
+// where "the first pane of the target" is the intended meaning.
 func resolvePanePID(exec tmux.Executor, paneID string) (int, error) {
-	pid, err := exec.PanePID(paneID)
+	pid, err := exec.ActivePanePID(paneID)
 	if err != nil {
 		return 0, err
 	}

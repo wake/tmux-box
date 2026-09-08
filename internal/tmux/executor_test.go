@@ -2,6 +2,7 @@
 package tmux_test
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -261,6 +262,66 @@ printf 'on\n'
 	}
 	if value != "on" {
 		t.Fatalf("ShowWindowOption() = %q, want on", value)
+	}
+}
+
+// `default-shell` is a server option, and `show-options -w` cannot read one:
+// asking through ShowWindowOption returns empty and the shell probe would
+// silently fall through to $SHELL. So the argv is asserted, not just the value.
+func TestRealExecutorShowGlobalOptionUsesServerShowOptions(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "tmux")
+	if err := os.WriteFile(script, []byte(`#!/bin/sh
+if [ "$1" != "show-options" ] || [ "$2" != "-g" ] || [ "$3" != "-q" ] || [ "$4" != "-v" ] || [ "$5" != "default-shell" ] || [ -n "$6" ]; then
+  printf 'unexpected args: %s\n' "$*" >&2
+  exit 2
+fi
+printf '/bin/zsh\n'
+`), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	value, err := (&tmux.RealExecutor{}).ShowGlobalOption(context.Background(), "default-shell")
+	if err != nil {
+		t.Fatalf("ShowGlobalOption returned error: %v", err)
+	}
+	if value != "/bin/zsh" {
+		t.Fatalf("ShowGlobalOption() = %q, want /bin/zsh", value)
+	}
+}
+
+// The fake keeps global options in their own map: a caller that reaches for
+// ShowWindowOption instead must not accidentally find the value there.
+func TestFakeExecutor_ShowGlobalOption(t *testing.T) {
+	f := tmux.NewFakeExecutor()
+
+	value, err := f.ShowGlobalOption(context.Background(), "default-shell")
+	if err != nil {
+		t.Fatalf("ShowGlobalOption on an unset option returned error: %v", err)
+	}
+	if value != "" {
+		t.Fatalf("ShowGlobalOption() = %q, want empty", value)
+	}
+
+	f.SetGlobalOptionValue("default-shell", "/bin/zsh")
+	value, err = f.ShowGlobalOption(context.Background(), "default-shell")
+	if err != nil {
+		t.Fatalf("ShowGlobalOption returned error: %v", err)
+	}
+	if value != "/bin/zsh" {
+		t.Fatalf("ShowGlobalOption() = %q, want /bin/zsh", value)
+	}
+	if got, err := f.ShowWindowOption("default-shell"); err != nil || got != "" {
+		t.Fatalf("ShowWindowOption saw the global option: %q, %v", got, err)
+	}
+	if calls := f.ShowGlobalOptionCalls(); len(calls) != 2 || calls[0] != "default-shell" {
+		t.Fatalf("ShowGlobalOptionCalls() = %v", calls)
+	}
+
+	f.SetGlobalOptionError("default-shell", fmt.Errorf("no server running"))
+	if _, err := f.ShowGlobalOption(context.Background(), "default-shell"); err == nil {
+		t.Fatal("expected the seeded error")
 	}
 }
 

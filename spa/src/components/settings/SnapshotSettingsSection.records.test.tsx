@@ -7,9 +7,10 @@
 // without a snapshot. `runBatchRebuild` / `rebuildPane` are stubbed through
 // partial mocks so the grouping and the conflict rendering stay real.
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 import { SnapshotSettingsSection } from './SnapshotSettingsSection'
 import { useRebuildStore } from '../../stores/useRebuildStore'
+import { useResumeTemplateStore } from '../../stores/useResumeTemplateStore'
 import { useTabStore } from '../../stores/useTabStore'
 import * as storageModule from '../../lib/snapshot/storage'
 import * as hostApiModule from '../../lib/host-api'
@@ -87,6 +88,7 @@ describe('SnapshotSettingsSection — per-tab rebuild records (T16)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     useRebuildStore.setState({ operations: {}, lockedBy: null })
+    useResumeTemplateStore.setState({ agents: {} })
     mockedReadSnapshot.mockReturnValue(null)
     mockedReadPrev.mockReturnValue(null)
     mockedListSessions.mockResolvedValue([])
@@ -114,6 +116,24 @@ describe('SnapshotSettingsSection — per-tab rebuild records (T16)', () => {
     expect(screen.getByTestId('record-health-p2').getAttribute('data-health')).toBe('live')
     // The same labels the captured-snapshot table above it uses.
     expect(screen.getByTestId('record-health-p1').textContent).toBe('Rebuildable')
+  })
+
+  // The command column is RESOLVED, not stored (spec §4.2). A row that read it
+  // off the record through an unsubscribed path would render the right string
+  // on first paint and a stale one after the user edits the template.
+  it('renders the resolved command, and re-renders it when the template changes', async () => {
+    seedTabs(recordTab('t1', 'p1', {
+      rebuild: {
+        sessionName: 'dev', tmuxInstance: '111:1000', cwd: '/w', capturedAt: 1,
+        agent: { type: 'cc', sessionId: 'S1', updatedAt: 1 },
+      },
+    }))
+    render(<SnapshotSettingsSection />)
+    await waitFor(() => expect(screen.getByText('claude --resume S1')).toBeInTheDocument())
+
+    act(() => { useResumeTemplateStore.getState().setTemplate('cc', 'exact', 'cld-yolo --resume {id}') })
+    expect(screen.getByText('cld-yolo --resume S1')).toBeInTheDocument()
+    expect(screen.queryByText('claude --resume S1')).toBeNull()
   })
 
   it('an unreachable host greys every record row out, exactly as the snapshot table does', async () => {
@@ -226,6 +246,16 @@ describe('SnapshotSettingsSection — per-tab rebuild records (T16)', () => {
     useRebuildStore.getState().acquireOperationLock('rebuild:p9')
     render(<SnapshotSettingsSection />)
     expect((screen.getByTestId('record-rebuild-all-btn') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  // Task 16 (templates plan): the editor is mounted here — above the records —
+  // so the templates sit next to the commands they compose.
+  it('mounts the resume template editor above the records table', () => {
+    seedTabs(recordTab('t1', 'p1'))
+    render(<SnapshotSettingsSection />)
+    const editor = screen.getByTestId('resume-templates')
+    const records = screen.getByTestId('rebuild-records-block')
+    expect(editor.compareDocumentPosition(records) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
   it('a blocked batch reports who is holding the lock instead of failing silently', async () => {

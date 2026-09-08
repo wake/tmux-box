@@ -167,12 +167,35 @@ function mapTmuxPanesInLayout(
 }
 
 /**
+ * Whether a write landing `next` invalidates an override written while the
+ * record held `prev` (spec §4.3).
+ *
+ * The rule is a product policy, not a proof. It is neither necessary nor
+ * sufficient — `cld-yolo -c` stays valid across an identity change and is
+ * discarded anyway — but the one hazard that silently does the WRONG thing is
+ * a verbatim command carrying a dead session id, and that is exactly an
+ * identity change. A discarded override is visible and retypable; a silently
+ * stale one is not.
+ *
+ * No previous agent means no identity was named, so nothing was invalidated.
+ */
+function identityInvalidates(
+  prev: PaneRebuildRecord['agent'],
+  next: PaneRebuildRecord['agent'],
+): boolean {
+  if (!prev) return false
+  return prev.type !== next?.type || (prev.sessionId ?? '') !== (next?.sessionId ?? '')
+}
+
+/**
  * Apply one `RebuildPatch` to a pane, creating the record on first write.
  *
  * Returns the same content object when the patch changes nothing (a probe
  * against a cwd that is already known, an edit that retypes the same value).
- * Every write that does land re-stamps `capturedAt`, which is what makes the
- * batch view's "latest edit wins" resolution meaningful.
+ * A write that lands NEW CONTENT re-stamps `capturedAt`, which is what makes
+ * the batch view's "latest edit wins" resolution meaningful. The one exception
+ * is the backfill's confirm mode, which learns nothing about the content and
+ * so must not re-open that election — see mode 3 below.
  */
 function applyRebuildPatch(c: TmuxSessionContent, patch: RebuildPatch): TmuxSessionContent {
   const prev: PaneRebuildRecord = c.rebuild ?? {
@@ -191,22 +214,116 @@ function applyRebuildPatch(c: TmuxSessionContent, patch: RebuildPatch): TmuxSess
       // directory beside a new session id. `unverified` is cleared too — it
       // only ever meant "this agent group disagrees with the daemon", and this
       // is a fresh, authoritative agent group.
+      //
+      // `resumeCommandOverride` is NOT in the unit. It is a user edit, and it
+      // is discarded only when the identity it was written against changed
+      // (spec §4.3) — an idle SessionStart re-emit carrying the same id must
+      // keep it. A record that held no agent has no identity to have changed,
+      // so nothing invalidated the edit and it stays; that is the same rule
+      // the backfill's fill mode obeys.
       next = {
         sessionName: prev.sessionName,
         tmuxInstance: record.tmuxInstance || prev.tmuxInstance,
         cwd: record.cwd,
         cwdSource: record.cwd === undefined ? undefined : (record.cwdSource ?? 'agent-session-start'),
         agent: record.agent,
-        resumeCommand: record.resumeCommand,
+        ...(identityInvalidates(prev.agent, record.agent)
+          ? {}
+          : { resumeCommandOverride: prev.resumeCommandOverride }),
         capturedAt: now,
       }
       break
     }
+    case 'agent-backfill': {
+      // The daemon's ownership answer, applied under FOUR ORDERED modes: the
+      // first match wins (spec §5.5). The order is the whole policy — an
+      // unordered table let one state match two rows.
+      const { record } = patch
+
+      // Mode 1 — FILL. Nothing was known, so take the answer, but never step on
+      // provenance that outranks a process-tree inference: a cwd the user typed
+      // or a SessionStart reported stays, and only a probe's cwd is upgraded.
+      if (!prev.agent) {
+        const takesCwd = record.cwd !== undefined && (prev.cwd === undefined || prev.cwdSource === 'pane-probe')
+        next = {
+          ...prev,
+          tmuxInstance: record.tmuxInstance || prev.tmuxInstance,
+          agent: record.agent,
+          ...(takesCwd ? { cwd: record.cwd, cwdSource: 'agent-backfill' as const } : {}),
+          // A record with no agent CAN be flagged: `flagUnverifiedAgent` picks
+          // the triggering pane from a disagreeing recorded agent, but writes
+          // session-scoped, so a sibling that has no agent at all is flagged
+          // alongside it. Fill is that pane's only exit — replace and confirm
+          // both require a recorded agent — and a flag left standing keeps the
+          // pane eligible for the probe forever while the batch skips its
+          // resume. This answer IS the verification, so the flag goes with it.
+          unverified: undefined,
+          // `resumeCommandOverride` rides through untouched: nothing was
+          // invalidated, because the record held no identity to invalidate.
+          capturedAt: now,
+        }
+        break
+      }
+
+      const identityMatches =
+        prev.agent.type === record.agent.type &&
+        (prev.agent.sessionId ?? '') === (record.agent.sessionId ?? '')
+
+      // Mode 2 — REPLACE. The record is flagged and the answer names someone
+      // else, so the whole group goes as one unit exactly like `agent-group`:
+      // correcting the agent while leaving the previous agent's cwd and command
+      // attached is the cross-identity mixture whole-group writes exist to
+      // prevent. A `cwdSource: 'user'` cwd is the one thing kept — the override
+      // is dropped by omission, since the identity it named is the one this
+      // correction just replaced (spec §4.3).
+      if (prev.unverified && !identityMatches) {
+        const keepsUserCwd = prev.cwd !== undefined && prev.cwdSource === 'user'
+        next = {
+          sessionName: prev.sessionName,
+          tmuxInstance: record.tmuxInstance || prev.tmuxInstance,
+          cwd: keepsUserCwd ? prev.cwd : record.cwd,
+          cwdSource: keepsUserCwd ? 'user' : record.cwd === undefined ? undefined : 'agent-backfill',
+          agent: record.agent,
+          capturedAt: now,
+        }
+        break
+      }
+
+      // Mode 3 — CONFIRM. The daemon agrees, which is positive evidence the
+      // record is right. This is what makes the probe terminate: without it an
+      // agreeing answer would leave the pane eligible and re-asking forever,
+      // since the projection's TopFrame can legitimately differ indefinitely.
+      //
+      // `capturedAt` is deliberately NOT re-stamped (spec §5.5): it carries
+      // product meaning — `groupForBatch` reads it to elect which pane's record
+      // a group rebuilds from. Refreshing it here would let a live sibling that
+      // never saw the user's pane-scoped edit outrank the pane they typed into,
+      // purely because the daemon happened to answer about it later. Confirm
+      // learns nothing new about the record's CONTENT; it only clears the flag.
+      if (prev.unverified) {
+        next = { ...prev, unverified: undefined }
+        break
+      }
+
+      // Mode 4 — NO-OP. An agent is present and verified: "有了就跳過".
+      return c
+    }
     case 'field': {
-      if (prev[patch.field] === patch.value) return c
-      // Spelled out per field so the record keeps its exact shape.
-      next = patch.field === 'cwd' ? { ...prev, cwd: patch.value, capturedAt: now }
-        : patch.field === 'resumeCommand' ? { ...prev, resumeCommand: patch.value, capturedAt: now }
+      // A cwd edit also stamps `cwdSource: 'user'`, so retyping the directory a
+      // probe already found is a CONFIRMATION, not a no-op: the value is
+      // unchanged but the provenance is not, and the agent backfill's fill mode
+      // reads that provenance to decide whether it may overwrite. Once the
+      // source is already 'user' there is nothing left to change, and the early
+      // return still covers the override and `sessionName` unconditionally.
+      const promotesCwdSource = patch.field === 'cwd' && prev.cwdSource !== 'user'
+      if (prev[patch.field] === patch.value && !promotesCwdSource) return c
+      // Spelled out per field so the record keeps its exact shape. An emptied
+      // override is DROPPED rather than stored as '': clearing the row is how
+      // the user goes back to the agent's template, so the record has to end
+      // up in the state it was in before they typed anything.
+      next = patch.field === 'cwd' ? { ...prev, cwd: patch.value, cwdSource: 'user', capturedAt: now }
+        : patch.field === 'resumeCommandOverride'
+          ? { ...prev, resumeCommandOverride: patch.value || undefined, capturedAt: now }
           : { ...prev, sessionName: patch.value, capturedAt: now }
       break
     }

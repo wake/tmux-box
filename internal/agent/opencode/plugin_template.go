@@ -142,7 +142,7 @@ export const PurdexOpenCodeHooks = async (ctx = {}) => {
             suppressIdleForSession.delete(sid)
             return
           }
-          await emit(PURDEX_EVENT.PdxStop, { session_id: sid })
+          await emit(PURDEX_EVENT.PdxStop, { session_id: sid, cwd: pdxCwd() })
           return
         }
         case 'session.deleted': {
@@ -174,8 +174,26 @@ export const PurdexOpenCodeHooks = async (ctx = {}) => {
       if (input.sessionID) suppressIdleForSession.delete(input.sessionID)
       const model = input.model
       const modelName = model ? (model.providerID + '/' + model.modelID) : ''
+      // chat.message is the one hook a child (subagent) session still
+      // reaches, and that is deliberate: it is the event that reports the
+      // now-current session id when opencode switches sessions in-process,
+      // and suppressing it would change the lights. But parent and child
+      // share one tmux pane and one sender PID, so the daemon — which
+      // matches a frame by (pane, senderPID) — would write the CHILD's
+      // session id onto the PARENT's frame. The pane's recorded session
+      // would flip to the subagent's for as long as it works, and a Rebuild
+      // in that window would resume the wrong conversation. So drop just
+      // those two fields for a child; the daemon writes only non-empty
+      // values, leaving the parent's identity untouched.
+      //
+      // Known limit: subagentSessions is in-memory, so a plugin reload loses
+      // it and a child prompt arriving afterwards is indistinguishable from
+      // a parent's — that degrades to the pre-fix behaviour, not to
+      // something worse, and session.created re-registers the child.
+      const childPrompt = !!input.sessionID && subagentSessions.has(input.sessionID)
       await emit(PURDEX_EVENT.PdxUserPromptSubmit, {
-        session_id: input.sessionID,
+        session_id: childPrompt ? undefined : input.sessionID,
+        cwd: childPrompt ? undefined : pdxCwd(),
         message_id: input.messageID || output.message?.id || '',
         agent: output.message?.agent || input.agent || '',
         modelName,

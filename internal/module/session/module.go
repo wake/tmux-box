@@ -24,9 +24,17 @@ type SessionModule struct {
 	shellHomeReader func(pid string) (string, error)
 	// tmuxInstanceFn reads the tmux server identity; swapped in tests.
 	tmuxInstanceFn func() string
-	cancelWatch    context.CancelFunc
-	wstate         watcherState
-	waitForGate    chan bool
+	// shellProbe runs the command-word probe (spec §4.4). A field, not a
+	// package global, so a test can prove a rejected token never reached a
+	// shell without mutating shared state.
+	shellProbe shellProbeFunc
+	// passwdShell is the third rung of the probe's shell ladder. It takes a
+	// context because on darwin it shells out to `dscl`, and that read is on
+	// the resolve-command deadline like everything else on the path.
+	passwdShell func(ctx context.Context) string
+	cancelWatch context.CancelFunc
+	wstate      watcherState
+	waitForGate chan bool
 	// createMu serializes handleCreate's HasSession→NewSession→SetMeta
 	// critical section so two concurrent POSTs with the same name can't
 	// both slip past the duplicate check. See #61.
@@ -52,6 +60,8 @@ func NewSessionModule(meta *store.MetaStore) *SessionModule {
 		meta:            meta,
 		shellHomeReader: readShellHomeFromProc,
 		tmuxInstanceFn:  config.GetTmuxInstance,
+		shellProbe:      runShellProbe,
+		passwdShell:     passwdShellForCurrentUser,
 	}
 }
 
@@ -76,6 +86,7 @@ func (m *SessionModule) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/sessions/{code}/mode", m.handleSwitchMode)
 	mux.HandleFunc("POST /api/sessions/{code}/send-keys", m.handleSendKeys)
 	mux.HandleFunc("/ws/terminal/{code}", m.handleTerminalWS)
+	mux.HandleFunc("POST /api/shell/resolve-command", m.handleShellResolveCommand)
 	mux.HandleFunc("GET /api/hooks/tmux/status", m.handleTmuxHookStatus)
 	mux.HandleFunc("POST /api/hooks/tmux/setup", m.handleTmuxHookSetup)
 }

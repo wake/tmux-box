@@ -3,7 +3,6 @@ import { create } from 'zustand'
 import { getActiveSessionInfo } from '../lib/active-session'
 import { compositeKey } from '../lib/composite-key'
 import { parseProvenance } from '../lib/rebuild/provenance'
-import { composeResumeCommand } from '../lib/rebuild/composer'
 import { useTabStore } from './useTabStore'
 import { scanPaneTree } from '../lib/pane-tree'
 
@@ -70,6 +69,10 @@ export interface NormalizedEvent {
  * envelope (spec §4.2 step 3). The whole agent group is replaced as one unit,
  * so a payload without `cwd` clears `cwd` rather than leaving the previous
  * agent's directory beside a new session id.
+ *
+ * What lands is the agent IDENTITY, never a command: `resolveResumeCommand`
+ * composes from the identity at the moment the command is needed, so a
+ * template the user edits later reaches every pane already recorded.
  */
 function writeProvenanceRecord(
   hostId: string,
@@ -91,7 +94,6 @@ function writeProvenanceRecord(
         tmuxPaneId: prov.tmuxPaneId || undefined,
         updatedAt: now,
       },
-      resumeCommand: composeResumeCommand(prov.agentType, prov.sessionId) || undefined,
       capturedAt: now,
     },
   })

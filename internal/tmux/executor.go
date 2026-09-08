@@ -58,6 +58,16 @@ type Executor interface {
 	PasteText(target, text string) error
 	PaneCurrentPath(target string) (string, error)
 	PaneSessionName(target string) (string, error)
+	// PaneSessionID returns the tmux session ID ("$N") the pane belongs to.
+	// Unlike the session name it is immutable for the life of the session, so
+	// a caller that must not be confused by a rename asks for this instead.
+	//
+	// It takes a context for the same reason ShowGlobalOption does: it is on a
+	// request path with a deadline (GET /api/sessions/{code}/provenance calls
+	// it once per pane to enumerate, and once more per pane to re-confirm),
+	// and a tmux server that has stopped answering must not hold that request
+	// open past it. A caller with nothing to bound it passes context.Background().
+	PaneSessionID(ctx context.Context, target string) (string, error)
 	PanePID(target string) (string, error)
 	ActivePanePID(target string) (string, error)
 	PaneChildCommands(target string) ([]string, error)
@@ -78,6 +88,16 @@ type Executor interface {
 	SetWindowOption(target, option, value string) error
 	SetWindowOptionGlobal(option, value string) error
 	ShowWindowOption(option string) (string, error)
+	// ShowGlobalOption reads a SERVER/global option (`show-options -g`).
+	// ShowWindowOption passes `-w` and can only see window options, so it
+	// returns "" for a server option such as `default-shell` — which reads as
+	// "unset" and is indistinguishable from a real absence.
+	//
+	// It takes a context because it is on a request path with a deadline
+	// (POST /api/shell/resolve-command) and a tmux server that has stopped
+	// answering must not hold that request open past it. A caller with
+	// nothing to bound it passes context.Background().
+	ShowGlobalOption(ctx context.Context, option string) (string, error)
 	SetHookGlobal(event, command string) error
 	RemoveHookGlobal(event string) error
 	ShowHooksGlobal() (string, error)
@@ -296,6 +316,14 @@ func (r *RealExecutor) PaneSessionName(target string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+func (r *RealExecutor) PaneSessionID(ctx context.Context, target string) (string, error) {
+	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", target, "#{session_id}").Output()
+	if err != nil {
+		return "", fmt.Errorf("tmux display-message session_id: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 func (r *RealExecutor) PanePID(target string) (string, error) {
 	out, err := exec.Command("tmux", "list-panes", "-t", target, "-F", "#{pane_pid}").Output()
 	if err != nil {
@@ -439,6 +467,20 @@ func (r *RealExecutor) ShowWindowOption(option string) (string, error) {
 			}
 		}
 		return "", fmt.Errorf("tmux show-options -w %s: %w", option, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (r *RealExecutor) ShowGlobalOption(ctx context.Context, option string) (string, error) {
+	out, err := exec.CommandContext(ctx, "tmux", "show-options", "-g", "-q", "-v", option).Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr := string(exitErr.Stderr)
+			if strings.Contains(stderr, "no server running") {
+				return "", nil
+			}
+		}
+		return "", fmt.Errorf("tmux show-options -g %s: %w", option, err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }

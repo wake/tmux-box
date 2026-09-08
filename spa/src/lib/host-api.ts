@@ -202,6 +202,83 @@ export async function fetchSessionCwd(
   return { cwd: String(body.cwd ?? ''), tmuxInstance: String(body.tmux_instance ?? '') }
 }
 
+/**
+ * The daemon's answer to "which agent owns this pane?" (spec §5.3): the root
+ * agent frame of the session, resolved through the frames and the tmux session
+ * id, never through the session name.
+ *
+ * `found: false` means no root frame carried a session id; every `omitempty`
+ * field is then absent from the body and normalised to '' / 0 here, so a caller
+ * never has to distinguish "missing" from "empty". `tmuxInstance` follows the
+ * same rule as {@link SessionCwd}: '' is the daemon's "I could not tell" and
+ * never equals a real generation.
+ */
+export interface SessionProvenance {
+  found: boolean
+  agentType: string
+  sessionId: string
+  cwd: string
+  tmuxPaneId: string
+  tmuxInstance: string
+  lastSeenAt: number
+}
+
+export async function fetchSessionProvenance(
+  hostId: string,
+  sessionCode: string,
+  signal?: AbortSignal,
+): Promise<SessionProvenance> {
+  const res = await hostFetch(hostId, `/api/sessions/${sessionCode}/provenance`, { signal })
+  if (!res.ok) throw new Error(`fetchSessionProvenance failed: ${res.status}`)
+  const body = await res.json()
+  return {
+    found: Boolean(body.found),
+    agentType: String(body.agent_type ?? ''),
+    sessionId: String(body.session_id ?? ''),
+    cwd: String(body.cwd ?? ''),
+    tmuxPaneId: String(body.tmux_pane_id ?? ''),
+    tmuxInstance: String(body.tmux_instance ?? ''),
+    lastSeenAt: Number(body.last_seen_at ?? 0),
+  }
+}
+
+/**
+ * The verdict `POST /api/shell/resolve-command` returns (spec §4.4).
+ *
+ * `unverifiable` is not a daemon verdict — it is what a 404 means: a daemon
+ * older than this endpoint. The user's template is already saved and the check
+ * is advice, so an old daemon must read as "could not check", never as an
+ * error the user has to debug (spec §8).
+ */
+export type ShellResolveVerdict =
+  | { status: 'resolved'; detail: string }
+  | { status: 'unresolved'; reason: string }
+  | { status: 'unverifiable' }
+
+/**
+ * `command` must be the COMMAND WORD, not a whole template: the daemon passes
+ * it to the shell as a single positional parameter, so `cld-yolo --resume {id}`
+ * would be looked up verbatim and answer `not_found`. Splitting is the caller's
+ * job (spec §4.4).
+ */
+export async function resolveShellCommand(
+  hostId: string,
+  command: string,
+  signal?: AbortSignal,
+): Promise<ShellResolveVerdict> {
+  const res = await hostFetch(hostId, '/api/shell/resolve-command', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command }),
+    signal,
+  })
+  if (res.status === 404) return { status: 'unverifiable' }
+  if (!res.ok) throw new Error(`resolveShellCommand failed: ${res.status}`)
+  const body = await res.json()
+  if (body.resolved) return { status: 'resolved', detail: String(body.detail ?? '') }
+  return { status: 'unresolved', reason: String(body.reason ?? '') }
+}
+
 export async function fetchSessionHome(
   hostId: string,
   sessionCode: string,

@@ -10,12 +10,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { useI18nStore } from '../stores/useI18nStore'
 import { usePaneOperation, type RebuildBinding } from '../stores/useRebuildStore'
+import { useResumeTemplateLookup } from '../stores/useResumeTemplateStore'
+import { resolveResumeCommand } from '../lib/rebuild/composer'
 import { retryResume, attachAnyway, type RebuildPlan, type StepResult } from '../lib/rebuild/engine'
 import { AGENT_NAMES } from '../lib/agent-metadata'
 import type { PaneRebuildRecord, TerminatedReason } from '../types/tab'
 
 /** The record fields the user may hand-edit (`RebuildPatch` kind `'field'`). */
-export type RebuildEditableField = 'sessionName' | 'cwd' | 'resumeCommand'
+export type RebuildEditableField = 'sessionName' | 'cwd' | 'resumeCommandOverride'
 
 /**
  * What the panel needs out of a rebuild operation. Structurally satisfied by
@@ -24,6 +26,13 @@ export type RebuildEditableField = 'sessionName' | 'cwd' | 'resumeCommand'
  */
 export interface RebuildOperationView {
   status?: 'running' | 'done'
+  /**
+   * The string the engine resolved and pinned when the operation started
+   * (`RebuildOperation.resumeCommand`). The panel renders it instead of the
+   * live resolution while the operation is still actionable — see the `pinned`
+   * computation below.
+   */
+  resumeCommand?: string
   report?: {
     hostId?: string
     created?: { code: string; name: string; tmuxInstance?: string }
@@ -205,6 +214,10 @@ export function RebuildActionSet({
   const t = useI18nStore((s) => s.t)
   const storedOperation = usePaneOperation(paneId, binding)
   const op: RebuildOperationView | undefined = operation ?? storedOperation
+  // Subscribed, not read once: the panel shows what the next Rebuild would
+  // send, so a template edited in Settings (or in another window) has to
+  // repaint this row without anything remounting.
+  const templates = useResumeTemplateLookup()
 
   // Per-row overrides on top of the derived defaults, so a value that arrives
   // later (a cwd the user just typed in) turns its row back on by itself.
@@ -225,8 +238,20 @@ export function RebuildActionSet({
   // them would only pretend to change it.
   const frozen = busy || !!created || hostRemoved
 
+  // Spec §4.3. An operation that is in flight, or that has already created a
+  // session, is the thing the next button press acts on — "Retry resume"
+  // re-sends against THAT session, so the row has to show the string the engine
+  // pinned at operation start, not whatever the templates resolve to now.
+  //
+  // An operation that failed before creating anything is not actionable: the
+  // next Rebuild recomputes from scratch. So the panel goes back to the live
+  // resolution, and a template the user edits in between is visible before they
+  // press the button rather than after.
+  const pinned = busy || !!created
+  const resumeCommand = pinned ? (op?.resumeCommand ?? '') : resolveResumeCommand(record, templates)
+
   const hasCwd = !!record.cwd
-  const hasResume = !!record.resumeCommand
+  const hasResume = !!resumeCommand
   // A dead pane's session has to be recreated — unchecking is only meaningful
   // when re-pointing at something live, which the session picker does (§4.9).
   const createLocked = !!terminated
@@ -291,11 +316,11 @@ export function RebuildActionSet({
         onToggle={() => setOverride((o) => ({ ...o, runResume: !plan.runResume }))}
       >
         <EditableValue
-          value={record.resumeCommand}
+          value={resumeCommand}
           placeholder="—"
           disabled={frozen}
           testId="rebuild-resume-command"
-          onCommit={edit('resumeCommand')}
+          onCommit={edit('resumeCommandOverride')}
         />
       </ActionRow>
 

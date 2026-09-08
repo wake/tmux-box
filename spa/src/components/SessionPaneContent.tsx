@@ -11,6 +11,7 @@ import { handoff, fetchWsTicket } from '../lib/host-api'
 import { useHostStore } from '../stores/useHostStore'
 import { findPane } from '../lib/pane-tree'
 import { probeSessionCwd } from '../lib/rebuild/cwd-probe'
+import { probeSessionProvenance } from '../lib/rebuild/provenance-probe'
 import type { PaneRendererProps } from '../lib/module-registry'
 
 const EMPTY_PRESETS: Array<{ name: string; command: string }> = []
@@ -71,6 +72,12 @@ export function SessionPaneContent({ pane, isActive }: PaneRendererProps) {
     if (mode !== 'terminal' || terminated) return
     if (!attachGateOpen) return
     probeSessionCwd(hostId, sessionCode, tmuxInstance)
+    // The third provenance trigger (spec §5.4), under the same gate and the
+    // same binding: a pane opened after the list settled gets no sweep, and a
+    // session whose agent is silent sends no hook, so without this one nothing
+    // would ever ask on its behalf. The probe itself decides whether this
+    // binding still wants an answer.
+    probeSessionProvenance(hostId, sessionCode, tmuxInstance)
   }, [hostId, sessionCode, tmuxInstance, mode, terminated, attachGateOpen])
 
   // Look up tabId from store (pane renderers don't receive tabId as a prop)
