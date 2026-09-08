@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 	agentpkg "github.com/wake/purdex/internal/agent"
@@ -35,6 +36,33 @@ type Frame struct {
 
 type FramesStore struct {
 	db *sql.DB
+	// identitySeq hands out the versions UpdateSessionIdentity orders by. See
+	// NextIdentitySeq.
+	identitySeq atomic.Int64
+}
+
+// NextIdentitySeq allocates the version for one identity write.
+//
+// It is a counter and not a clock, because a clock can go backwards. A system
+// clock that steps back hands a NEWER event a SMALLER version than an older
+// one already holds, and UpdateSessionIdentity — which can only compare the
+// numbers it is given — refuses the newer write, or lets an older event that
+// allocated before the step overwrite it afterwards. Neither is recoverable
+// from inside the store.
+//
+// The counter starts from the persisted maximum rather than from zero (see
+// AgentEventStore.Frames), which is the objection that made an earlier round
+// reach for the wall clock in the first place: a counter that forgets across a
+// restart hands out versions below every version already stored, and every
+// identity write for a surviving frame is refused until it climbs back. A
+// counter that remembers has no such window.
+//
+// Allocation must happen when an event ARRIVES, before anything that can wait
+// — verification reads processes and asks tmux — so that the order of the
+// numbers is the order the daemon received the events, not the order their
+// goroutines happened to finish waiting.
+func (s *FramesStore) NextIdentitySeq() int64 {
+	return s.identitySeq.Add(1)
 }
 
 func migrateFramesDB(db *sql.DB) error {

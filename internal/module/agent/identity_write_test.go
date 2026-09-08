@@ -1,7 +1,11 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	agentpkg "github.com/wake/purdex/internal/agent"
@@ -504,7 +508,10 @@ func TestSessionIdentity_WriteBetweenProxyAttachReadAndUpsertSurvives(t *testing
 
 // identityEvent is one hook payload from a `cc` sender, carrying the identity
 // it wants written.
-func identityEvent(sessionID, cwd string) EventRequest {
+// identityEvent builds one hook carrying an identity, stamped with the version
+// handleEvent would have allocated for it on arrival. The version is part of
+// the event, so it is set here rather than passed alongside.
+func identityEvent(sessionID, cwd string, seq int64) EventRequest {
 	return EventRequest{
 		TmuxSession:     "work",
 		TmuxPaneID:      "%5",
@@ -513,6 +520,7 @@ func identityEvent(sessionID, cwd string) EventRequest {
 		SenderPID:       100,
 		SenderStartTime: "t100",
 		RawEvent:        identityPayload(sessionID, cwd),
+		identitySeq:     seq,
 	}
 }
 
@@ -535,9 +543,9 @@ func TestSessionIdentity_OlderEventDoesNotOverwriteNewer(t *testing.T) {
 	frame := seedFrame(t, m, "%5", "cc", 100, "t100", 10)
 
 	// B is the newer event and lands first.
-	m.recordSessionIdentity(identityEvent("sess-B", "/w/b"), frame.FrameID, 300)
+	m.recordSessionIdentity(identityEvent("sess-B", "/w/b", 300), frame.FrameID)
 	// A was emitted earlier and arrives late.
-	m.recordSessionIdentity(identityEvent("sess-A", "/w/a"), frame.FrameID, 200)
+	m.recordSessionIdentity(identityEvent("sess-A", "/w/a", 200), frame.FrameID)
 
 	assertIdentity(t, loadFrame(t, m, "%5", 100, "t100"), "sess-B", "/w/b")
 }
@@ -548,8 +556,8 @@ func TestSessionIdentity_NewerEventStillWins(t *testing.T) {
 	m := newIdentityTestModule(t)
 	frame := seedFrame(t, m, "%5", "cc", 100, "t100", 10)
 
-	m.recordSessionIdentity(identityEvent("sess-A", "/w/a"), frame.FrameID, 200)
-	m.recordSessionIdentity(identityEvent("sess-B", "/w/b"), frame.FrameID, 300)
+	m.recordSessionIdentity(identityEvent("sess-A", "/w/a", 200), frame.FrameID)
+	m.recordSessionIdentity(identityEvent("sess-B", "/w/b", 300), frame.FrameID)
 
 	assertIdentity(t, loadFrame(t, m, "%5", 100, "t100"), "sess-B", "/w/b")
 }
@@ -561,12 +569,88 @@ func TestSessionIdentity_LastSeenAtIsNotTheVersion(t *testing.T) {
 	m := newIdentityTestModule(t)
 	frame := seedFrame(t, m, "%5", "cc", 100, "t100", 10)
 
-	m.recordSessionIdentity(identityEvent("sess-A", "/w/a"), frame.FrameID, 200)
+	m.recordSessionIdentity(identityEvent("sess-A", "/w/a", 200), frame.FrameID)
 	if err := m.frames.UpdateStatusAndLastSeen(frame.FrameID, agentpkg.StatusRunning, 9999); err != nil {
 		t.Fatalf("UpdateStatusAndLastSeen: %v", err)
 	}
 	// Still older than A by event order, however far last_seen_at has moved.
-	m.recordSessionIdentity(identityEvent("sess-STALE", "/w/stale"), frame.FrameID, 150)
+	m.recordSessionIdentity(identityEvent("sess-STALE", "/w/stale", 150), frame.FrameID)
 
 	assertIdentity(t, loadFrame(t, m, "%5", 100, "t100"), "sess-A", "/w/a")
+}
+
+// --- where the version comes from -------------------------------------------
+
+// postIdentityEvent drives one hook all the way through handleEvent, which is
+// the only path that allocates an identity version. The direct
+// applyFrameEvent tests above hand a version in and so cannot say anything
+// about where it came from or when it was taken.
+func postIdentityEvent(t *testing.T, m *Module, sessionID, cwd string) {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"tmux_session":      "work",
+		"tmux_pane_id":      "%5",
+		"sender_pid":        100,
+		"sender_start_time": "t100",
+		"purdex_name":       "PdxUserPromptSubmit",
+		"agent_type":        "cc",
+		"raw_event":         identityPayload(sessionID, cwd),
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/api/agent/event", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	m.handleEvent(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d (body %s)", w.Code, w.Body.String())
+	}
+}
+
+// TestSessionIdentity_SlowVerificationDoesNotOvertakeANewerEvent — the
+// version has to be allocated when the event ARRIVES, not when it is about to
+// be written, and verification sits between the two.
+//
+// Verification is a real wait: it reads the sender's process with `ps` and
+// asks tmux about the pane. Two hooks from one process can be in flight at
+// once (opencode switches session inside a single process without a
+// SessionStart), and there is nothing that makes them clear verification in
+// the order they arrived. A version taken AFTER verification is therefore the
+// order the goroutines finished waiting, not the order the daemon received
+// them — so the event that arrived first, and verified slowest, gets the
+// HIGHEST version and overwrites the identity of the one that arrived after
+// it. The store's ordering guard cannot help: it is being handed the wrong
+// numbers.
+//
+// A arrives first and blocks in verification until B — which arrives second —
+// has been written in full. B's identity is the newer one and must survive.
+func TestSessionIdentity_SlowVerificationDoesNotOvertakeANewerEvent(t *testing.T) {
+	m := newIdentityTestModule(t)
+	seedFrame(t, m, "%5", "cc", 100, "t100", 10)
+
+	aInVerify := make(chan struct{})
+	bWritten := make(chan struct{})
+	origVerify := verifyEventFn
+	verifyEventFn = func(_ *Module, req EventRequest) verifyDecision {
+		if strings.Contains(string(req.RawEvent), "sess-A") {
+			close(aInVerify)
+			<-bWritten // A is slow: it clears verification only after B is done
+		}
+		return verifyDecision{Accepted: true}
+	}
+	t.Cleanup(func() { verifyEventFn = origVerify })
+
+	aDone := make(chan struct{})
+	go func() {
+		defer close(aDone)
+		postIdentityEvent(t, m, "sess-A", "/w/a")
+	}()
+
+	<-aInVerify // A is inside the handler, past the point a version is due
+	postIdentityEvent(t, m, "sess-B", "/w/b")
+	close(bWritten)
+	<-aDone
+
+	assertIdentity(t, loadFrame(t, m, "%5", 100, "t100"), "sess-B", "/w/b")
 }

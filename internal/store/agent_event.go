@@ -170,7 +170,22 @@ func (s *AgentEventStore) Frames() (*FramesStore, error) {
 	if err := migrateFramesDB(s.db); err != nil {
 		return nil, err
 	}
-	return &FramesStore{db: s.db}, nil
+	frames := &FramesStore{db: s.db}
+	// The identity version counter continues from what is already on disk. A
+	// counter restarting at zero would hand every event after a reboot a
+	// version below the ones stored, and UpdateSessionIdentity would refuse
+	// them all — silently, for as long as it took to climb back. Read after
+	// the migration, so the column is there to read; NULL (an empty table, or
+	// a table migrated a moment ago) is the 0 the counter would have started
+	// at anyway.
+	var maxSeq sql.NullInt64
+	if err := s.db.QueryRow(`SELECT MAX(identity_seq) FROM agent_frames`).Scan(&maxSeq); err != nil {
+		return nil, fmt.Errorf("frames store: read identity_seq high-water mark: %w", err)
+	}
+	if maxSeq.Valid {
+		frames.identitySeq.Store(maxSeq.Int64)
+	}
+	return frames, nil
 }
 
 func (s *AgentEventStore) Traces() (*TraceStore, error) {

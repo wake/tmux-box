@@ -3,8 +3,10 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	agentpkg "github.com/wake/purdex/internal/agent"
@@ -1103,4 +1105,111 @@ func TestMigrateFramesDB_AddsOnlyTheMissingIdentityColumn(t *testing.T) {
 		t.Fatalf("UpdateSessionIdentity after partial migration: %v", err)
 	}
 	assertStoredIdentity(t, frames, "old-frame", "sess-1", "/w/old")
+}
+
+// --- where the version comes from -------------------------------------------
+
+// storedIdentitySeq reads the version column directly, which nothing else in
+// these tests does: every other assertion is about the identity the version
+// let through, and this one is about the version itself.
+func storedIdentitySeq(t *testing.T, s *FramesStore, frameID string) int64 {
+	t.Helper()
+	var seq int64
+	if err := s.db.QueryRow(`SELECT identity_seq FROM agent_frames WHERE frame_id = ?`, frameID).Scan(&seq); err != nil {
+		t.Fatalf("read identity_seq: %v", err)
+	}
+	return seq
+}
+
+// TestFrames_NextIdentitySeq_ResumesFromThePersistedMaximum — the counter has
+// to survive a restart, and the reason is not tidiness.
+//
+// A counter that starts from zero on every boot hands the first event after a
+// restart a version BELOW every version already stored, and
+// UpdateSessionIdentity refuses those: the daemon would come back up unable to
+// record an identity for any frame that outlived it, silently, until the
+// counter climbed back past the old high-water mark. That is the objection
+// that made an earlier round reach for the wall clock instead — and it is an
+// objection to a counter that forgets, not to counters.
+func TestFrames_NextIdentitySeq_ResumesFromThePersistedMaximum(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.db")
+
+	events, err := OpenAgentEvent(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	s, err := events.Frames()
+	if err != nil {
+		t.Fatalf("frames: %v", err)
+	}
+	frame := seedIdentityFrame(t, s, "", "")
+	if err := s.UpdateSessionIdentity(frame.FrameID, "sess-before", "/before", 5000); err != nil {
+		t.Fatalf("UpdateSessionIdentity: %v", err)
+	}
+	events.Close()
+
+	reopened, err := OpenAgentEvent(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { reopened.Close() })
+	s2, err := reopened.Frames()
+	if err != nil {
+		t.Fatalf("frames after restart: %v", err)
+	}
+
+	next := s2.NextIdentitySeq()
+	if next <= 5000 {
+		t.Fatalf("NextIdentitySeq() = %d after a restart, want > 5000 — the daemon came back unable to write an identity", next)
+	}
+	if err := s2.UpdateSessionIdentity(frame.FrameID, "sess-after", "/after", next); err != nil {
+		t.Fatalf("the first write after a restart was refused: %v", err)
+	}
+	assertStoredIdentity(t, s2, frame.FrameID, "sess-after", "/after")
+}
+
+// TestFrames_NextIdentitySeq_IsMonotonicAndNotTheClock — the version is a
+// counter, and that is the whole point: a wall clock can go backwards, and one
+// that does hands a NEWER event a SMALLER version, so the newer event's write
+// is refused (or, worse, an older event holding a version allocated before the
+// step still overwrites it afterwards). Nothing about the ordering guard in
+// UpdateSessionIdentity can detect that; it can only compare the numbers it is
+// given.
+//
+// Two properties, and both are needed: consecutive allocations differ by
+// exactly one — so the value cannot be a timestamp, whatever the clock does —
+// and concurrent allocations are all distinct, since the events being ordered
+// are by definition in flight at the same time.
+func TestFrames_NextIdentitySeq_IsMonotonicAndNotTheClock(t *testing.T) {
+	s := openTestFramesStore(t)
+
+	first, second := s.NextIdentitySeq(), s.NextIdentitySeq()
+	if second != first+1 {
+		t.Fatalf("consecutive allocations = %d, %d: want a counter stepping by one, not a clock reading", first, second)
+	}
+
+	const goroutines = 64
+	seen := make(chan int64, goroutines)
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			seen <- s.NextIdentitySeq()
+		}()
+	}
+	wg.Wait()
+	close(seen)
+
+	unique := make(map[int64]bool, goroutines)
+	for v := range seen {
+		if unique[v] {
+			t.Fatalf("NextIdentitySeq handed %d out twice: two in-flight events cannot be ordered against each other", v)
+		}
+		unique[v] = true
+		if v <= second {
+			t.Fatalf("NextIdentitySeq went backwards: %d after %d", v, second)
+		}
+	}
 }
