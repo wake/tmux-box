@@ -124,9 +124,7 @@ func (m *Module) resolveSessionOwner(ctx context.Context, code string) (PaneOwne
 		// So the pane is asked again, at the point its answer is about to be
 		// used, and an answer that can no longer be confirmed as this
 		// session's is dropped rather than reported.
-		if !m.paneStillInSession(ctx, paneID, code) {
-			continue
-		}
+		stillOurs := m.paneStillInSession(ctx, paneID, code)
 		// The re-check is itself a tmux round trip, and it is the LAST thing
 		// done before an owner is adopted — so the clock is read once more
 		// here, after it, and not only before. A round trip that completes as
@@ -135,8 +133,19 @@ func (m *Module) resolveSessionOwner(ctx context.Context, code string) (PaneOwne
 		// would answer a request that is already out of time: exactly what the
 		// deadline is for. An expired ctx ends the walk as "no answer", the
 		// same as a store failure — never as the owners found so far.
+		//
+		// This check comes BEFORE the membership verdict is acted on, because
+		// the deadline is the reason a re-check fails most often: a cancelled
+		// round trip reports "not confirmed as ours", and skipping just that
+		// pane would let the walk finish and answer with whatever earlier pane
+		// it had already adopted — an out-of-time answer, and quite possibly
+		// the wrong root, since the pane that never got confirmed may be the
+		// one that would have won.
 		if ctx.Err() != nil {
 			return PaneOwner{}, false
+		}
+		if !stillOurs {
+			continue
 		}
 		for _, owner := range owners {
 			// The session-id filter lives HERE, not in resolvePaneOwners: a

@@ -852,3 +852,77 @@ func TestHandleSessionProvenance_RecheckAnswersAfterTheDeadline_NotAnAnswer(t *t
 		t.Fatalf("body = %+v, want found:false — the confirmation arrived after the deadline", body)
 	}
 }
+
+// paneTargetedRecheckExecutor blocks the re-check of ONE named pane until its
+// context is cancelled, and answers normally for every other pane. Blocking by
+// pane rather than by call index keeps the case readable with more than one
+// pane in play: the enumeration visits each pane once, so the second call for a
+// given pane is that pane's re-check.
+type paneTargetedRecheckExecutor struct {
+	*tmux.FakeExecutor
+	mu        sync.Mutex
+	calls     map[string]int
+	blockPane string
+}
+
+func (e *paneTargetedRecheckExecutor) PaneSessionID(ctx context.Context, target string) (string, error) {
+	e.mu.Lock()
+	if e.calls == nil {
+		e.calls = make(map[string]int)
+	}
+	e.calls[target]++
+	nth := e.calls[target]
+	e.mu.Unlock()
+
+	if target == e.blockPane && nth > 1 {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(2 * time.Second):
+			// The context never reached the command: fail loudly rather than
+			// letting the test pass on a timeout that looks like cancellation.
+			return "", errors.New("PaneSessionID was never cancelled")
+		}
+	}
+	return e.FakeExecutor.PaneSessionID(ctx, target)
+}
+
+// TestHandleSessionProvenance_CancelledRecheckDiscardsEarlierOwner — a
+// cancelled re-check must end the whole query, not just skip its own pane.
+//
+// With two panes in the session, the first one can be adopted before the
+// second one's re-check is cancelled. Skipping the cancelled pane and
+// returning what was found so far answers a request that is already out of
+// time, and answers it with a candidate that may well have lost: the pane
+// whose confirmation never arrived is the one with the newer last_seen_at
+// here, so the "answer" is not merely late, it is the wrong root.
+//
+// Panes are walked in pane-id order (FramesStore.ListAll is ORDER BY pane_id),
+// so %5 is adopted first and %6 is the one whose re-check never returns.
+func TestHandleSessionProvenance_CancelledRecheckDiscardsEarlierOwner(t *testing.T) {
+	m, fake, _ := newProvenanceQueryModule(t)
+	exec := &paneTargetedRecheckExecutor{FakeExecutor: fake, blockPane: "%6"}
+	m.tmux = exec
+	orig := provenanceTimeout
+	provenanceTimeout = 80 * time.Millisecond
+	t.Cleanup(func() { provenanceTimeout = orig })
+
+	fake.AddSession("work", "/w")
+	attachPane(fake, "%5", "$0", "200")
+	attachPane(fake, "%6", "$0", "400")
+	seedIdentityFrame(t, m, "%5", "cc", 100, "t100", 42, "sess-first", "/w/a")
+	seedIdentityFrame(t, m, "%6", "cc", 300, "t300", 99, "sess-second", "/w/b")
+	withProcessTree(t, map[int]int{100: 200, 200: 1, 300: 400, 400: 1})
+	withLivePids(t, map[int]string{100: "t100", 300: "t300"})
+
+	start := time.Now()
+	_, body, _ := getProvenance(t, m, codeOf(t, "$0"))
+	elapsed := time.Since(start)
+
+	if elapsed > time.Second {
+		t.Fatalf("the request took %v: the deadline never reached the re-check", elapsed)
+	}
+	if body.Found {
+		t.Fatalf("body = %+v, want found:false — the deadline expired during %%6's re-check, so nothing found so far is an answer", body)
+	}
+}
