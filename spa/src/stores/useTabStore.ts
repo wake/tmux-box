@@ -250,6 +250,14 @@ function applyRebuildPatch(c: TmuxSessionContent, patch: RebuildPatch): TmuxSess
           tmuxInstance: record.tmuxInstance || prev.tmuxInstance,
           agent: record.agent,
           ...(takesCwd ? { cwd: record.cwd, cwdSource: 'agent-backfill' as const } : {}),
+          // A record with no agent CAN be flagged: `flagUnverifiedAgent` picks
+          // the triggering pane from a disagreeing recorded agent, but writes
+          // session-scoped, so a sibling that has no agent at all is flagged
+          // alongside it. Fill is that pane's only exit — replace and confirm
+          // both require a recorded agent — and a flag left standing keeps the
+          // pane eligible for the probe forever while the batch skips its
+          // resume. This answer IS the verification, so the flag goes with it.
+          unverified: undefined,
           // `resumeCommandOverride` rides through untouched: nothing was
           // invalidated, because the record held no identity to invalidate.
           capturedAt: now,

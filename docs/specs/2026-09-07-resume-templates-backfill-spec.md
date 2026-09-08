@@ -714,10 +714,11 @@ skipped by a bare cooldown and never asked again. So a suppressed trigger is
   cleared by the same `reset*` test seam.
 
 **This terminates.** The only states that keep a pane eligible are "no agent"
-and "unverified", and §5.5 guarantees every answer leaves at least one of them
-closed: an answer with an identity ends "no agent"; an answer that agrees with
-an `unverified` record clears the flag; an answer that disagrees replaces the
-record. A binding that keeps answering `found: false` costs one request per 30 s
+and "unverified", and §5.5 guarantees every answer closes BOTH: fill writes the
+identity and clears the flag together; an answer that agrees with an
+`unverified` record clears the flag; an answer that disagrees replaces the
+record. Closing only one of the two was the round-2 defect — a filled record
+that stayed flagged went on asking forever. A binding that keeps answering `found: false` costs one request per 30 s
 **only while hooks keep arriving**, and none at all once the session is idle.
 
 `unverified` cannot be re-raised in a loop, because the only writer is the
@@ -747,9 +748,9 @@ same identity, verified" match two rows at once:
 
 | # | Condition | Mode | Effect |
 |---|---|---|---|
-| 1 | `prev.agent` absent | **fill** | writes `agent`; writes `cwd` only if the answer has one and the existing `cwd` is absent or `cwdSource === 'pane-probe'`; sets `cwdSource: 'agent-backfill'` when it writes one; leaves `resumeCommandOverride` alone |
+| 1 | `prev.agent` absent | **fill** | writes `agent`; writes `cwd` only if the answer has one and the existing `cwd` is absent or `cwdSource === 'pane-probe'`; sets `cwdSource: 'agent-backfill'` when it writes one; **clears `unverified`**; leaves `resumeCommandOverride` alone |
 | 2 | `prev.unverified` **and** the answer's `type` or `sessionId` differs | **replace** | writes the whole agent group as one unit, exactly as `agent-group` does: new `agent`, the answer's `cwd` (or none), `unverified` cleared, **and `resumeCommandOverride` cleared** (§4.3). A `cwdSource: 'user'` cwd is the one thing kept |
-| 3 | `prev.unverified` **and** the answer's identity matches | **confirm** | clears `unverified` and nothing else |
+| 3 | `prev.unverified` **and** the answer's identity matches | **confirm** | clears `unverified` and nothing else — **`capturedAt` included** |
 | 4 | otherwise (`agent` present and verified) | **no-op** | the "有了就跳過" policy |
 
 **Mode 3 is the convergence rule.** Without it an `unverified` record whose
@@ -758,6 +759,24 @@ re-asking every 30 s for the life of the session — the projection's `TopFrame`
 type can legitimately differ from the ancestry root indefinitely (§3.2), so the
 flag would never lift on its own. An ancestry answer that names the same agent
 is positive evidence the record is right, and saying so is what ends the loop.
+
+**Mode 1 clears the flag as well, and must.** `unverified` is raised by
+`flagUnverifiedAgent`, which chooses the triggering pane from a recorded agent
+that disagrees with the replay but then writes **session-scoped**: every live
+pane on the binding is flagged, including a sibling holding no agent at all.
+That pane reaches the answer through fill, and fill is its only exit — modes 2
+and 3 both require a recorded agent. A flag left standing there would give the
+pane `agent: cc` *and* `unverified: true`: shown as unverified indefinitely,
+still eligible so the probe keeps asking, and with its resume switched off by
+`planForRecord` on every batch rebuild.
+
+**Mode 3 must not re-stamp `capturedAt`.** "Nothing else" is literal, because
+that field is read by `groupForBatch` to elect which pane's record a group
+rebuilds from. Resume-command edits are pane-scoped, so a confirm that reached
+only the live sibling would move the election onto the one pane that never saw
+the edit, and the batch would rebuild from a record missing the command the user
+had just typed. Confirm learns nothing about the record's content; it lifts a
+flag, and that is all it may do.
 
 **Mode 2** is why the fill-only rule of v2 was not enough: correcting the agent
 while leaving the previous agent's `cwd` and override attached would recreate
@@ -885,15 +904,21 @@ part review has broken twice:
 - **in-flight**: a hook arriving while a request is open schedules exactly one
   follow-up after it completes;
 - **re-checked before the deferred run**: a pane that gained an agent, was
-  re-pointed, terminated, or lost its attach gate during the cooldown issues
-  no request;
+  re-pointed, terminated, lost its attach gate, or had its binding disowned
+  during the cooldown issues no request. The disowned case must arm its timer
+  while the first request is still in flight — a trigger issued after the
+  disowning answer landed returns at the scheduler's own entry guard and never
+  reaches the deferred callback at all;
 - **termination**: after a `confirm` the pane makes no further request on any
   number of broadcasts.
 
 **Vitest — store (Phase 1).** The four modes of §5.5 as an ordered table,
 including the case v3 left ambiguous (agent present, same identity, verified →
 **no-op**, matched by row 4 and not by any earlier row). Plus: `confirm` clears
-`unverified` and changes nothing else; a `'user'` cwd survives fill and
+`unverified` and changes nothing else — asserted over the WHOLE record under a
+moved clock, so `capturedAt` is covered, and again through `groupForBatch` to
+show the batch's chosen source is unmoved; **fill clears an `unverified` a
+sibling's disagreement raised session-scoped**; a `'user'` cwd survives fill and
 replace; a `'pane-probe'` cwd is replaced; the generation guard; a later
 `agent-group` overwrites; a manual cwd edit sets `cwdSource: 'user'`; **a
 hand-typed `resumeCommand` on an agent-less record survives a fill**.

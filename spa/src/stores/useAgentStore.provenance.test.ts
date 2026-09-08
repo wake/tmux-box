@@ -3,7 +3,8 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { useAgentStore, type NormalizedEvent } from './useAgentStore'
 import { useTabStore } from './useTabStore'
-import { createTab } from '../types/tab'
+import { createTab, type PaneContent } from '../types/tab'
+import { findPane } from '../lib/pane-tree'
 import { resolveResumeCommand } from '../lib/rebuild/composer'
 import { useResumeTemplateStore, type ResumeTemplateLookup } from './useResumeTemplateStore'
 
@@ -25,6 +26,40 @@ function seedTerminalPane(tmuxInstance: string) {
 function recordOf(tabId: string) {
   const l = useTabStore.getState().tabs[tabId].layout
   return l.type === 'leaf' && l.pane.content.kind === 'tmux-session' ? l.pane.content.rebuild : undefined
+}
+
+/**
+ * Open a second pane on the SAME binding, the way splitting a tab does. It
+ * carries no rebuild record: the agent group was written before it existed.
+ */
+function addSiblingPane(tabId: string, paneId: string) {
+  const tab = useTabStore.getState().tabs[tabId]
+  if (tab.layout.type !== 'leaf') throw new Error('bad fixture')
+  const first = tab.layout.pane
+  if (first.content.kind !== 'tmux-session') throw new Error('bad fixture')
+  const fresh: PaneContent = { ...first.content, rebuild: undefined }
+  useTabStore.setState({
+    tabs: {
+      [tabId]: {
+        ...tab,
+        layout: {
+          type: 'split',
+          id: 'split-1',
+          direction: 'h',
+          sizes: [50, 50],
+          children: [
+            { type: 'leaf', pane: { ...first, id: 'p1' } },
+            { type: 'leaf', pane: { id: paneId, content: fresh } },
+          ],
+        },
+      },
+    },
+  })
+}
+
+const recordOfPane = (tabId: string, paneId: string) => {
+  const pane = findPane(useTabStore.getState().tabs[tabId].layout, paneId)
+  return pane && pane.content.kind === 'tmux-session' ? pane.content.rebuild : undefined
 }
 
 const envelope = (over?: Record<string, unknown>) => ({
@@ -136,6 +171,42 @@ describe('unverified flagging', () => {
     const tab = seedWithAgent()
     send(event({ agent_type: 'cc', raw_event_name: 'PdxStop', detail: {} }))
     expect(recordOf(tab.id)?.unverified).toBeUndefined()
+  })
+
+  it('the flag lands on an agent-less sibling too, and the answer clears it', () => {
+    // `flagUnverifiedAgent` decides WHICH pane triggers the flag from a
+    // recorded agent that disagrees, but the write it makes is SESSION-scoped:
+    // every live pane on the binding is flagged, including a sibling opened
+    // after the agent group was written and holding no agent at all.
+    //
+    // The ownership answer then reaches that sibling through the backfill's
+    // FILL mode — the one mode that has no flag to clear, unless it clears it.
+    // Nothing else ever will: fill is terminal for an agent-less record, so the
+    // pane would stay "unverified" for good, and the batch would keep skipping
+    // its resume.
+    const tab = seedTerminalPane('222:2000')
+    send(event({ detail: { pdx_provenance: envelope() } }))       // p1: codex
+    addSiblingPane(tab.id, 'p2')
+
+    send(event({ agent_type: 'cc', raw_event_name: 'replay', detail: {} }))
+    expect(recordOfPane(tab.id, 'p1')?.unverified).toBe(true)
+    expect(recordOfPane(tab.id, 'p2')?.unverified).toBe(true)
+    expect(recordOfPane(tab.id, 'p2')?.agent).toBeUndefined()
+
+    // The daemon's ownership answer: p1 replaces, p2 fills.
+    useTabStore.getState().setPaneRebuild('h1', 'abc123', '222:2000', {
+      kind: 'agent-backfill',
+      record: {
+        tmuxInstance: '222:2000',
+        agent: { type: 'cc', sessionId: 'S9', updatedAt: 2 },
+        cwd: '/w/p',
+      },
+    })
+
+    expect(recordOfPane(tab.id, 'p1')?.unverified).toBeUndefined()
+    expect(recordOfPane(tab.id, 'p2')?.agent?.type).toBe('cc')
+    expect(recordOfPane(tab.id, 'p2')?.unverified).toBeUndefined()
+    expect(resolveResumeCommand(recordOfPane(tab.id, 'p2'), defaultTemplates)).toBe('claude --resume S9')
   })
 
   it('a fresh qualifying agent group clears the flag again', () => {

@@ -877,25 +877,40 @@ does the equivalent thing to `resumeCommand`, and Task 13 migrates it.
 
 - **fill** — write `agent`; write `cwd` only if the answer has one *and* the
   existing `cwd` is absent or `cwdSource === 'pane-probe'`; set
-  `cwdSource: 'agent-backfill'` when writing one; write `resumeCommand` (via the
-  existing `composeResumeCommand`) **only when it is currently empty**, so a
-  hand-typed command survives.
+  `cwdSource: 'agent-backfill'` when writing one; **clear `unverified`** (see
+  below); write `resumeCommand` (via the existing `composeResumeCommand`)
+  **only when it is currently empty**, so a hand-typed command survives.
 - **replace** — whole group as one unit, exactly like `agent-group`: new
   `agent`, the answer's `cwd` or none, `unverified` cleared, `resumeCommand`
   recomposed. A `cwdSource: 'user'` cwd is the one thing kept.
-- **confirm** — clear `unverified`, change nothing else. This is what makes the
-  probe terminate; without it an agreeing answer would leave the pane eligible
-  forever.
+- **confirm** — clear `unverified`, change nothing else, **`capturedAt`
+  included**. This is what makes the probe terminate; without it an agreeing
+  answer would leave the pane eligible forever. Re-stamping `capturedAt` is not
+  "nothing else": `groupForBatch` reads it to elect which pane's record a group
+  rebuilds from, so a confirm reaching a live sibling would hand the election to
+  the one pane that never saw the user's pane-scoped edit.
 - **no-op** — return the content unchanged (`return c`), like the other
   no-op arms.
 
 **Two facts that stop a later reader from "fixing" this:**
 
-- **Fill does not clear `unverified`, and does not need to.** The flag's only
-  writer is `flagUnverifiedAgent` (`useAgentStore.ts:112`), which returns early
-  unless the record already has an `agent.type` to disagree with. "No agent and
-  flagged" is therefore unreachable, and row 1 winning over the flag is moot
-  rather than a gap.
+- **Fill MUST clear `unverified`** — an earlier draft of this plan claimed the
+  opposite, and it was wrong. The reasoning it gave ("`flagUnverifiedAgent`
+  returns early unless the record already has an `agent.type` to disagree with,
+  so 'no agent and flagged' is unreachable") reads only the loop that picks
+  *which* pane triggers the flag. The write it then makes —
+  `setPaneRebuild(hostId, sessionCode, tmuxInstance, { kind: 'unverified' })` —
+  is SESSION-scoped, so it lands on **every live pane on the binding**,
+  including a sibling that has no agent recorded at all (one opened after the
+  agent group was written, for instance).
+
+  So the state is reachable, and it is a trap: pane A holds `cc`, pane B holds
+  nothing; a replay naming `codex` flags both; the ownership answer then takes
+  A through **confirm** and B through **fill**. Leaving the flag on B ends with
+  `agent: cc` *and* `unverified: true` — a record that renders as unverified
+  forever, keeps asking the probe forever (it stays eligible), and has its
+  resume switched off by `planForRecord` in every batch rebuild. Fill is B's
+  only exit, because modes 2 and 3 both require a recorded agent.
 - **The patch's `resumeCommand?` has no producer.** The daemon's answer carries
   no command (§5.3), so the only value that ever reaches it is the one the store
   composes. It is kept because the spec declares the shape and Task 13 removes
@@ -909,9 +924,11 @@ The generation guard is unchanged: panes are matched on
   left ambiguous (agent present, same identity, **verified** → no-op, matched by
   row 4 and by no earlier row); a `'user'` cwd survives both fill and replace; a
   `'pane-probe'` cwd is replaced by fill; an `'agent-session-start'` cwd is not;
-  a hand-typed `resumeCommand` survives fill but not replace; the generation
-  guard rejects a mismatched instance; a later `agent-group` still overwrites
-  everything.
+  a hand-typed `resumeCommand` survives fill but not replace; **fill clears an
+  `unverified` raised session-scoped by a sibling's disagreement**; **confirm
+  leaves `capturedAt` where the last real write left it**, compared as a whole
+  record rather than field by field; the generation guard rejects a mismatched
+  instance; a later `agent-group` still overwrites everything.
 - [ ] **Step 2: Run — fail** · [ ] **Step 3: Implement** · [ ] **Step 4: Run — pass**
 - [ ] **Step 5:** vitest + lint
 - [ ] **Step 6: Commit** — `feat(rebuild): fill, correct or confirm a record from the daemon's answer`

@@ -464,6 +464,22 @@ describe('setPaneRebuild — agent-backfill', () => {
     expect(resolveResumeCommand(rec(tab.id), defaultTemplates)).toBe('cld-yolo -c')
   })
 
+  it('mode 1 (fill): an answer clears a flag raised by a sibling pane', () => {
+    // `unverified` is raised SESSION-scoped (useAgentStore's
+    // `flagUnverifiedAgent`), so a pane holding no agent can carry the flag a
+    // sibling's disagreement raised. Fill is that pane's only way out: replace
+    // and confirm both require a recorded agent, and a record left flagged
+    // stays eligible for the probe and has its resume skipped by the batch.
+    const tab = seed()
+    useTabStore.getState().setPaneRebuild('h1', 'abc123', '111:1000', {
+      kind: 'unverified', unverified: true,
+    })
+    backfill({ tmuxInstance: '111:1000', agent: answer, cwd: '/w/answer' })
+    expect(rec(tab.id)?.agent).toEqual(answer)
+    expect(rec(tab.id)?.unverified).toBeUndefined()
+    expect(resolveResumeCommand(rec(tab.id), defaultTemplates)).toBe('claude --resume S1')
+  })
+
   it('mode 2 (replace): an unverified record with a different agent type is replaced whole', () => {
     const tab = seed()
     seedAgentGroup({
