@@ -29,6 +29,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -208,10 +209,13 @@ func runShellProbe(ctx context.Context, shell, token string) shellProbeOutcome {
 
 	cmd := exec.CommandContext(ctx, shell, "-l", "-i", "-c", script, "_", token)
 
-	// An rc file can start anything. Setpgid puts the shell and everything it
-	// spawns in one group so cancellation can take the whole group, which
-	// exec.CommandContext's default (kill the direct child) would not.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// An rc file can start anything, so the shell gets a container of its own
+	// to be cleaned up by. Setsid rather than Setpgid: setsid gives a new
+	// SESSION (and, with it, a new process group of the same id, so
+	// `kill(-pid)` still works), and the session is the only container job
+	// control does not split — see killSessionStragglers. Setting both would
+	// fail the exec: setpgid(0, 0) on a session leader is EPERM.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
@@ -252,7 +256,9 @@ func runShellProbe(ctx context.Context, shell, token string) shellProbeOutcome {
 	if err := cmd.Start(); err != nil {
 		return shellProbeOutcome{Err: err}
 	}
-	pgid := cmd.Process.Pid
+	// setsid made the child both a session leader and a process group leader,
+	// so its pid is the id of both.
+	sid := cmd.Process.Pid
 	// The parent's copies of the write ends, so EOF depends only on the
 	// children.
 	stdout.closeWriter()
@@ -260,10 +266,15 @@ func runShellProbe(ctx context.Context, shell, token string) shellProbeOutcome {
 
 	waitErr := cmd.Wait()
 
-	// The shell has exited, so anything left in its group is a stray holding
-	// our pipe open. Kill the group unconditionally: waiting for it instead
-	// would stall the request for the whole deadline over output nobody wants.
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	// The shell has exited, so anything left behind is a stray — possibly one
+	// holding our pipe open. Kill unconditionally: waiting instead would stall
+	// the request for the whole deadline over output nobody wants.
+	//
+	// The group first, because it is one syscall and it is where most strays
+	// are, then the rest of the session for the ones job control moved out of
+	// the group.
+	_ = syscall.Kill(-sid, syscall.SIGKILL)
+	killSessionStragglers(sid)
 
 	out := shellProbeOutcome{Stdout: stdout.finish(shellProbeReadGrace)}
 	stderr.finish(shellProbeReadGrace)
@@ -286,6 +297,69 @@ func runShellProbe(ctx context.Context, shell, token string) shellProbeOutcome {
 		out.Err = waitErr
 	}
 	return out
+}
+
+// killSessionStragglers kills whatever is left of the probe's session.
+//
+// Killing the process GROUP is not enough on its own. A shell with job control
+// on does not keep its background jobs in its own group — it gives each job a
+// group of its own, which is the whole point of job control — so `kill(-pgid)`
+// reaches the shell's group and nothing else, and the job is then orphaned by
+// the shell's exit and left running. One per probe, accumulating for as long as
+// the daemon lives. An rc turns job control on with a bare `set -m`, and shells
+// differ on when they turn it on by themselves, so this is not a corner a
+// probe of the user's own login shell can decline to handle.
+//
+// The session is what job control does not split: setsid gave the probe a
+// session of its own, and a process only ever leaves a session by calling
+// setsid itself. So every straggler still reports our sid, whatever group it
+// was moved into. The scan costs one `ps` per probe, against a probe that has
+// just started a full interactive login shell.
+//
+// Residual, and deliberately not papered over:
+//   - a descendant that calls setsid() itself is in a session of its own and
+//     survives. That is precisely what daemonising means, and no group- or
+//     session-based cleanup can reach it.
+//   - anything forked between the listing and the kills survives; the listing
+//     is a snapshot.
+//   - a pid that could not be listed (a `ps` that fails outright) is not
+//     killed. The group kill above still happened.
+//
+// A recycled pid cannot be killed by mistake: membership is re-checked with
+// Getsid at kill time, and a pid that has become someone else's is not in our
+// session.
+func killSessionStragglers(sid int) {
+	self := os.Getpid()
+	for _, pid := range listPids() {
+		// pid 1 can never be ours; sid is the shell, already reaped.
+		if pid <= 1 || pid == sid || pid == self {
+			continue
+		}
+		if got, err := syscall.Getsid(pid); err != nil || got != sid {
+			continue
+		}
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+}
+
+// listPids snapshots the process table. Bounded like everything else on this
+// path: a `ps` that will not answer must not become the thing that holds the
+// request open.
+func listPids() []int {
+	ctx, cancel := context.WithTimeout(context.Background(), shellProbeReadGrace)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ps", "-A", "-o", "pid=").Output()
+	if err != nil {
+		return nil
+	}
+	fields := strings.Fields(string(out))
+	pids := make([]int, 0, len(fields))
+	for _, field := range fields {
+		if pid, err := strconv.Atoi(field); err == nil {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
 }
 
 // cappedPipe reads one fd on its own goroutine, all the way to EOF, keeping at

@@ -530,6 +530,65 @@ func TestShellResolve_Integration_BlockedRcIsCancelledAtTheDeadline(t *testing.T
 	requirePidGone(t, pids[1], "the shell's background job")
 }
 
+func requireBash(t *testing.T) string {
+	t.Helper()
+	path, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	return path
+}
+
+// writeBashHome builds a HOME whose login rc runs `extra`. bash -l reads
+// ~/.bash_profile, so that is where the chain starts.
+func writeBashHome(t *testing.T, extra string) string {
+	t.Helper()
+	dir := t.TempDir()
+	rc := "echo \"rc chatter on stdout\"\n" + extra
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".bash_profile"), []byte(rc), 0o644))
+	return dir
+}
+
+// TestShellResolve_Integration_BashJobControlDescendantIsCleanedUp — a shell
+// with job control ON does not put its background jobs in its own process
+// group. It puts each one in a process group of its OWN, which is the entire
+// point of job control, and `kill(-pgid)` then reaches the shell's group and
+// nothing else.
+//
+// Any rc may turn job control on (`set -m` here, explicitly, so the test does
+// not depend on what a given bash build decides for itself), and the job it
+// then starts is orphaned by the shell's exit, reparented to init, and left
+// running. One per probe, accumulating for as long as the daemon lives.
+//
+// zsh is not a substitute for bash here: this is about a shell's job-control
+// behaviour, so it has to be tested on the shell whose behaviour is in
+// question.
+func TestShellResolve_Integration_BashJobControlDescendantIsCleanedUp(t *testing.T) {
+	bash := requireBash(t)
+	pidFile := filepath.Join(t.TempDir(), "descendant.pid")
+	t.Setenv("PDX_TEST_PIDFILE", pidFile)
+	t.Setenv("HOME", writeBashHome(t, "set -m\nsleep 300 &\necho $! > $PDX_TEST_PIDFILE\n"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), shellProbeTimeout)
+	defer cancel()
+
+	start := time.Now()
+	out := runShellProbe(ctx, bash, "cd")
+	elapsed := time.Since(start)
+
+	assert.False(t, out.TimedOut, "outcome = %+v", out)
+	assert.Equal(t, 0, out.ExitCode, "outcome = %+v", out)
+	assert.Less(t, elapsed, 4*time.Second, "the probe waited on the descendant")
+
+	pid := readPidLine(t, pidFile, 1)[0]
+	// The job is in a process group of its own, so nothing that kills the
+	// shell's group can reach it.
+	if pgid, err := syscall.Getpgid(pid); err == nil && pgid == pid {
+		t.Logf("the job-control descendant %d leads its own process group", pid)
+	}
+	requirePidGone(t, pid, "the bash job-control descendant")
+}
+
 // An rc that prints far more than the output bound must not turn a perfectly
 // good answer into a timeout, and must not become the answer either.
 //
