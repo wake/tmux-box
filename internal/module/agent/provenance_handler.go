@@ -110,6 +110,23 @@ func (m *Module) resolveSessionOwner(ctx context.Context, code string) (PaneOwne
 		if err != nil {
 			return PaneOwner{}, false
 		}
+		if len(owners) == 0 {
+			continue
+		}
+		// The membership decided by panesOfSession is stale by the time the
+		// walk finishes: resolvePaneOwners is the slow part of the request
+		// (four `ps` forks per distinct PID), and a `join-pane` inside that
+		// window moves the pane — and whatever agent is now running in it —
+		// into a DIFFERENT session. Neither generation sample notices: both
+		// sessions live on the same tmux server, so the stamp is identical
+		// on both sides and the answer is reported as trustworthy.
+		//
+		// So the pane is asked again, at the point its answer is about to be
+		// used, and an answer that can no longer be confirmed as this
+		// session's is dropped rather than reported.
+		if !m.paneStillInSession(paneID, code) {
+			continue
+		}
 		for _, owner := range owners {
 			// The session-id filter lives HERE, not in resolvePaneOwners: a
 			// root that never reported an identity is still a root, it just
@@ -123,6 +140,26 @@ func (m *Module) resolveSessionOwner(ctx context.Context, code string) (PaneOwne
 		}
 	}
 	return best, found
+}
+
+// paneStillInSession re-reads the pane's tmux session id and reports whether it
+// is still the session behind `code`. Matched by session ID and encoded with
+// the same pure function panesOfSession uses, for the same reason: a name would
+// reintroduce the rename window this route exists to avoid.
+//
+// Anything short of a confirmed match is a no: a pane that cannot be read, an
+// id that cannot be encoded, and an id that encodes to another code are all
+// "not confirmed as ours", and none of them may be answered with.
+func (m *Module) paneStillInSession(paneID, code string) bool {
+	tmuxID, err := m.tmux.PaneSessionID(paneID)
+	if err != nil {
+		return false
+	}
+	paneCode, err := session.EncodeSessionID(tmuxID)
+	if err != nil {
+		return false
+	}
+	return paneCode == code
 }
 
 // betterOwner is the multi-root tie-break: most recently seen wins, and equal

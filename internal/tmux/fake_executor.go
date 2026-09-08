@@ -424,6 +424,16 @@ func (f *FakeExecutor) SetPaneSessionID(target, sessionID string) {
 	f.paneSessionIDs[target] = sessionID
 }
 
+// ForgetPaneSessionID makes PaneSessionID start failing for a pane it was
+// previously told about — the shape of a pane that has gone away, or of a tmux
+// round trip that could not be completed, in the middle of a request that
+// already read it once.
+func (f *FakeExecutor) ForgetPaneSessionID(target string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.paneSessionIDs, target)
+}
+
 func (f *FakeExecutor) PaneSessionID(target string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

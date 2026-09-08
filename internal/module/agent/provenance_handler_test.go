@@ -622,3 +622,92 @@ func TestHandleSessionProvenance_MemoizesReadsAcrossPanes(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The pane must still be the session's when the answer is handed back
+// ---------------------------------------------------------------------------
+
+// withProcessReadHook runs `hook` once, on the FIRST process read of the
+// request. Install it after withProcessTree so it wraps the tree rather than
+// replacing it. The first read is the moment ownership resolution begins — i.e.
+// strictly after panesOfSession has already decided which panes belong to the
+// session — so a fixture mutation made here is exactly a change that landed
+// inside the request's own window.
+func withProcessReadHook(t *testing.T, hook func()) {
+	t.Helper()
+	orig := readProcessInfoFn
+	fired := false
+	readProcessInfoFn = func(pid int) (agentpkg.ProcessInfo, error) {
+		if !fired {
+			fired = true
+			hook()
+		}
+		return orig(pid)
+	}
+	t.Cleanup(func() { readProcessInfoFn = orig })
+}
+
+// TestHandleSessionProvenance_PaneMovedAfterEnumeration_NotAnAnswer — the pane
+// was listed as this session's while the enumeration ran, and a `join-pane`
+// moved it into another session before the walk finished. The frame it carries
+// then answers for whatever now lives in that pane, which is the OTHER
+// session's business; reporting it hands the caller a session id that was never
+// theirs, and the SPA composes a resume command from it.
+//
+// The generation stamp cannot catch this. A pane moving between two sessions of
+// ONE tmux server leaves tmux_instance identical on both samples, so the two
+// readings agree and the answer is reported as trustworthy.
+func TestHandleSessionProvenance_PaneMovedAfterEnumeration_NotAnAnswer(t *testing.T) {
+	m, fake, _ := newProvenanceQueryModule(t)
+	fake.AddSession("work", "/w")  // $0 — the session being asked about
+	fake.AddSession("other", "/o") // $1 — where the pane ends up
+	attachPane(fake, "%5", "$0", "200")
+	seedIdentityFrame(t, m, "%5", "cc", 100, "t100", 42, "sess-1", "/w/purdex")
+	withProcessTree(t, map[int]int{100: 200, 200: 1})
+	withLivePids(t, map[int]string{100: "t100"})
+	withProcessReadHook(t, func() { fake.SetPaneSessionID("%5", "$1") })
+
+	status, body, _ := getProvenance(t, m, codeOf(t, "$0"))
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if body.Found {
+		t.Fatalf("body = %+v, want found:false — the pane left the session mid-request", body)
+	}
+}
+
+// TestHandleSessionProvenance_PaneReReadFails_NotAnAnswer — a re-read that
+// cannot be completed is not a confirmation. The pane is dropped rather than
+// trusted on the strength of the earlier reading.
+func TestHandleSessionProvenance_PaneReReadFails_NotAnAnswer(t *testing.T) {
+	m, fake, _ := newProvenanceQueryModule(t)
+	fake.AddSession("work", "/w")
+	attachPane(fake, "%5", "$0", "200")
+	seedIdentityFrame(t, m, "%5", "cc", 100, "t100", 42, "sess-1", "/w/purdex")
+	withProcessTree(t, map[int]int{100: 200, 200: 1})
+	withLivePids(t, map[int]string{100: "t100"})
+	// PaneSessionID errors for a pane it has never been told about.
+	withProcessReadHook(t, func() { fake.ForgetPaneSessionID("%5") })
+
+	_, body, _ := getProvenance(t, m, codeOf(t, "$0"))
+	if body.Found {
+		t.Fatalf("body = %+v, want found:false — the pane's session could not be re-confirmed", body)
+	}
+}
+
+// TestHandleSessionProvenance_PaneStillInSession_StillAnswered is the other
+// half of the guard: re-reading the pane's session must not cost a correct
+// answer when nothing moved.
+func TestHandleSessionProvenance_PaneStillInSession_StillAnswered(t *testing.T) {
+	m, fake, _ := newProvenanceQueryModule(t)
+	fake.AddSession("work", "/w")
+	attachPane(fake, "%5", "$0", "200")
+	seedIdentityFrame(t, m, "%5", "cc", 100, "t100", 42, "sess-1", "/w/purdex")
+	withProcessTree(t, map[int]int{100: 200, 200: 1})
+	withLivePids(t, map[int]string{100: "t100"})
+
+	_, body, _ := getProvenance(t, m, codeOf(t, "$0"))
+	if !body.Found || body.SessionID != "sess-1" || body.TmuxPaneID != "%5" {
+		t.Fatalf("body = %+v, want the pane's own root", body)
+	}
+}
