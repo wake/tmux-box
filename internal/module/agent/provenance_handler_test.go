@@ -1,11 +1,14 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -528,9 +531,9 @@ type countingExecutor struct {
 	sessionIDCalls int
 }
 
-func (c *countingExecutor) PaneSessionID(target string) (string, error) {
+func (c *countingExecutor) PaneSessionID(ctx context.Context, target string) (string, error) {
 	c.sessionIDCalls++
-	return c.FakeExecutor.PaneSessionID(target)
+	return c.FakeExecutor.PaneSessionID(ctx, target)
 }
 
 // TestHandleSessionProvenance_ExpiredDeadline_SkipsPaneEnumeration — the
@@ -709,5 +712,143 @@ func TestHandleSessionProvenance_PaneStillInSession_StillAnswered(t *testing.T) 
 	_, body, _ := getProvenance(t, m, codeOf(t, "$0"))
 	if !body.Found || body.SessionID != "sess-1" || body.TmuxPaneID != "%5" {
 		t.Fatalf("body = %+v, want the pane's own root", body)
+	}
+}
+
+// recheckExecutor instruments the pane→session re-read that
+// paneStillInSession makes: it records the context every call was handed, and
+// can make the LAST call (the re-check, as opposed to the enumeration that
+// precedes it) either block until its context is cancelled, or answer
+// correctly but only after the request's deadline has already passed.
+//
+// Both are the same real shape — the last tmux round trip of a request being
+// the slow one — and they separate the two halves of the fix: the query has to
+// be cancellable there, and an answer that arrives late must not be used.
+type recheckExecutor struct {
+	*tmux.FakeExecutor
+	mu            sync.Mutex
+	calls         int
+	deadlines     []bool // whether each call's ctx carried a deadline
+	blockAfter    int    // calls beyond this block until ctx is done
+	sleepAfter    int    // calls beyond this sleep, then answer normally
+	sleepDuration time.Duration
+}
+
+func (r *recheckExecutor) PaneSessionID(ctx context.Context, target string) (string, error) {
+	r.mu.Lock()
+	r.calls++
+	call := r.calls
+	_, hasDeadline := ctx.Deadline()
+	r.deadlines = append(r.deadlines, hasDeadline)
+	r.mu.Unlock()
+
+	if r.blockAfter > 0 && call > r.blockAfter {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(2 * time.Second):
+			// The context never reached the command: fail loudly rather than
+			// letting the test pass on a timeout that looks like cancellation.
+			return "", errors.New("PaneSessionID was never cancelled")
+		}
+	}
+	if r.sleepAfter > 0 && call > r.sleepAfter {
+		// Answer correctly even though the deadline has gone by, which is what
+		// a real round trip does when tmux writes its output and exits just as
+		// the context expires: exec.CommandContext has nothing left to kill and
+		// Output() returns the answer with no error. Hence context.Background()
+		// here — the point of the case is a SUCCESSFUL late answer.
+		time.Sleep(r.sleepDuration)
+		return r.FakeExecutor.PaneSessionID(context.Background(), target)
+	}
+	return r.FakeExecutor.PaneSessionID(ctx, target)
+}
+
+func (r *recheckExecutor) everyCallHadADeadline() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.deadlines) == 0 {
+		return false
+	}
+	for _, ok := range r.deadlines {
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// TestHandleSessionProvenance_RecheckIsCancellable — the re-confirmation added
+// for the join-pane race is one more tmux round trip, made at the very end of
+// the request, and it was the only tmux call on this path with no context at
+// all: `exec.Command(...).Output()` waits for as long as tmux takes. A tmux
+// server that has stopped answering there extends the request past the deadline
+// the whole route is supposed to hold, and the last pane is exactly where there
+// is no remaining budget to spend.
+//
+// The blocking executor returns only when its context is cancelled, so a
+// request that finishes promptly is one whose deadline actually reached the
+// command. It also asserts the context is the REQUEST's — a
+// context.Background() handed to CommandContext compiles, satisfies the
+// signature, and cancels nothing.
+func TestHandleSessionProvenance_RecheckIsCancellable(t *testing.T) {
+	m, fake, _ := newProvenanceQueryModule(t)
+	// Call 1 is the enumeration; call 2 is the re-check, and it blocks.
+	exec := &recheckExecutor{FakeExecutor: fake, blockAfter: 1}
+	m.tmux = exec
+	orig := provenanceTimeout
+	provenanceTimeout = 80 * time.Millisecond
+	t.Cleanup(func() { provenanceTimeout = orig })
+
+	fake.AddSession("work", "/w")
+	attachPane(fake, "%5", "$0", "200")
+	seedIdentityFrame(t, m, "%5", "cc", 100, "t100", 42, "sess-1", "/w/purdex")
+	withProcessTree(t, map[int]int{100: 200, 200: 1})
+	withLivePids(t, map[int]string{100: "t100"})
+
+	start := time.Now()
+	_, body, _ := getProvenance(t, m, codeOf(t, "$0"))
+	elapsed := time.Since(start)
+
+	if elapsed > time.Second {
+		t.Fatalf("the request took %v: the deadline never reached the re-check", elapsed)
+	}
+	if body.Found {
+		t.Fatalf("body = %+v, want found:false — the re-check was cancelled, so nothing was confirmed", body)
+	}
+	if !exec.everyCallHadADeadline() {
+		t.Fatalf("PaneSessionID was called with a context carrying no deadline: %v", exec.deadlines)
+	}
+}
+
+// TestHandleSessionProvenance_RecheckAnswersAfterTheDeadline_NotAnAnswer — the
+// re-check is the LAST thing the walk does before the owner is adopted, and
+// nothing looked at the clock again afterwards. So a re-check that answers
+// correctly, but only after the deadline has passed, produced found:true from a
+// request that was already out of time — the one thing the deadline exists to
+// prevent.
+//
+// The executor here answers with the right session id; only the timing is
+// wrong. found:true would therefore be a real answer, arrived at too late,
+// which is precisely the case a deadline says no to.
+func TestHandleSessionProvenance_RecheckAnswersAfterTheDeadline_NotAnAnswer(t *testing.T) {
+	m, fake, _ := newProvenanceQueryModule(t)
+	// Call 1 enumerates; call 2 is the re-check, and it answers correctly but
+	// only after the deadline has gone by.
+	exec := &recheckExecutor{FakeExecutor: fake, sleepAfter: 1, sleepDuration: 60 * time.Millisecond}
+	m.tmux = exec
+	orig := provenanceTimeout
+	provenanceTimeout = 30 * time.Millisecond
+	t.Cleanup(func() { provenanceTimeout = orig })
+
+	fake.AddSession("work", "/w")
+	attachPane(fake, "%5", "$0", "200")
+	seedIdentityFrame(t, m, "%5", "cc", 100, "t100", 42, "sess-1", "/w/purdex")
+	withProcessTree(t, map[int]int{100: 200, 200: 1})
+	withLivePids(t, map[int]string{100: "t100"})
+
+	_, body, _ := getProvenance(t, m, codeOf(t, "$0"))
+	if body.Found {
+		t.Fatalf("body = %+v, want found:false — the confirmation arrived after the deadline", body)
 	}
 }

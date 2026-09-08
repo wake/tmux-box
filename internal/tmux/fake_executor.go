@@ -438,7 +438,10 @@ func (f *FakeExecutor) ForgetPaneSessionID(target string) {
 	delete(f.paneSessionIDs, target)
 }
 
-func (f *FakeExecutor) PaneSessionID(target string) (string, error) {
+func (f *FakeExecutor) PaneSessionID(ctx context.Context, target string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if id, ok := f.paneSessionIDs[target]; ok {

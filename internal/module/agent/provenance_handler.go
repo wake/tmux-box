@@ -124,8 +124,19 @@ func (m *Module) resolveSessionOwner(ctx context.Context, code string) (PaneOwne
 		// So the pane is asked again, at the point its answer is about to be
 		// used, and an answer that can no longer be confirmed as this
 		// session's is dropped rather than reported.
-		if !m.paneStillInSession(paneID, code) {
+		if !m.paneStillInSession(ctx, paneID, code) {
 			continue
+		}
+		// The re-check is itself a tmux round trip, and it is the LAST thing
+		// done before an owner is adopted — so the clock is read once more
+		// here, after it, and not only before. A round trip that completes as
+		// its context expires returns a perfectly good answer with no error
+		// (there is nothing left for CommandContext to kill), and adopting it
+		// would answer a request that is already out of time: exactly what the
+		// deadline is for. An expired ctx ends the walk as "no answer", the
+		// same as a store failure — never as the owners found so far.
+		if ctx.Err() != nil {
+			return PaneOwner{}, false
 		}
 		for _, owner := range owners {
 			// The session-id filter lives HERE, not in resolvePaneOwners: a
@@ -150,8 +161,8 @@ func (m *Module) resolveSessionOwner(ctx context.Context, code string) (PaneOwne
 // Anything short of a confirmed match is a no: a pane that cannot be read, an
 // id that cannot be encoded, and an id that encodes to another code are all
 // "not confirmed as ours", and none of them may be answered with.
-func (m *Module) paneStillInSession(paneID, code string) bool {
-	tmuxID, err := m.tmux.PaneSessionID(paneID)
+func (m *Module) paneStillInSession(ctx context.Context, paneID, code string) bool {
+	tmuxID, err := m.tmux.PaneSessionID(ctx, paneID)
 	if err != nil {
 		return false
 	}
@@ -212,7 +223,7 @@ func (m *Module) panesOfSession(ctx context.Context, code string) ([]string, err
 			continue
 		}
 		seen[frame.PaneID] = true
-		tmuxID, err := m.tmux.PaneSessionID(frame.PaneID)
+		tmuxID, err := m.tmux.PaneSessionID(ctx, frame.PaneID)
 		if err != nil {
 			continue
 		}

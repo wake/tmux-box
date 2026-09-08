@@ -61,7 +61,13 @@ type Executor interface {
 	// PaneSessionID returns the tmux session ID ("$N") the pane belongs to.
 	// Unlike the session name it is immutable for the life of the session, so
 	// a caller that must not be confused by a rename asks for this instead.
-	PaneSessionID(target string) (string, error)
+	//
+	// It takes a context for the same reason ShowGlobalOption does: it is on a
+	// request path with a deadline (GET /api/sessions/{code}/provenance calls
+	// it once per pane to enumerate, and once more per pane to re-confirm),
+	// and a tmux server that has stopped answering must not hold that request
+	// open past it. A caller with nothing to bound it passes context.Background().
+	PaneSessionID(ctx context.Context, target string) (string, error)
 	PanePID(target string) (string, error)
 	ActivePanePID(target string) (string, error)
 	PaneChildCommands(target string) ([]string, error)
@@ -310,8 +316,8 @@ func (r *RealExecutor) PaneSessionName(target string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func (r *RealExecutor) PaneSessionID(target string) (string, error) {
-	out, err := exec.Command("tmux", "display-message", "-p", "-t", target, "#{session_id}").Output()
+func (r *RealExecutor) PaneSessionID(ctx context.Context, target string) (string, error) {
+	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", target, "#{session_id}").Output()
 	if err != nil {
 		return "", fmt.Errorf("tmux display-message session_id: %w", err)
 	}
