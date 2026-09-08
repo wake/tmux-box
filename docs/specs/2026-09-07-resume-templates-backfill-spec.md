@@ -397,9 +397,18 @@ rc file can leave descendants holding the output pipe open:
   through `Cmd.Cancel`.
 - `Cmd.WaitDelay = 1 * time.Second`, so a descendant holding the pipe cannot
   make `Wait` hang after the kill.
-- stdin is `/dev/null`; stdout and stderr are read through an `io.LimitReader`
-  capped at 8 KiB, so the buffer is bounded **before** the 512-byte display
-  truncation.
+- stdin is `/dev/null`. Stdout and stderr are each **drained to EOF on their own
+  goroutine**, and only stdout keeps anything: the **last** 8 KiB it saw, which
+  is where `displayDetail`'s "last non-empty line" lives. The buffer is bounded
+  **before** the 512-byte display truncation.
+
+  > **Superseded (PR review round 1).** This contract originally read "stdout
+  > and stderr are read through an `io.LimitReader` capped at 8 KiB". A
+  > `LimitReader` stops reading at the cap and leaves the writer blocked on a
+  > full pipe, so a chatty rc file could wedge the probe until the deadline
+  > killed it — and it keeps the HEAD of the output, while the answer is at the
+  > tail. Both pipes are now drained all the way (stderr with a limit of 0:
+  > drained and discarded), and the kept bytes are the tail.
 - 5 s deadline.
 
 **Rejected before exec** (`resolved: false`, with `reason` `"shell_metacharacters"`
@@ -808,8 +817,11 @@ typically `'pane-probe'` — and **fill** would overwrite it.
 
 ### 5.6 What this replaces
 
-v1 §9.1's deferred `session_meta` backfill is **cancelled, not postponed**, and
-that section is rewritten to say so. None of its four objections apply to a
+v1 §9.1's deferred `session_meta` backfill is **cancelled, not postponed**. The
+pointer to it lives in `2026-09-07-tab-rebuild-spec.md` §9.1 itself, which is
+annotated in place rather than rewritten: that document is the shipped record of
+what Tab Rebuild decided, and rewriting its body would erase the decision this
+one supersedes. None of its four objections apply to a
 read-only query over frames: there is no row to upsert, no `SetMeta` writer to
 teach, no nil-means-no-change ambiguity, no orphan cleanup to fire.
 
@@ -1021,18 +1033,24 @@ value, not to a zero-allocation `Unmarshal` (§7's benchmark asserts the former)
 
 ### 10.3 Round 2 — codex `task-mtrggpct-ub3biv` on v2
 
+> **Read the dispositions below against §4.4, §5.2 and §5.3, not as the
+> current contract.** Three of them name interfaces that later rounds — and the
+> implementation — replaced; each such row now says which round superseded it.
+> A disposition table records what was decided AT THE TIME, so the rows are
+> annotated rather than rewritten.
+
 | # | Finding | Disposition |
 |---|---|---|
 | 1 | Blocker — no guarantee the query runs after ancestry settles, and no reliable re-query | **Split.** The re-query half is accepted and fixed: a third trigger on hook broadcasts, with cooldowns (§5.4) — this was the likely everyday failure. The ancestry half is **not claimed as solved**; it is the frameless-ancestor limit, now stated as such (§9) instead of being marked resolved |
-| 2 | Blocker — only alive + start-time; misses the pane-tree descendant check every event passes | **Accepted.** Step 3 of §5.3 reuses `resolvePanePIDFn` + `pidAncestorIncludesFn`, with the reused-pane-id case as its own test (§7) |
-| 3 | Important — the parse gate freezes an old conversation and blocks a late `cwd` | **Accepted.** Gate removed; every own-frame event contributes a non-empty value, made affordable by a `map[string]json.RawMessage` extraction (§5.2) |
+| 2 | Blocker — only alive + start-time; misses the pane-tree descendant check every event passes | **Accepted.** Step 3 of §5.3 reuses `resolvePanePIDFn` + `pidAncestorIncludesFn`, with the reused-pane-id case as its own test (§7). **Superseded by round 3 (§10.2 row 4): `pidAncestorIncludesFn` is no longer called at all** — step 4 of §5.3 answers ancestry inside the one shared, memoized walker |
+| 3 | Important — the parse gate freezes an old conversation and blocks a late `cwd` | **Accepted.** Gate removed; every own-frame event contributes a non-empty value, made affordable by a `map[string]json.RawMessage` extraction (§5.2). **Superseded by round 3 (§10.2 row 5): the extraction is a two-field typed struct**, not a `map[string]json.RawMessage`, which still scanned and copied the big field |
 | 4 | Important — ordinary events go through `UpdateHookPath`, not `Upsert`; CAS re-application | **Accepted.** A per-method write contract, and a dedicated `UpdateSessionIdentity` so identity never rides a read-modify-write (§5.2) |
 | 5 | Important — correcting the agent while keeping the old agent's cwd | **Accepted.** The **replace** mode writes the whole group (§5.5) |
 | 6 | Important — override policy incomplete; Phase 1 overwrites a hand-typed command | **Accepted.** Replace-mode clears the override; Phase 1 writes a composed command only into an empty field; the policy is stated as policy, not proof (§4.3, §5.5) |
 | 7 | Important — a create-failed operation still pinned the display | **Accepted.** Pinning applies only in flight or once `op.created` exists (§4.3) |
 | 8 | Important — "most recent wins" silently changed meaning | **Accepted.** Stated as a new rule with the divergence spelled out (§5.3, §9) |
 | 9 | Important — re-ask cost and stop conditions undefined; 4 `ps` forks per process read | **Accepted.** Per-request memoization + deadline (§5.3), cooldowns and an oscillation guard (§5.4), measured cost recorded (§3.4) |
-| 10 | Important — no implementable `kind` contract; `type` output differs per shell | **Accepted.** `command -v`, last non-empty line, two structural kinds (§4.4) |
+| 10 | Important — no implementable `kind` contract; `type` output differs per shell | **Accepted.** `command -v`, last non-empty line, two structural kinds (§4.4). **Superseded by round 3 (§10.2 row 6): there is no `kind` field.** Both structural kinds were removed from the API — §4.4 and `shellResolveResponse` return `resolved` plus a free-text `detail`, and every non-resolution is one of §4.4's `reason` tokens |
 | 11 | Minor — imprecise summary of `disowned` and the generation comparisons | **Accepted.** §5.4 names the helpers and separates eligibility from write authorisation |
 | 12 | Minor — a test result survived a host switch | **Accepted.** Keyed by `(hostId, commandWord)` (§4.5) |
 
