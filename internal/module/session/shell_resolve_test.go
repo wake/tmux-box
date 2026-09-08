@@ -100,6 +100,26 @@ func TestShellResolve_MalformedBodyIsTheOnly400(t *testing.T) {
 	assert.Zero(t, spy.calls, "a malformed body must never reach a shell")
 }
 
+// --- the body is bounded before it is decoded --------------------------------
+
+// The token cap is checked AFTER the decode, and a JSON decoder has already
+// buffered the whole string value by the time it can be applied — so a
+// multi-megabyte `command` is read into memory in full before anything rejects
+// it. The bound has to sit in front of the decoder.
+func TestShellResolve_OversizeBodyIsRefusedBeforeItIsBuffered(t *testing.T) {
+	srv, spy, _ := newShellResolveServer(t)
+
+	status, _ := postResolve(t, srv, `{"command":"`+strings.Repeat("a", 1<<20)+`"}`)
+	assert.Equal(t, http.StatusBadRequest, status, "an oversize body must be refused, not decoded")
+	assert.Zero(t, spy.calls, "an oversize body must never reach a shell")
+
+	// The token check still owns everything that fits: a 257-byte token in a
+	// small body is `too_long` with a 200, not a transport error.
+	v := resolveCommand(t, srv, strings.Repeat("a", 257))
+	assert.Equal(t, "too_long", v.Reason)
+	assert.Zero(t, spy.calls)
+}
+
 // --- rejected before exec ---------------------------------------------------
 
 func TestShellResolve_RejectsShellMetacharactersWithoutExec(t *testing.T) {

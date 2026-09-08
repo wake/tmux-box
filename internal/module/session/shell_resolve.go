@@ -45,6 +45,12 @@ const (
 	// The token is what we agree to hand a shell. The template itself is not
 	// restricted — only this.
 	shellProbeMaxToken = 256
+	// The body bound has to sit in FRONT of the decoder: shellProbeMaxToken is
+	// checked on the decoded value, and by then the decoder has already
+	// buffered the whole string. Sized well clear of the largest legitimate
+	// body — a 256-byte token whose every byte needed a \uXXXX escape is
+	// ~1.5 KiB — so nothing real is ever refused by it.
+	shellResolveMaxBody = 16 << 10
 	// After the shell exits, anything still holding the output pipe is a
 	// stray descendant. This is how long we wait for the reader to notice the
 	// pipe closed after the process group is killed.
@@ -84,6 +90,7 @@ type shellResolveResponse struct {
 }
 
 func (m *SessionModule) handleShellResolveCommand(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, shellResolveMaxBody)
 	var req shellResolveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Command == nil {
 		http.Error(w, "command must be a string", http.StatusBadRequest)
