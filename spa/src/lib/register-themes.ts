@@ -25,7 +25,7 @@ const darkTokens: ThemeTokens = {
   'terminal-cursor': '#e0e0e0',
   'status-error': '#e06c75',
   'status-warning': '#c8b560',
-  'status-success': '#2a4a3a',
+  'status-success': '#7ec699',
 }
 
 const lightTokens: ThemeTokens = {
