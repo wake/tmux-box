@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.0.0-alpha.333] - 2026-09-08
+
+### Feat: 分頁自己去問「這個 pane 是誰的」，resume 指令變成可設定的範本（#977）
+
+alpha.332 之後留下兩個洞。一是**部署前就開著的 session 重建只會得到純 shell**——紀錄的 agent 只由合格的 `SessionStart` 寫入，而那些 session 的 `SessionStart` 早在新程式上線前就發生過了，使用者實際看到那個空欄位。二是組出來的 `claude --resume <id>` **對他是叫錯執行檔**——他用的是一個 zsh function（會補上 `--dangerously-skip-permissions` 與 iTerm2 狀態指示），所以重建會 resume 到對的對話、卻用錯的程式啟動。
+
+**第一版設計整個被推翻，而且推翻得對。** 原本是 daemon 在任何 owner 事件上主動掛第二個 envelope，並節流成「每個 frame 一次」。review 指出兩個缺陷，兩個都是「推」這個形式本身的問題，不是節流參數調不好：廣播出去時使用者往往還沒開那個分頁（他會先開 Purdex 再開 tab），那一次資格就這樣消耗掉了；而「只填不覆蓋」的寫入無法被後續同樣「只填不覆蓋」的寫入更正，所以一旦寫錯就定型。改成**由 SPA 主動查詢**之後，兩者同時消失——答案是給發問者的 response，不會沒人接；而且隨時可以再問。節流機制、arming map、混版風險也一併不需要了。
+
+**ownership 判定沒有動。** 仍然是 frame layer 的 ancestry walk，從 `classifyAncestor` 抽成共用函式而非另寫一套，外加每個被接受的事件本來就會通過的 pane process tree 檢查。`agent_frames` 補上它從來沒存過的 session id，由**任何** own-frame hook 事件透過專屬的窄 UPDATE 寫入——那個 UPDATE 不參與任何 read-modify-write，所以 proxy attach 的 retry loop 不會把它洗掉。
+
+**`resolvePanePID` 修的是一個既有的 bug，而且專案自己記錄過。** `PanePID` 走 `tmux list-panes -t <target>`，tmux 會把 pane id 解析成它所屬的 window，於是回傳的是**第一個** pane 的 PID。`liveness.go` 的註解在 PR #638 就寫清楚過並改用 `ActivePanePID`，但 `verify.go` 沒跟上——所以分割視窗裡非第一個 pane 的 hook 一直被判成 `pid_not_in_pane_tree` 而拒絕，那些 pane 根本不會有 frame。這是本功能的必要前提（查詢要求走訪途中看到 panePID），也意味著那些 pane 從此會開始產生先前不存在的 frame。
+
+**shell probe 只驗指令的第一個 token，而且必須在互動 login shell 裡驗。** 一個 shell function 對任何非互動 shell 都是不存在的——那正是這個功能要解決的情境。`type` 的輸出在 zsh 與 bash 不同（bash 還會印出整個函式本體），`command -v` 的輸出也不是「路徑或單字」（alias 會印出自己的定義、PATH 上的相對路徑會印相對路徑），所以 API **不宣稱找到的是哪一類東西**，只回報解析成功與 shell 實際印出什麼。
+
+**五輪 review、24 項發現、23 修 1 延後。** 其中四項是 plan 本身寫錯——`op.created` 這個符號不存在、空指令是關掉 resume 步驟而不是排除整個 pane、`field` 的同值提早返回會讓「確認同一個目錄」標不上使用者來源、`Executor` 根本沒有列舉 session panes 的能力。這些都在進到程式碼之前就被攔下來。另外四項是**測試綠了卻沒驗到東西**，每一項都靠變異測試才確認：deadline 只在一開始就過期時測、partial slice 恰好是空的所以分辨不出有沒有丟棄；disowned 的測試從未建立 deferred timer；單一 pane 的取消測試分辨不出「回傳部分結果」與「整個丟棄」。
+
+**兩個實測推翻了 review 的診斷。** bash job control 那項，第二輪說「`-i` 下沒有 `m`、要靠 rc 裡的 `set -m` 才會逃出 group」，第三輪量到相反結果。最後用一支複製 probe 實際 fd 配置的 Go harness 量了七種組合才釐清：決定性變因是 **bash exec 時是否已是 process-group leader**（`Setsid` 與 `Setpgid` 都會讓它是），而且**在 bash 還在 source 啟動檔期間啟動的背景 job，不論 `$-` 有沒有 `m` 都會留在 shell 自己的 group**。兩邊的結論都對、理由都錯，註解現在三個事實都寫進去。
+
+清理仍有做不到的邊界，並且寫在 spec 裡而不是宣稱解決：自行呼叫 `setsid()` 的 descendant、`ps` 快照之後才 fork 的程序、`Getsid` 到 `Kill` 之間被縮小但未關閉的 PID reuse 窗口。
+
+**已知限制**：部署後那個 session 必須**至少送出一次 hook**，daemon 才知道它的 session id——還在用的 session 下次互動就會補齊，之後完全沒再碰過的則維持純 shell（但有 cwd）。範本是所有 host 共用的，只有測試是選 host 的。probe 近似 pane 的 shell，不是重現它（沒有 tty、不跑 tmux 的 `default-command`）。
+
+延後追蹤：#978（walker 把讀取失敗與「不是 root」混為同一個 verdict）、#979（`PanePID` 其餘呼叫者稽核）、#980（清空範本會安靜退化成純 shell）、#981（SPA 既有 flake）、#983（rebuild 規則堆積在 `useTabStore`）。
+
 ## [1.0.0-alpha.332] - 2026-09-07
 
 ### Feat: 每個分頁記住自己怎麼被重建（#970）
