@@ -305,6 +305,57 @@ describe('ResumeTemplateSettings — the host picker', () => {
     expect(verdict('cc', 'exact')).toBeNull()
   })
 
+  it('a verdict from a superseded request never overwrites a newer one', async () => {
+    // Away and back leaves the host and the word EXACTLY as the first request
+    // sent them, so the (host, word) pair cannot tell the two requests apart.
+    // Only the request's own identity can.
+    const first = deferred<Response>()
+    const second = deferred<Response>()
+    vi.spyOn(globalThis, 'fetch')
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+    render(<ResumeTemplateSettings />)
+    await act(async () => { fireEvent.click(testButton('cc', 'exact')) })
+
+    fireEvent.change(screen.getByTestId('resume-template-host'), { target: { value: H2 } })
+    fireEvent.change(screen.getByTestId('resume-template-host'), { target: { value: H1 } })
+    await act(async () => { fireEvent.click(testButton('cc', 'exact')) })
+
+    // Reverse order: the newer answer lands first, the abandoned one after.
+    await act(async () => {
+      second.resolve(jsonResponse({ resolved: false, reason: 'not_found' }))
+      await second.promise
+    })
+    await act(async () => {
+      first.resolve(jsonResponse({ resolved: true, detail: 'from the abandoned request' }))
+      await first.promise
+    })
+
+    const el = verdict('cc', 'exact')!
+    expect(el.getAttribute('data-status')).toBe('unresolved')
+    expect(el.textContent).not.toContain('abandoned')
+  })
+
+  it('editing a row cancels its in-flight request, even if the word is retyped', async () => {
+    // The stated contract is "editing the row invalidates its verdict —
+    // including one still in flight". Retyping the original value restores the
+    // word, but not the request the user abandoned by editing.
+    const d = deferred<Response>()
+    vi.spyOn(globalThis, 'fetch').mockReturnValue(d.promise)
+    render(<ResumeTemplateSettings />)
+    const original = input('cc', 'exact').value
+    await act(async () => { fireEvent.click(testButton('cc', 'exact')) })
+
+    fireEvent.change(input('cc', 'exact'), { target: { value: 'other --resume {id}' } })
+    fireEvent.change(input('cc', 'exact'), { target: { value: original } })
+    await act(async () => {
+      d.resolve(jsonResponse({ resolved: true, detail: '/usr/bin/claude' }))
+      await d.promise
+    })
+
+    expect(verdict('cc', 'exact')).toBeNull()
+  })
+
   it('a verdict for one row does not leak onto the other row of the same agent', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ resolved: true, detail: 'x' }))
     render(<ResumeTemplateSettings />)

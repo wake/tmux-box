@@ -27,6 +27,15 @@
 // match, so a verdict from another machine — or about a word the user has since
 // edited — can never sit beside the command being judged now. A response that
 // lands after either changed is discarded rather than rendered.
+//
+// That pair is not enough on its own, because it can come back: switching host
+// and switching back, or editing a word and retyping it, restores the exact
+// pair an abandoned request was sent under. So each request also carries a
+// REVISION, and anything that abandons a request — an edit, a revert, a host
+// change, Reset all, or simply pressing Test again — drops the row's revision.
+// A response is taken only when its revision is still the row's current one AND
+// the pair still holds; otherwise two requests racing on one row could settle
+// out of order and leave the older answer on screen.
 import { useRef, useState } from 'react'
 import { ArrowCounterClockwise, CheckCircle, CircleNotch, Question, Warning, XCircle } from '@phosphor-icons/react'
 import { AGENT_NAMES } from '../../lib/agent-metadata'
@@ -101,6 +110,18 @@ export function ResumeTemplateSettings({ busy = false }: { busy?: boolean }) {
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [results, setResults] = useState<Record<string, RowResult>>({})
 
+  // The live request per row, and the counter that names them. Not state: no
+  // render reads it, and it must be readable by a settle that started before
+  // the render it is racing.
+  const requestSeq = useRef(0)
+  const liveRequest = useRef<Record<string, number>>({})
+
+  /** Abandon whatever request `key` has out; its answer is no longer wanted. */
+  const abandonRequest = (key: string) => { delete liveRequest.current[key] }
+
+  /** Abandon every row's request — what a host change and Reset all both do. */
+  const abandonAllRequests = () => { liveRequest.current = {} }
+
   const liveValue = (agentType: string, field: Field): string => {
     const key = rowKey(agentType, field)
     return drafts[key] ?? lookup(agentType)?.[field] ?? ''
@@ -126,9 +147,12 @@ export function ResumeTemplateSettings({ busy = false }: { busy?: boolean }) {
     setDrafts(({ [key]: _dropped, ...rest }) => rest)
 
   const handleChange = (agentType: string, field: Field, value: string) => {
-    setDrafts((d) => ({ ...d, [rowKey(agentType, field)]: value }))
-    // Editing the row invalidates its verdict — including one still in flight.
-    dropResult(rowKey(agentType, field))
+    const key = rowKey(agentType, field)
+    setDrafts((d) => ({ ...d, [key]: value }))
+    // Editing the row invalidates its verdict — including one still in flight,
+    // and including one whose word the next keystroke happens to restore.
+    dropResult(key)
+    abandonRequest(key)
   }
 
   const handleCommit = (agentType: string, field: Field, value: string) => {
@@ -145,23 +169,41 @@ export function ResumeTemplateSettings({ busy = false }: { busy?: boolean }) {
     const key = rowKey(agentType, field)
     dropDraft(key)
     dropResult(key)
+    abandonRequest(key)
   }
 
   const handleHostChange = (nextHostId: string) => {
     setPickedHostId(nextHostId)
     // Contract: a verdict from another machine must never sit beside a command
-    // being judged for this one.
+    // being judged for this one — and switching back must not let the answer
+    // to a request sent before the round trip count as an answer about now.
     setResults({})
+    abandonAllRequests()
   }
 
   const handleResetAll = () => {
     for (const agentType of Object.keys(useResumeTemplateStore.getState().agents)) resetAgent(agentType)
     setDrafts({})
     setResults({})
+    abandonAllRequests()
   }
 
-  /** Keep a verdict only while the host and the word it judged still stand. */
-  const settle = (key: string, forHost: string, word: string, verdict: ShellResolveVerdict) => {
+  /**
+   * Keep a verdict only while the request that asked for it is still the row's
+   * live one AND the host and word it judged still stand.
+   *
+   * A superseded revision writes nothing at all: whatever abandoned it has
+   * already dropped this row's result, and anything sitting there now belongs
+   * to a later request this one must not touch.
+   */
+  const settle = (
+    key: string,
+    rev: number,
+    forHost: string,
+    word: string,
+    verdict: ShellResolveVerdict,
+  ) => {
+    if (liveRequest.current[key] !== rev) return
     const live = liveRef.current
     if (live.hostId !== forHost || live.words[key] !== word) {
       setResults((r) => {
@@ -180,13 +222,17 @@ export function ResumeTemplateSettings({ busy = false }: { busy?: boolean }) {
     const word = commandWordOf(liveValue(agentType, field))
     if (!word || !hostId) return
     const forHost = hostId
+    // Pressing Test again abandons the previous request for this row: the newer
+    // question is the one being asked, whatever order the answers arrive in.
+    const rev = ++requestSeq.current
+    liveRequest.current[key] = rev
     setResults((r) => ({ ...r, [key]: { hostId: forHost, commandWord: word, verdict: 'pending' } }))
     try {
-      settle(key, forHost, word, await resolveShellCommand(forHost, word))
+      settle(key, rev, forHost, word, await resolveShellCommand(forHost, word))
     } catch {
       // Contract 4's other half: the daemon was unreachable, which says nothing
       // about the command. The template is already saved either way.
-      settle(key, forHost, word, { status: 'unverifiable' })
+      settle(key, rev, forHost, word, { status: 'unverifiable' })
     }
   }
 
